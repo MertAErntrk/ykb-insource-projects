@@ -25,7 +25,6 @@ from motor import Motor
 from sozluk import Sozluk
 from yakalayici import Yakalayici, ekran_okuyucu
 
-OKUMA_ARALIK = 0.6
 DURUM_ARALIK = 60
 
 
@@ -150,7 +149,7 @@ def komut_basla(a):
                 print(f"— {m.parca_no} parça kapandı, {biten} işlendi, açık parça ~{m.mevcut_tok} token, "
                       f"{len(m.bekleyen_oneriler())} öneri —")
                 son_durum = time.time()
-            time.sleep(OKUMA_ARALIK)
+            time.sleep(y.onerilen_aralik())      # A7: UIA okumasi yavassa aralik 1,2 sn'ye cikar
     except KeyboardInterrupt:
         print("\nToplantı bitiriliyor...")
     finally:

@@ -1,8 +1,9 @@
 """
 not_araclari.py — notun ve kayitlarin uzerinde calisan yardimcilar (arayuzden bagimsiz):
 toplantilar arasi arama, transkriptte bir ana gitme, nottan aksiyon ayiklama, kisiye ozel e-posta,
-Word'e aktarma, katilimci bilgilendirme metni.
+Word'e aktarma, Jira/Planner CSV'si, konusma paylari, katilimci bilgilendirme metni.
 """
+import csv
 import json
 import os
 import re
@@ -13,6 +14,8 @@ from sozluk import normalize
 BILGILENDIRME = ("Bilgi: Bu toplantıda BriefMind ile not alınmaktadır. Ses kaydedilmez; konuşmalar kurum içi "
                  "sistemlerde metne çevrilip özetlenir ve not katılımcılarla paylaşılır. Not alınmasını "
                  "istemeyen katılımcı lütfen belirtsin.")
+SATIR_TAVAN_SN = 15             # konusma payi: bir satirin sayilabilecegi en uzun sure (araya giren sessizlik)
+JIRA_BASLIKLAR = ["Summary", "Assignee", "Due Date", "Description", "Issue Type"]
 
 
 def _sn(ts):
@@ -165,3 +168,59 @@ def word_kaydet(not_md, yol):
             belge.add_paragraph(s)
     belge.save(yol)
     return yol
+
+
+def konusma_paylari(satirlar):
+    """N7: konusmaci basina konusma suresi ve payi -> [(konusmaci, saniye, yuzde)], cok konusandan aza.
+    Satir suresi = sonraki satira kadar gecen sure (en fazla SATIR_TAVAN_SN: arada sessizlik/mola olabilir);
+    son satirin ya da ayni saniyedeki satirin sonrasi yoktur, kelime sayisindan tahmin edilir (~2,5 kelime/sn).
+    Nota yazilmaz (meta.json -> Gecmis detayi)."""
+    satirlar = [s for s in satirlar if (s.get("text") or "").strip()]
+    sure = {}
+    for i, s in enumerate(satirlar):
+        fark = _sn(satirlar[i + 1].get("ts")) - _sn(s.get("ts")) if i + 1 < len(satirlar) else 0
+        if fark <= 0:
+            fark = len(s["text"].split()) / 2.5
+        kim = (s.get("speaker") or "?").strip() or "?"
+        sure[kim] = sure.get(kim, 0.0) + min(SATIR_TAVAN_SN, fark)
+    toplam = sum(sure.values())
+    if not toplam:
+        return []
+    return sorted(((k, round(v, 1), round(100 * v / toplam)) for k, v in sure.items()),
+                  key=lambda x: (-x[1], x[0]))
+
+
+def konusma_payi_metni(paylar):
+    """[(ad, sn, yuzde)] -> 'Konuşma payı: Elif %38, Berk %27' (Gecmis detay paneli)."""
+    if not paylar:
+        return ""
+    return "Konuşma payı: " + ", ".join(f"{p[0]} %{p[2]}" for p in paylar)
+
+
+def jira_csv(aksiyonlar, yol, proje=""):
+    """N9: aksiyonlari Jira 'Import from CSV' (Planner'a da aktarilabilen) CSV'ye yazar: UTF-8 BOM'lu (Excel
+    Turkce karakterleri bozmasin), basliklar Summary, Assignee, Due Date, Description, Issue Type.
+    proje: toplantinin adi ve tarihi ('Strateji (2026-09-23)'), Description'a yazilir. Tarih yalnizca
+    YYYY-MM-DD ise Due Date'e girer. Sorumlu belirsizse Assignee bos kalir; birden cok sorumlu varsa ilki
+    Assignee, hepsi Description'da. Dondurur: yazilan satir sayisi. (REST entegrasyonu yok.)"""
+    satir_sayisi = 0
+    with open(yol, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(JIRA_BASLIKLAR)
+        for a in aksiyonlar:
+            madde = (a.get("madde") or "").strip()
+            if not madde or madde == "-":
+                continue
+            sorumlu = re.sub(r"\s*\(\?\)\s*$", "", (a.get("sorumlu") or "").strip())
+            adlar = [x.strip() for x in re.split(r",|/| ve ", sorumlu) if x.strip()]
+            adlar = [x for x in adlar if x.lower() not in ("belirsiz", "-", "?")]
+            tarih = re.match(r"\d{4}-\d{2}-\d{2}", (a.get("tarih") or "").strip())
+            aciklama = "BriefMind — " + (proje or "toplantı")
+            ts = re.search(r"\d{1,2}:\d{2}:\d{2}", a.get("kaynak") or "")
+            if ts:
+                aciklama += f" · kaynak {ts.group(0)}"
+            if len(adlar) > 1:
+                aciklama += " · sorumlular: " + ", ".join(adlar)
+            w.writerow([madde, adlar[0] if adlar else "", tarih.group(0) if tarih else "", aciklama, "Task"])
+            satir_sayisi += 1
+    return satir_sayisi

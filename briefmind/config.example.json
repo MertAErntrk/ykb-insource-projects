@@ -5,12 +5,18 @@
  "stt_url": "https://<stt-adresi>",
  "stt_model": "whisper-large-v3-turbo-prod",
  "stt_key": "EMPTY",
+ "stt_proxy": true,
  "kaynak": "ses",
+ "mikrofon_cihaz": null,
  "otobitir": 180,
  "duzelt": true,
  "outlook": true,
  "otomatik_basla": false,
+ "otomatik_not": true,
+ "not_sablonu": "genel",
+ "saklama_gun": 0,
  "altyazi_otomatik": true,
  "altyazi_goster": false,
+ "ca_bundle": "",
  "ben": ""
 }

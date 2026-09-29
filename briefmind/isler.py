@@ -8,6 +8,7 @@ import time
 
 from PyQt5 import QtCore
 
+import ayar as ayar_mod
 import motor as motor_mod
 from motor import Motor
 from yakalayici import Yakalayici, ekran_okuyucu
@@ -57,7 +58,8 @@ class YakalamaIsi(QtCore.QThread):
                     olay=lambda t, v: self.olay.emit(t, v),
                     satir_fn=lambda ts, kim, metin, akis: self.motor.ses_satiri(ts, kim, metin, akis),
                     model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
-                    proxy=self.ayar.get("stt_proxy", True))   # false: Windows proxy'sini atla (kopmalar icin)
+                    proxy=self.ayar.get("stt_proxy", True),   # false: Windows proxy'sini atla (kopmalar icin)
+                    verify=ayar_mod.tls_dogrulama(self.ayar))
                 if not self.ses_servisi.baslat():
                     self.ses_servisi = None
                     self.motor.kaynak = "altyazi"
@@ -137,7 +139,7 @@ class YakalamaIsi(QtCore.QThread):
                     elif basladi:
                         self.durum.emit(f"Yakalanıyor — {self.motor.parca_no} parça, "
                                         f"açık parça ~{self.motor.mevcut_tok} token")
-                    time.sleep(0.6)
+                    time.sleep(y.onerilen_aralik())      # A7: UIA okumasi yavassa 1,2 sn
             finally:
                 ekran_okuyucu(False)
             for s in y.bitir():

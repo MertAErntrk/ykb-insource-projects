@@ -134,8 +134,9 @@ def kaydet(cihaz, stt):
     if stt:
         with open("config.json", encoding="utf-8") as f:
             cfg = json.load(f)
+        import ayar as ayar_mod
         s = ses_mod.SttIstemci(cfg.get("stt_url", ""), model=cfg.get("stt_model", "whisper"),
-                               api_key=cfg.get("stt_key", ""))
+                               api_key=cfg.get("stt_key", ""), verify=ayar_mod.tls_dogrulama(cfg))
         t0 = time.time()
         segler = s.coz(ses)
         metin = " ".join((x.get("text") or "").strip() for x in segler).strip()

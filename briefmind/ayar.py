@@ -4,13 +4,12 @@ ayar.py — config.json okuma/yazma (arayuz ve komut satiri ortak).
 import json
 import os
 
-import llm
-
 AYAR_DOSYA = "config.json"
 AYAR_HATASI = None                         # config.json okunamadiysa neden (acilista kullaniciya gosterilir)
 
 
 def ayar_oku():
+    import llm                             # gec: llm de bu modulu (tls_dogrulama) ice aktarir
     v = {"route": llm.ROUTE, "model": llm.MODEL, "otobitir": 180, "duzelt": True, "outlook": True,
          "otomatik_basla": False,
          "kaynak": "ses",                  # altyazi | ses | ikisi
@@ -21,7 +20,8 @@ def ayar_oku():
          "ben": "",
          "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
          "altyazi_turkce": True,           # altyazi bulununca konusulan dili Turkce yapmayi dene
-         "otomatik_not": True}             # toplanti bitince incelemeyi bekleme, notu dogrudan uret
+         "otomatik_not": True,             # toplanti bitince incelemeyi bekleme, notu dogrudan uret
+         "ca_bundle": ""}                  # kurum kok sertifikasi (.cer, Base64); bos: TLS dogrulamasi kapali
     global AYAR_HATASI
     if os.path.exists(AYAR_DOSYA):
         try:
@@ -40,6 +40,18 @@ def ayar_yaz(v):
 
 
 def tls_dogrulama(ayar=None):
-    """LLM/STT isteklerinde TLS dogrulamasi: kurum CA dosyasinin yolu ya da False.
-    Simdilik hep False (kurum ici sertifika zinciri bilinmiyor); Asama 2'de config.json -> ca_bundle."""
+    """LLM/STT isteklerinde TLS dogrulamasi (httpx/requests `verify=`): config.json -> ca_bundle dosyasi
+    varsa onun yolu, yoksa False (dogrulama kapali; eski davranis). ayar verilmezse config.json okunur.
+    Kok sertifika Edge'den disa aktarilir (README: 'TLS dogrulamasi')."""
+    if ayar is None:
+        ayar = {}
+        try:
+            with open(AYAR_DOSYA, encoding="utf-8") as f:
+                ayar = json.load(f)
+        except Exception:
+            pass
+    yol = ayar.get("ca_bundle") if isinstance(ayar, dict) else None
+    yol = (yol or "").strip() if isinstance(yol, str) else ""
+    if yol and os.path.isfile(yol):
+        return yol
     return False

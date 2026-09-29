@@ -49,11 +49,28 @@ python app.py
 |---|---|
 | `route`, `model`, `context` | OpenAI uyumlu LLM adresi (`/v1`), model adı, bağlam penceresi |
 | `stt_url`, `stt_model`, `stt_key` | OpenAI uyumlu STT adresi (`/v1/audio/transcriptions`), model, Bearer anahtarı |
-| `kaynak` | `ses` (Whisper) / `ikisi` / `altyazi` |
+| `kaynak` | `ses` (Whisper metni, konuşmacı altyazıdan) / `ikisi` / `altyazi` (yalnız Teams altyazısı). `ikisi`: metin Whisper'dan gelir; bir altyazı satırının 8 sn içinde benzer Whisper karşılığı gelmezse (Whisper kaçırmış) altyazı satırı eklenir, gelirse eklenmez (çift satır olmaz) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
 | `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
 | `otomatik_not` | (varsayılan `true`) Toplantı bitince İnceleme beklenmez, not doğrudan üretilir. `false`: önce İnceleme sekmesi (eski akış). Ayarlar → "Toplantı bitince incelemeyi atla" |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
+| `not_sablonu` | `genel` / `haftalik` / `karar` / `birebir` / `calistay` (Ayarlar → Not şablonu) |
+| `saklama_gun` | Notu üretilmiş toplantıların transkripti bu kadar gün sonra silinir; `0` kapalı (Ayarlar → Transkript saklama süresi) |
+| `ca_bundle` | (isteğe bağlı) Kurum kök sertifikası dosyası (`.cer`, Base64). Doluysa LLM ve STT bağlantılarında TLS doğrulanır; boşsa doğrulama kapalıdır ve açılışta Olaylar'a bir kez yazılır. Aşağıdaki adımlara bakın. |
+
+### TLS doğrulaması (`ca_bundle`)
+
+Kurum içi sunucuların sertifikası kurumun kendi kök sertifikasıyla imzalıdır. Bu kök bir kez dışa aktarılır:
+
+1. Edge'de LLM adresini açın (ör. `https://<llm-adresi>/v1/models`), adres çubuğundaki **kilit** simgesine tıklayın.
+2. **Bağlantı güvenli** → **Sertifika geçerli** (sertifika simgesi) → **Ayrıntılar** sekmesi.
+3. **Sertifika hiyerarşisi**nde en üstteki **kök** sertifikayı seçin.
+4. **Dışarı aktar…** → biçim olarak **Base64 ile kodlanmış ASCII, tek sertifika** → örneğin
+   `C:\Users\<kullanıcı>\kurum_kok.cer` olarak kaydedin.
+5. `config.json`'a ekleyin: `"ca_bundle": "C:\\Users\\<kullanıcı>\\kurum_kok.cer"` (JSON'da `\` çift yazılır) ve
+   uygulamayı yeniden başlatın. Olaylar'da "TLS doğrulaması kapalı" satırı görünmüyorsa doğrulama açıktır;
+   `python tools\teshis.py` çıktısında da "TLS doğrulaması: açık" yazar. STT başka bir kökle imzalıysa
+   iki sertifika aynı `.cer` dosyasına alt alta kopyalanabilir.
 
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 
@@ -61,7 +78,10 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 
 1. Teams toplantısına gir (altyazı açık olsun; kapalıysa uygulama Alt+Shift+C ile açmayı dener).
 2. **Başlat** — üstteki listeden toplantı seçilir (takvimden, Teams penceresine göre otomatik).
-3. Konuşmalar cümle cümle Canlı sekmesine düşer; parçalar arka planda özetlenir.
+3. Konuşmalar cümle cümle Canlı sekmesine düşer; parçalar arka planda özetlenir. İki kişi aynı anda konuşunca
+   Whisper genelde baskın sesi yazar; öbür kişinin Teams altyazısındaki satırı transkripte ayrıca eklenir
+   (`kaynak: altyazi-cakisma`), sonradan gelen aynı sözlü Whisper satırı ikinci kez yazılmaz. Kısık gelen ses
+   (tepe < 0,3) Whisper'a gitmeden yükseltilir.
 4. **Bitir** → not doğrudan üretilir (`otomatik_not`); Not sekmesindeki şeritte aşama ve geçen süre görünür
    ("Parça 3/12 özetleniyor", "Özet paragrafı yazılıyor"…) → Outlook taslağı. Şüpheli terimler İnceleme
    sekmesinde bilgi için durur: onaylayıp **Uygula ve notu üret** ile sözlüğe alınır ve not yeniden üretilir.
@@ -81,6 +101,11 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
   düzeltilip özetlenir ve yeni not üretilir (yarım kalmış kayıtlar için de). Eski not `not.md.yedek-YYYYMMDD-HHMM`
   olarak saklanır. Tek parça için: "Seçili parçayı yeniden özetle".
 - **Düzenle / Word / PDF / Kişiye özel e-postalar:** Not sekmesindeki düğmeler.
+- **Jira/Planner CSV:** Not sekmesi → "Jira/Planner CSV" aksiyon tablosunu `aksiyonlar.csv` olarak kaydeder
+  (sütunlar `Summary, Assignee, Due Date, Description, Issue Type`; UTF-8). Jira: *Issues → Import issues from CSV*.
+  Planner: CSV Excel'de açılıp görevler kopyalanır. Doğrudan Jira'ya kayıt açılmaz (kimlik bilgisi gerekmez).
+- **Konuşma payı:** Geçmiş sekmesinde bir toplantı seçilince üstte "Konuşma payı: Elif %38, Berk %27, …"
+  (satırın süresi = sonraki satıra kadar, en fazla 15 sn). Nota yazılmaz; `meta.json` → `konusma_paylari`.
 - **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi.
 - **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
 

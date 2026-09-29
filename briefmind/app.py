@@ -41,6 +41,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.resize(1180, 740)
         self.setStyleSheet(QSS)
         self.ayar = ayar_oku()
+        llm.ayarla(self.ayar)                # uygulama klasorundeki config.json (LLM adresi, ca_bundle) gecerli
         self.sozluk = Sozluk()
         self.is_ = None
         self.motor = None
@@ -55,6 +56,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.tamamla = None
         self.yeniden = None
         self._kur()
+        self._tls_bildir()
         self._tepsi()
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, self.ana_dugme)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+1"), self, lambda: self.nav.setCurrentRow(0))
@@ -293,9 +295,12 @@ class Pencere(QtWidgets.QMainWindow):
         b_word.clicked.connect(lambda: self.not_disa_aktar("docx"))
         b_pdf = QtWidgets.QPushButton("PDF")
         b_pdf.clicked.connect(lambda: self.not_disa_aktar("pdf"))
+        b_jira = QtWidgets.QPushButton("Jira/Planner CSV")
+        b_jira.setToolTip("Aksiyonları Jira 'Import from CSV' / Planner içe aktarma için CSV olarak kaydeder")
+        b_jira.clicked.connect(self.jira_disa_aktar)
         b3 = QtWidgets.QPushButton("Klasörü aç")
         b3.clicked.connect(self.klasor_ac)
-        for b in (self.b_outlook, b_kisi, b2, self.b_duzenle, b_word, b_pdf, b3):
+        for b in (self.b_outlook, b_kisi, b2, self.b_duzenle, b_word, b_pdf, b_jira, b3):
             h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
@@ -546,6 +551,16 @@ class Pencere(QtWidgets.QMainWindow):
         self.canli_sayac.setText(f"Şu ana kadar: {len(t['kararlar'])} karar, {len(t['aksiyonlar'])} aksiyon, "
                                  f"{len(t['acik_sorular'])} açık soru")
 
+    def _tls_bildir(self):
+        """A8: acilista bir kez: TLS dogrulamasi kapaliysa Olaylar'a yaz (README: ca_bundle adimlari)."""
+        if llm.TLS_HATASI:
+            self.log(f"TLS doğrulaması kapalı (ca_bundle sertifikası okunamadı: {llm.TLS_HATASI})")
+        elif not ayar_mod.tls_dogrulama(self.ayar):
+            if (self.ayar.get("ca_bundle") or "").strip():
+                self.log("TLS doğrulaması kapalı (config.json'daki ca_bundle dosyası bulunamadı)")
+            else:
+                self.log("TLS doğrulaması kapalı (config.json'da ca_bundle ayarlı değil)")
+
     def log(self, m):
         self.gunluk.appendPlainText(f"{dt.datetime.now():%H:%M:%S}  {m}")
 
@@ -730,7 +745,8 @@ class Pencere(QtWidgets.QMainWindow):
 
     def _satir_html(self, v):
         r = self._renk(v["speaker"])
-        if v.get("kaynak") == "altyazi" and self.ayar.get("kaynak") != "altyazi":
+        # 'altyazi' / 'altyazi-cakisma' (K5): ses modunda metni Whisper degil Teams altyazisi verdi
+        if (v.get("kaynak") or "").startswith("altyazi") and self.ayar.get("kaynak") != "altyazi":
             return (f'<span style="color:#CBD5E1;font-size:11px">{v["ts"]}</span> '
                     f'<span style="color:{r};opacity:0.55">{v["speaker"]}</span> '
                     f'<span style="color:#94A3B8;font-size:10px">[altyazı]</span>'
@@ -1085,8 +1101,10 @@ class Pencere(QtWidgets.QMainWindow):
                 m = json.load(f)
         except Exception:
             return
-        self.g_bilgi.setText(f"{m['baslik']} — {m['tarih']} · durum: {m['durum']} · {m['parca']} parça · "
-                             f"katılımcı: {len(m.get('katilimcilar', []))}")
+        bilgi = (f"{m['baslik']} — {m['tarih']} · durum: {m['durum']} · {m['parca']} parça · "
+                 f"katılımcı: {len(m.get('katilimcilar', []))}")
+        pay = not_araclari.konusma_payi_metni(m.get("konusma_paylari") or [])
+        self.g_bilgi.setText(bilgi + ("\n" + pay if pay else ""))
         for p_ in self._parcalari_oku(k):
             o = p_.get("ozet")
             oz = f"özet: {len(o['kararlar'])} karar, {len(o['aksiyonlar'])} aksiyon" if o else "özetsiz"
@@ -1316,7 +1334,8 @@ class Pencere(QtWidgets.QMainWindow):
         try:
             import ses as ses_mod
             ist = ses_mod.SttIstemci(self.a_stt.text().strip(), model=self.a_stt_model.text().strip(),
-                                     api_key=self.a_stt_key.text().strip())
+                                     api_key=self.a_stt_key.text().strip(),
+                                     verify=ayar_mod.tls_dogrulama(self.ayar))
             saglik = "ulaşılabilir" if ist.saglik() else "ULAŞILAMIYOR"
             kul = ses_mod.kulaklik_var_mi()
             QtWidgets.QMessageBox.information(
@@ -1474,6 +1493,29 @@ class Pencere(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Dışa aktarma", repr(e))
             return
         self.log(f"not dışa aktarıldı: {yol}")
+
+    def jira_disa_aktar(self):
+        """N9: nottaki aksiyon tablosu -> Jira/Planner CSV (REST yok; dosya elle ice aktarilir)."""
+        if not self.not_md:
+            return
+        aks = not_araclari.aksiyonlari_ayikla(self.not_md)
+        if not aks:
+            QtWidgets.QMessageBox.information(self, "Jira/Planner CSV", "Notta aksiyon yok.")
+            return
+        klasor = self.motor.klasor if self.motor else os.getcwd()
+        yol, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Aksiyonları CSV olarak kaydet",
+                                                       os.path.join(klasor, "aksiyonlar.csv"), "CSV (*.csv)")
+        if not yol:
+            return
+        ilk = self.not_md.splitlines()[0].lstrip("# ").strip() if self.not_md.strip() else ""
+        baslik, _, tarih = ilk.rpartition(" — ")
+        proje = f"{baslik} ({tarih})" if baslik and tarih else ilk
+        try:
+            n = not_araclari.jira_csv(aks, yol, proje)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Jira/Planner CSV", repr(e))
+            return
+        self.log(f"{n} aksiyon CSV'ye yazıldı: {yol} (Jira: Import from CSV; Planner: Excel'den içe aktar)")
 
     def gecmiste_ara(self):
         import html as _h

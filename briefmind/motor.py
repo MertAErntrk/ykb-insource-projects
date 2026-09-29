@@ -33,6 +33,10 @@ SESSIZLIK_SN = 180
 SESSIZLIK_MIN_TOKEN = 500
 DUZELT_MIN_TOKEN = 800          # bundan kucuk (genelde son) parcada duzeltme gecisi atlanir
 PARALEL = 2
+CAKISMA_SN = 4                  # K5: Whisper satiriyla ayni anda (±) konusan baska kisinin altyazisi aranir
+CAKISMA_KAPSAMA = 0.30          # K5: altyazi koklerinin en fazla bu kadari Whisper'da geciyorsa soz kaybolmus
+IKISI_BEKLE_SN = 8              # A6: 'ikisi' modunda altyazi satiri Whisper karsiligini bu kadar bekler
+AYNI_SOZ = 0.45                 # Whisper cumlesi ile altyazi satiri ayni sozu tasiyor (metin_benzerligi)
 
 
 def slug(s):
@@ -169,7 +173,12 @@ class Motor:
         self.seri = slug(baslik)             # toplanti serisi (sozluk kapsami, baglam ayirimi)
         self.kaynak = kaynak                 # altyazi | ses | ikisi
         self.ben = ben                       # mikrofon akisinin sahibi (kullanicinin adi)
-        self.konusmaci_izi = []              # (ts, konusmaci, metin) — altyazidan
+        # altyazidan: {"ts", "speaker", "text", "kullanildi", "son"}. kullanildi: None | "ses" (bir Whisper
+        # satiri bu sozu yazdi) | "altyazi" (altyazi metni transkripte girdi: K5 cakisma ya da A6 zaman asimi).
+        # son: 'ikisi' modunda Whisper karsiliginin beklendigi son an (A6), digerlerinde None.
+        self.konusmaci_izi = []
+        self._son_ses = []                   # son Whisper satirlari {"ts", "text"} (K5 kapsama, A6 eslesme)
+        self._iz_kilit = threading.RLock()   # altyazi (yakalama is parcacigi) ve Whisper (STT iscileri) ayni izi kullanir
         self.bekleyen_ses = []               # konusmacisi henuz bilinmeyen Whisper satirlari
         self.uyum = []                       # son Whisper cumlelerinin altyaziyla benzerligi (0-1)
         self.oneriler = []
@@ -208,7 +217,8 @@ class Motor:
                 f.write(json.dumps(kayit, ensure_ascii=False) + "\n")
 
     # ---------- disk ----------
-    def meta_yaz(self, durum):
+    def meta_yaz(self, durum, **ek):
+        """ek: meta.json'a yazilacak ek alanlar (or. konusma_paylari)."""
         yol = os.path.join(self.klasor, "meta.json")
         meta = {}
         try:                                  # bilinmeyen alanlar (ör. transkript_silindi) korunur
@@ -219,6 +229,7 @@ class Motor:
         meta.update({"baslik": self.baslik, "tarih": self.tarih.isoformat(), "durum": durum,
                      "katilimcilar": self.katilimcilar, "gundem": self.gundem, "parca": self.parca_no,
                      "kaynak": self.kaynak})
+        meta.update(ek)
         with open(yol, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=1)
 
@@ -262,18 +273,74 @@ class Motor:
 
     # ---------- yakalama tarafi ----------
     def altyazi_satiri(self, satir):
-        """Altyazidan gelen satir: konusmaci-zaman haritasina yazilir; kaynak 'ses' ise
-        nota girmez (metni Whisper veriyor), 'altyazi' ise normal satir olarak islenir."""
-        self.konusmaci_izi.append((satir["ts"], satir["speaker"], satir.get("text", "")))
-        self.konusmaci_izi = self.konusmaci_izi[-400:]
-        if satir["speaker"] not in self.katilimcilar and satir["speaker"] != "?":
-            self.katilimcilar.append(satir["speaker"])
-        if self.kaynak != "ses":
-            self.satir_ekle(satir)
-        else:
+        """Altyazidan gelen satir: konusmaci-zaman haritasina (iz) yazilir.
+        'altyazi': normal satir olarak hemen islenir. 'ses': nota girmez (metni Whisper veriyor).
+        'ikisi' (A6): hemen girmez; IKISI_BEKLE_SN icinde benzer bir Whisper satiri gelirse (ya da gelmisse)
+        duser, gelmezse kontrol() altyazi satirini ekler (Whisper kacirmis)."""
+        with self._iz_kilit:
+            giris = {"ts": satir["ts"], "speaker": satir["speaker"], "text": satir.get("text", ""),
+                     "kullanildi": None, "son": None}
+            self.konusmaci_izi.append(giris)
+            self.konusmaci_izi = self.konusmaci_izi[-400:]
+            if satir["speaker"] not in self.katilimcilar and satir["speaker"] != "?":
+                self.katilimcilar.append(satir["speaker"])
+            if self.kaynak == "altyazi":
+                giris["kullanildi"] = "altyazi"
+                self.satir_ekle(satir)
+                return
+            if self.kaynak == "ikisi":
+                giris["son"] = time.time() + IKISI_BEKLE_SN
+                # altyazi genelde Whisper'dan 1-3 sn gec gelir: ayni soz zaten yazilmis olabilir
+                hedef = _sn(giris["ts"])
+                if any(abs(_sn(w["ts"]) - hedef) <= 30 and metin_benzerligi(w["text"], giris["text"]) >= AYNI_SOZ
+                       for w in self._son_ses):
+                    giris["kullanildi"] = "ses"
             self._olay("altyazi_izi", {"ts": satir["ts"], "speaker": satir["speaker"],
                                        "text": satir["text"]})
             self._bekleyenleri_coz()
+
+    def _bekleyen_altyazilar(self, hepsi=False):
+        """A6: Whisper karsiligi suresi icinde gelmeyen altyazi satirlarini transkripte ekler (hepsi=True:
+        bitiste, sure beklemeden)."""
+        with self._iz_kilit:
+            simdi = time.time()
+            for g in list(self.konusmaci_izi):
+                if g["son"] is None or g["kullanildi"] or not (hepsi or simdi >= g["son"]):
+                    continue
+                g["kullanildi"] = "altyazi"
+                self.satir_ekle({"ts": g["ts"], "speaker": g["speaker"], "text": g["text"]}, kaynak="altyazi")
+
+    def _en_benzer_giris(self, ts, metin, pencere_sn=30):
+        """ts cevresinde metne en benzeyen altyazi izi girdisi -> (giris, benzerlik) ya da (None, 0)."""
+        hedef, en, en_b, en_fark = _sn(ts), None, 0.0, None
+        for g in self.konusmaci_izi:
+            fark = abs(hedef - _sn(g["ts"]))
+            if fark > pencere_sn or not g["text"]:
+                continue
+            b = metin_benzerligi(metin, g["text"])
+            if b > en_b or (en is not None and b == en_b and fark < en_fark):
+                en, en_b, en_fark = g, b, fark
+        return en, en_b
+
+    def _cakisanlar(self, ts, kim, metin):
+        """K5: Whisper satiri `kim`e yazildi; ±CAKISMA_SN icinde BASKA bir konusmacinin henuz kullanilmamis
+        altyazi satiri var ve kelime koklerinin en fazla %30'u bu (ve civardaki) Whisper metninde geciyorsa
+        Whisper o kisinin sozunu yazmamis demektir (iki kisi ayni anda konustu, baskin ses yazildi)."""
+        hedef = _sn(ts)
+        yazilan = _kokler(metin)
+        for w in self._son_ses:
+            if abs(_sn(w["ts"]) - hedef) <= CAKISMA_SN:
+                yazilan |= _kokler(w["text"])
+        sonuc = []
+        for g in self.konusmaci_izi:
+            if g["kullanildi"] or g["speaker"] in (kim, "?") or self._ben_mi(g["speaker"]):
+                continue                    # kullanicinin kendi sozu mikrofon akisindan ayrica gelir
+            if abs(_sn(g["ts"]) - hedef) > CAKISMA_SN:
+                continue
+            gk = _kokler(g["text"])
+            if gk and len(gk & yazilan) / len(gk) <= CAKISMA_KAPSAMA:
+                sonuc.append(g)
+        return sonuc
 
     def _bekleyenleri_coz(self):
         """Altyazi Whisper'dan 1-3 sn gec gelir: '?' kalmis satirlara konusmaci sonradan atanir."""
@@ -287,6 +354,9 @@ class Motor:
             if kim and benzer < 0.25 and simdi >= son and not self._tek_konusmaci(satir["ts"], kim):
                 kim = None      # sure doldu, metin hic eslesmedi ve pencerede baska konusan da var: tahmin etme
             if kim and (benzer >= 0.25 or simdi >= son):
+                giris, gb = self._en_benzer_giris(satir["ts"], satir["text"])
+                if giris is not None and gb >= AYNI_SOZ and not giris["kullanildi"]:
+                    giris["kullanildi"] = "ses"
                 satir["speaker"] = kim
                 if kim not in self.katilimcilar:
                     self.katilimcilar.append(kim)
@@ -297,6 +367,10 @@ class Motor:
 
     def ses_satiri(self, ts, konusmaci, metin, akis):
         """Whisper'dan gelen satir. konusmaci None ise altyaziyla zaman hizalamasi yapilir."""
+        with self._iz_kilit:
+            return self._ses_satiri(ts, konusmaci, metin, akis)
+
+    def _ses_satiri(self, ts, konusmaci, metin, akis):
         if konusmaci == "ben":
             kim, benzer = (self.ben or "Ben"), None
             # Kulakliksiz (hoparlorle) calisilirken karsi tarafin sesi mikrofona da girer; eko tekillestirmesi
@@ -321,7 +395,27 @@ class Motor:
             # Metin hicbir altyazi satiriyla eslesmedi, yalnizca zamana gore tahmin: o aralikta birden fazla
             # kisi konusuyorsa yanlis kisiye yazmamak icin '?' ile baslar; altyazi gelince atanir.
             kim = None
+        giris, gb = self._en_benzer_giris(ts, metin)
+        if giris is not None and gb >= AYNI_SOZ:
+            if giris["kullanildi"] == "altyazi":
+                # K5/A6: bu soz altyazidan transkripte girdi; Whisper satiri ikinci kez yazilmaz
+                self._olay("log", f"  · atlandı (altyazıdan zaten yazıldı): {metin[:40]}")
+                return None
+            giris["kullanildi"] = "ses"
+        cakisan = self._cakisanlar(ts, kim, metin) if (konusmaci != "ben" and kim) else []
+        for g in cakisan:
+            g["kullanildi"] = "altyazi"
+        once = [g for g in cakisan if _sn(g["ts"]) <= _sn(ts)]
+        for g in once:                      # transkript zaman sirasiyla: onceki altyazi satiri once
+            self.satir_ekle({"ts": g["ts"], "speaker": g["speaker"], "text": g["text"]}, kaynak="altyazi-cakisma")
         yeni = self.satir_ekle({"ts": ts, "speaker": kim or "?", "text": metin}, kaynak="ses")
+        for g in cakisan:
+            if g not in once:
+                self.satir_ekle({"ts": g["ts"], "speaker": g["speaker"], "text": g["text"]}, kaynak="altyazi-cakisma")
+        if cakisan:
+            self._olay("log", f"  · aynı anda konuşma: {len(cakisan)} altyazı satırı eklendi "
+                              f"({', '.join(g['speaker'] for g in cakisan)})")
+        self._son_ses = (self._son_ses + [{"ts": ts, "text": metin}])[-50:]
         if konusmaci != "ben" and yeni is not None and (not kim or (benzer or 0) < 0.25):
             # altyazi henuz gelmemis olabilir: 8 sn boyunca yeniden dene
             self.bekleyen_ses.append((yeni, time.time() + 8))
@@ -337,7 +431,7 @@ class Motor:
     def _tek_konusmaci(self, ts, kim, pencere_sn=10):
         """ts cevresinde (±pencere) altyazida yalnizca `kim` mi konusuyor?"""
         hedef = _sn(ts)
-        return all(k == kim for t, k, *_ in self.konusmaci_izi if abs(hedef - _sn(t)) <= pencere_sn)
+        return all(g["speaker"] == kim for g in self.konusmaci_izi if abs(hedef - _sn(g["ts"])) <= pencere_sn)
 
     def _altyazi_kokleri(self, ts, pencere_sn=20):
         """ts cevresindeki (±pencere) altyazi satirlarinin kelime kokleri."""
@@ -348,10 +442,9 @@ class Motor:
             except (ValueError, IndexError):
                 return 0
         hedef, kokler = sn(ts), set()
-        for kayit in self.konusmaci_izi:
-            t, _, alt = (kayit + ("",))[:3]
-            if abs(hedef - sn(t)) <= pencere_sn:
-                kokler |= _kokler(alt)
+        for g in self.konusmaci_izi:
+            if abs(hedef - sn(g["ts"])) <= pencere_sn:
+                kokler |= _kokler(g["text"])
         return kokler
 
     def uyum_orani(self):
@@ -378,8 +471,8 @@ class Motor:
 
         hedef, m1 = sn(ts), sade(metin)
         en_iyi, en_puan, en_benzer, gorulen = None, -1.0, 0.0, False
-        for kayit in reversed(self.konusmaci_izi):
-            t, kim, alt = (kayit + ("",))[:3]
+        for g in reversed(self.konusmaci_izi):
+            t, kim, alt = g["ts"], g["speaker"], g["text"]
             fark = hedef - sn(t)
             if abs(fark) > pencere_sn:
                 continue
@@ -427,6 +520,9 @@ class Motor:
         return satir
 
     def kontrol(self):
+        """Yakalama dongusunun her turunda: suresi dolan altyazi satirlari (A6) ve parca suresi."""
+        if self.kaynak == "ikisi":
+            self._bekleyen_altyazilar()
         if self.mevcut and time.time() - self.mevcut_bas >= PARCA_SURE_SN:
             self.parca_kapat("süre")
 
@@ -533,6 +629,7 @@ class Motor:
     # ---------- bitis ----------
     def bitir(self):
         """Son parcayi kapatir, arka plan islerini bekler; bekleyen onerileri dondurur."""
+        self._bekleyen_altyazilar(hepsi=True)     # A6: Whisper karsiligi gelmemis son altyazi satirlari
         self.parca_kapat("bitiş")
         bekleyen = [i for i in self.isler if not i.done()]
         if bekleyen:
@@ -669,7 +766,9 @@ class Motor:
         self.adim("Not kaydediliyor", 4, 4)
         with open(os.path.join(self.klasor, "not.md"), "w", encoding="utf-8") as f:
             f.write(not_md)
-        self.meta_yaz("tamam")
+        import not_araclari                  # gec: not_araclari motor'u ice aktarir
+        # N7: konusma paylari nota yazilmaz; Gecmis detayinda gosterilir
+        self.meta_yaz("tamam", konusma_paylari=[list(p) for p in not_araclari.konusma_paylari(satirlar)])
         return not_md
 
     def tum_satirlar(self):

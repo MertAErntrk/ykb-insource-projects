@@ -7,6 +7,8 @@ import ctypes
 import datetime as dt
 import difflib
 import re
+import time
+from collections import deque
 
 import uiautomation as auto
 
@@ -14,6 +16,9 @@ SPI_SETSCREENREADER = 0x0047
 GRUP_ADLARI = ("canlı alt yazı", "live captions")
 PENCERE_ANAHTAR = ("teams", "alt yaz", "caption")
 user32 = ctypes.windll.user32
+OKUMA_ARALIK = 0.6           # dongude iki okuma arasi (sn)
+YAVAS_ARALIK = 1.2           # UIA okumasi yavassa (kalabalik toplanti, zayif makine): CPU'yu bogmasin
+YAVAS_OKUMA_SN = 0.25        # son 10 okumanin ortalamasi bunu gecerse yavas sayilir
 
 
 def ekran_okuyucu(acik):
@@ -86,6 +91,15 @@ class Yakalayici:
         self.kayip_zamani = None
         self.pencere_basligi = ""
         self.toplanti_adi = ""
+        self.okuma_sureleri = deque(maxlen=10)     # A7: son okumalarin suresi (sn)
+
+    def onerilen_aralik(self):
+        """A7: dongunun bir sonraki okumaya kadar beklemesi. UIA agaci yuruyusu son 10 okumada ortalama
+        250 ms'yi gecerse 1,2 sn (Teams'i ve makineyi yormasin), altina inince yine 0,6 sn."""
+        if not self.okuma_sureleri:
+            return OKUMA_ARALIK
+        ort = sum(self.okuma_sureleri) / len(self.okuma_sureleri)
+        return YAVAS_ARALIK if ort > YAVAS_OKUMA_SN else OKUMA_ARALIK
 
     def _ciftler(self):
         metinler = [(c.Name or "").strip()
@@ -124,7 +138,15 @@ class Yakalayici:
         return 0
 
     def oku(self):
-        """Yeni kesinlesmis satirlari dondurur. self.hazir: altyazi grubu bulundu mu."""
+        """Yeni kesinlesmis satirlari dondurur. self.hazir: altyazi grubu bulundu mu.
+        Okuma suresi olculur (onerilen_aralik)."""
+        bas = time.perf_counter()
+        try:
+            return self._oku()
+        finally:
+            self.okuma_sureleri.append(time.perf_counter() - bas)
+
+    def _oku(self):
         try:
             if self.grup is None:
                 self.grup, baslik = _grup_bul()

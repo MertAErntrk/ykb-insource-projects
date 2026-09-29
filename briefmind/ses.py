@@ -24,6 +24,8 @@ import wave
 import numpy as np
 import requests
 
+import ayar as ayar_mod
+
 ORNEK = 16000
 MIN_SN = 1.5                 # bundan kisa "cumle" gonderilmez (cok kisa klipte Whisper tekrar uretir)
 CUMLE_SESSIZLIK = 0.55       # cumle sonu sayilan sessizlik (kisa: konusmaci degisimi ayni klibe dusmesin)
@@ -40,6 +42,9 @@ BLOK = 1600                  # 0.1 sn
 KUYRUK_UYARI = 12            # bu kadar cumle birikirse STT yetisemiyor: uyar (parca atilmaz)
 KUYRUK_TAVAN = 60            # ancak bu kadar birikirse (STT fiilen yok) parca atilir; ~45 MB bellek
 BOLME_PENCERE = 15           # zorla kesimde son 1.5 sn icindeki en sessiz blokta bolunur
+NORMAL_TEPE = 0.3            # tepe genligi bundan dusuk (kisik) parca Whisper'a gitmeden yukseltilir
+NORMAL_HEDEF = 0.9           # yukseltilen parcanin hedef tepesi
+NORMAL_KAZANC = 8.0          # en fazla kazanc (gurultu tabani da o kadar yukselir)
 ISCI_SAYISI = 2
 
 
@@ -206,8 +211,19 @@ class AkisYakalayici(threading.Thread):
         if birikmis and birikmis % KUYRUK_UYARI == 0:
             # Eskiden 12'de parca atiliyordu: STT kisa bir sure yavasladiginda konusma kayboluyordu.
             self._olay("stt_gecikme", {"kuyruk": birikmis, "atlandi": False})
+        ses = normalize_et(ses)
         self.kuyruk.put({"kaynak": self.kaynak, "basla": basla, "bitis": dt.datetime.now(), "ses": ses,
                          "no": next(self._sayac) if self._sayac is not None else None})
+
+
+def normalize_et(ses):
+    """A5: kisik parca (tepe < NORMAL_TEPE; uzak mikrofon, kisik Teams sesi) tepe ~NORMAL_HEDEF olacak
+    sekilde yukseltilir (kazanc en fazla NORMAL_KAZANC), [-1, 1]'e kirpilir. Yuksek ses degismez."""
+    tepe = float(np.max(np.abs(ses))) if len(ses) else 0.0
+    if tepe <= 0 or tepe >= NORMAL_TEPE:
+        return ses
+    kazanc = min(NORMAL_KAZANC, NORMAL_HEDEF / tepe)
+    return np.clip(ses * kazanc, -1.0, 1.0).astype(np.float32)
 
 
 def bolme_noktasi(enerji, pencere=BOLME_PENCERE):
@@ -352,8 +368,11 @@ class SttIstemci:
     DENEME = 3                                   # baglanti kopmasinda toplam deneme
     BEKLEME = (0.5, 1.5)                         # denemeler arasi (sn)
 
-    def __init__(self, adres, ipucu_fn=None, zaman_asimi=180, model="whisper", api_key="", proxy=True):
+    def __init__(self, adres, ipucu_fn=None, zaman_asimi=180, model="whisper", api_key="", proxy=True,
+                 verify=None):
         self.proxy = proxy                        # False: Windows/ortam proxy'si atlanir, dogrudan baglanilir
+        # A8: ca_bundle yolu ya da False; verilmezse config.json'dan (ayar.tls_dogrulama)
+        self.verify = ayar_mod.tls_dogrulama() if verify is None else verify
         self._oturum = self._yeni_oturum()
         self.yeniden_deneme = 0                   # kopma sonrasi basarili tekrar sayisi (teshis)
         self.adres = adres.rstrip("/")
@@ -384,7 +403,8 @@ class SttIstemci:
                 time.sleep(2)
             for yol in ("/health", "/v1/models"):
                 try:
-                    r = self._oturum.get(f"{self.adres}{yol}", headers=self._basliklar(), verify=False, timeout=10)
+                    r = self._oturum.get(f"{self.adres}{yol}", headers=self._basliklar(), verify=self.verify,
+                                         timeout=10)
                     if r.status_code == 200:
                         return True
                     self.saglik_hatasi = f"{yol} -> HTTP {r.status_code}"
@@ -398,7 +418,7 @@ class SttIstemci:
         veri = {"language": "tr", "model": self.model, "temperature": "0", "response_format": bicim}
         if IPUCU_GONDER:
             veri["prompt"] = self._ipucu()[:200]
-        return self._oturum.post(f"{self.adres}/v1/audio/transcriptions", verify=False,
+        return self._oturum.post(f"{self.adres}/v1/audio/transcriptions", verify=self.verify,
                                  timeout=self.zaman_asimi, headers=self._basliklar(),
                                  files={"file": ("parca.wav", wav_bayt(ses), "audio/wav")}, data=veri)
 
@@ -445,9 +465,9 @@ class SesServisi:
     konusmaci: mikrofon akisi icin 'ben', loopback icin None (motor altyazidan esler)."""
 
     def __init__(self, stt_adres, ipucu_fn=None, mod="otomatik", mik_cihaz=None, olay=None, satir_fn=None,
-                 model="whisper", api_key="", proxy=True):
+                 model="whisper", api_key="", proxy=True, verify=None):
         self.kuyruk = queue.Queue()
-        self.stt = SttIstemci(stt_adres, ipucu_fn, model=model, api_key=api_key, proxy=proxy)
+        self.stt = SttIstemci(stt_adres, ipucu_fn, model=model, api_key=api_key, proxy=proxy, verify=verify)
         self.mod = mod                       # otomatik | cift | tek
         self.mik_cihaz = mik_cihaz
         self._olay = olay or (lambda t, v: None)

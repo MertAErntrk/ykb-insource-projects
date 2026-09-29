@@ -11,11 +11,13 @@ import difflib
 import json
 import os
 import re
+import ssl
 import time
 
 import httpx
 from openai import BadRequestError, OpenAI, UnprocessableEntityError
 
+import ayar as ayar_mod
 from metin import ad_geciyor, cift_yonlu_benzerlik, tr_kucuk
 
 CONFIG = "config.json"
@@ -29,13 +31,15 @@ if os.path.exists(CONFIG):
 
 MARJ = 350                                             # sablon + guvenlik payi
 ROUTE = MODEL = client = _http = None
+TLS_DOGRULAMA = False                                  # ca_bundle yolu ya da False (ayar.tls_dogrulama)
+TLS_HATASI = None                                      # ca_bundle var ama sertifika okunamadi (acilista gosterilir)
 BAGLAM_PENCERESI = 16384
 
 
 def ayarla(cfg):
     """LLM adresi/model/baglam penceresi ve istemciler calisirken yeniden kurulur (Ayarlar -> Kaydet
     sonrasi uygulamayi yeniden baslatmak gerekmez). cfg: config.json sozlugu."""
-    global ROUTE, MODEL, BAGLAM_PENCERESI, client, _http
+    global ROUTE, MODEL, BAGLAM_PENCERESI, TLS_DOGRULAMA, TLS_HATASI, client, _http
     cfg = cfg or {}
     ROUTE = cfg.get("route") or "http://localhost:8000/v1"          # config.json: LLM adresi (OpenAI uyumlu)
     # OpenShift icinden: "http://<servis>.<namespace>.svc.cluster.local:8000/v1"
@@ -44,10 +48,17 @@ def ayarla(cfg):
         BAGLAM_PENCERESI = int(cfg.get("context") or 16384)   # sunucunun max-model-len'i
     except (TypeError, ValueError):
         BAGLAM_PENCERESI = 16384
+    # A8: config.json -> ca_bundle (kurum kok sertifikasi) varsa TLS dogrulanir, yoksa kapali
+    TLS_DOGRULAMA, TLS_HATASI, dogrula = ayar_mod.tls_dogrulama(cfg), None, False
+    if TLS_DOGRULAMA:
+        try:
+            dogrula = ssl.create_default_context(cafile=TLS_DOGRULAMA)
+        except (ssl.SSLError, OSError, ValueError) as e:     # bozuk/yanlis bicimli .cer: uygulama acilsin
+            TLS_DOGRULAMA, TLS_HATASI = False, f"{e}"
     # eski istemciler kapatilmaz: o an baska bir is parcaciginda suren istek yarida kesilmesin
     client = OpenAI(base_url=ROUTE, api_key="x",
-                    http_client=httpx.Client(verify=False, trust_env=False, timeout=900))
-    _http = httpx.Client(verify=False, trust_env=False, timeout=30)
+                    http_client=httpx.Client(verify=dogrula, trust_env=False, timeout=900))
+    _http = httpx.Client(verify=dogrula, trust_env=False, timeout=30)
 
 
 ayarla(_cfg)

@@ -88,9 +88,18 @@ def ayarlar():
     return cfg
 
 
-def _http():
+def _dogrulama(cfg):
+    """A8: config.json -> ca_bundle varsa TLS dogrulanir (uygulamayla ayni kural: ayar.tls_dogrulama)."""
+    import ayar
+    return ayar.tls_dogrulama(cfg)
+
+
+def _http(cfg=None):
+    import ssl
     import httpx
-    return httpx.Client(verify=False, trust_env=False, timeout=120)
+    yol = _dogrulama(cfg or {})
+    return httpx.Client(verify=ssl.create_default_context(cafile=yol) if yol else False, trust_env=False,
+                        timeout=120)
 
 
 def llm_testleri(cfg):
@@ -100,7 +109,8 @@ def llm_testleri(cfg):
     if not route:
         yaz("route ayarli degil")
         return
-    h = _http()
+    yaz(f"  TLS doğrulaması: {'açık (ca_bundle)' if _dogrulama(cfg) else 'kapalı (ca_bundle ayarlı değil)'}")
+    h = _http(cfg)
     # 3a model listesi ve max_model_len
     try:
         r = h.get(f"{route}/models")
@@ -181,9 +191,10 @@ def stt_testleri(cfg, wav_yolu=None):
         return
     import requests
     bas = {"Authorization": f"Bearer {cfg['stt_key']}"} if cfg.get("stt_key") else {}
+    dogrula = _dogrulama(cfg)
     for yol in ("/health", "/v1/models"):
         try:
-            r = requests.get(adres + yol, headers=bas, verify=False, timeout=10)
+            r = requests.get(adres + yol, headers=bas, verify=dogrula, timeout=10)
             yaz(f"GET {yol} -> {r.status_code}  {r.text[:200]!r}")
         except Exception as e:
             yaz(f"GET {yol} HATA: {e!r}")
@@ -195,7 +206,7 @@ def stt_testleri(cfg, wav_yolu=None):
         for bicim in ("verbose_json", "json"):
             t0 = time.time()
             try:
-                r = requests.post(adres + "/v1/audio/transcriptions", headers=bas, verify=False, timeout=300,
+                r = requests.post(adres + "/v1/audio/transcriptions", headers=bas, verify=dogrula, timeout=300,
                                   files={"file": ("t.wav", veri, "audio/wav")},
                                   data={"language": "tr", "model": cfg.get("stt_model", "whisper"),
                                         "temperature": "0", "response_format": bicim})
