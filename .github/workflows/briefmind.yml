@@ -1,0 +1,84 @@
+# BriefMind: testler (Linux + is bilgisayariyla ayni Windows/Python 3.9) ve elle tetiklenen exe derlemesi.
+name: briefmind
+
+on:
+  push:
+    paths: ['briefmind/**', '.github/workflows/briefmind.yml']
+  pull_request:
+    paths: ['briefmind/**', '.github/workflows/briefmind.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: windows-latest
+            python: '3.9'          # is bilgisayari: Python 3.9.7
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Qt kutuphaneleri (Linux, ekransiz)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0
+      - name: Bagimliliklar (Linux)
+        # pywin32 / uiautomation / soundcard Windows'a ozgu: Linux'ta tests/conftest.py sahte modul kullanir
+        if: runner.os == 'Linux'
+        run: pip install openai httpx requests numpy PyQt5 python-docx pytest
+      - name: Bagimliliklar (Windows)
+        if: runner.os == 'Windows'
+        run: pip install -r briefmind/requirements.txt pytest
+      - name: Derleme kontrolu
+        working-directory: briefmind
+        run: python -m compileall -q .
+      - name: Testler
+        working-directory: briefmind
+        run: python -m pytest tests -q
+
+  build:
+    name: exe (PyInstaller)
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Bagimliliklar
+        run: pip install -r briefmind/requirements.txt pyinstaller pillow
+      - name: Derle (derle.bat mantigi)
+        working-directory: briefmind
+        shell: bash
+        # logo1.jpeg repoda yok (.gitignore): varsa ikon uretilir, yoksa varsayilan ikonla derlenir
+        run: |
+          IKON=""
+          if [ -f logo1.jpeg ]; then
+            python -c "from PIL import Image; Image.open('logo1.jpeg').convert('RGBA').save('logo.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+            IKON="--icon logo.ico"
+          fi
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name BriefMind $IKON \
+            --collect-all uiautomation --collect-all soundcard --collect-all sounddevice --collect-all soundfile \
+            --hidden-import win32com --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes \
+            --hidden-import PyQt5.QtSvg \
+            app.py
+          cp config.example.json sozluk.example.json dist/BriefMind/
+          mkdir -p dist/BriefMind/toplantilar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BriefMind
+          path: briefmind/dist/BriefMind
+          if-no-files-found: error

@@ -20,8 +20,12 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 | Dosya | Görev |
 |---|---|
 | `app.py` | PyQt5 masaüstü uygulaması (Canlı / İnceleme / Not / Sözlük / Geçmiş / Ayarlar) |
+| `isler.py` | Arayüzü dondurmayan arka plan işleri (yakalama, not üretimi, yeniden özetleme, soru) |
+| `gorunum.py` | Tema (QSS), notun HTML görünümü, ikonlar |
+| `ayar.py` | `config.json` okuma/yazma |
 | `motor.py` | Parçalama, arka plan özetleme, konuşmacı hizalama, dayanak kontrolü, not üretimi |
-| `llm.py` | LLM istemcisi, bölüm/birleştirme promptları, token bütçeleri |
+| `llm.py` | LLM istemcisi, bölüm/birleştirme promptları, token bütçeleri, notun deterministik temizliği |
+| `metin.py` | Metin benzerliği (kelime kökü), Türkçe küçük harf, ad eşleşmesi |
 | `ses.py` | Ses yakalama (WASAPI loopback + mikrofon), VAD, STT istemcisi, tekrar/halüsinasyon filtreleri |
 | `yakalayici.py` | Teams altyazısını UI Automation ile okuma, toplantı adı, altyazıyı otomatik açma |
 | `outlook.py` | Takvimden toplantı eşleştirme, taslak e-posta, oturum kullanıcısı |
@@ -48,6 +52,7 @@ python app.py
 | `kaynak` | `ses` (Whisper) / `ikisi` / `altyazi` |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
 | `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
+| `otomatik_not` | (varsayılan `true`) Toplantı bitince İnceleme beklenmez, not doğrudan üretilir. `false`: önce İnceleme sekmesi (eski akış). Ayarlar → "Toplantı bitince incelemeyi atla" |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
 
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
@@ -57,7 +62,13 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 1. Teams toplantısına gir (altyazı açık olsun; kapalıysa uygulama Alt+Shift+C ile açmayı dener).
 2. **Başlat** — üstteki listeden toplantı seçilir (takvimden, Teams penceresine göre otomatik).
 3. Konuşmalar cümle cümle Canlı sekmesine düşer; parçalar arka planda özetlenir.
-4. **Bitir** → İnceleme: şüpheli terimleri onayla → **Uygula ve notu üret** → Not → Outlook taslağı.
+4. **Bitir** → not doğrudan üretilir (`otomatik_not`); Not sekmesindeki şeritte aşama ve geçen süre görünür
+   ("Parça 3/12 özetleniyor", "Özet paragrafı yazılıyor"…) → Outlook taslağı. Şüpheli terimler İnceleme
+   sekmesinde bilgi için durur: onaylayıp **Uygula ve notu üret** ile sözlüğe alınır ve not yeniden üretilir.
+   `otomatik_not` kapalıysa eski akış: İnceleme → **Uygula ve notu üret** → Not.
+
+Ayarlar → **Kaydet** hemen geçerlidir; LLM adresi/modeli için uygulamayı yeniden başlatmak gerekmez.
+Komut satırı: `python toplanti.py basla --inceleme-yok` (ya da `bitir <klasör> --inceleme-yok`) incelemeyi atlar.
 
 Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplantılarımda her zaman alt yazıları göster*.
 
@@ -66,6 +77,9 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
 - **Kaynağa git:** Karar ve aksiyonların yanındaki `⏱10:12:03`'e tıklayınca transkript o anda açılır.
 - **Soru sor:** Not sekmesindeki kutuya "Test ortamı ne zaman hazır, kim söyledi?" gibi sorular yazılır; cevap yalnızca bu toplantının transkriptinden gelir.
 - **Ara:** Geçmiş sekmesinde tüm toplantıların transkript ve notlarında arama yapılır.
+- **Yeniden özetle:** Geçmiş sekmesinde bir toplantı seçilip basılır; **tüm** parçalar güncel sözlükle yeniden
+  düzeltilip özetlenir ve yeni not üretilir (yarım kalmış kayıtlar için de). Eski not `not.md.yedek-YYYYMMDD-HHMM`
+  olarak saklanır. Tek parça için: "Seçili parçayı yeniden özetle".
 - **Düzenle / Word / PDF / Kişiye özel e-postalar:** Not sekmesindeki düğmeler.
 - **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi.
 - **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
@@ -77,7 +91,9 @@ pip install pytest
 python -m pytest tests
 ```
 
-Testler LLM sunucusu ya da ses cihazı gerektirmez. Uçtan uca analiz ve yol haritası için bkz. [`docs/GELISTIRME_PLANI.md`](docs/GELISTIRME_PLANI.md).
+Testler LLM sunucusu ya da ses cihazı gerektirmez. GitHub Actions (`.github/workflows/briefmind.yml`, repo
+kökünde) `briefmind/` değişince testleri Ubuntu + Python 3.11 ve Windows + Python 3.9 üzerinde çalıştırır; Actions
+sekmesinden elle (**Run workflow**) tetiklenince Windows'ta exe derlenir ve `BriefMind` artefaktı olarak indirilir. Uçtan uca analiz ve yol haritası için bkz. [`docs/GELISTIRME_PLANI.md`](docs/GELISTIRME_PLANI.md).
 
 ## Gizlilik ve uyum
 

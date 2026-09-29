@@ -188,4 +188,16 @@ Tamamlanan karşılaştırma maddeleri:
 
 Bu sırada düzeltilen hata: Geçmiş'te bir notu yalnızca açmak toplantıyı "yarım" olarak işaretliyordu.
 
-Kalanlar: K5 (çakışmada altyazı), K8 (sorumlu doğrulama), A5 (ses normalizasyonu), A6, A7, A8 (CA sertifikası, bilgi bekliyor), A11, A12, N7 (konuşma süreleri), N9 (Jira/Planner), N10 (canlı ara özet).
+| Madde | Durum (Aşama 1, 2026-09-29) |
+|---|---|
+| Not kalitesi S1–S5 | **Tamamlandı.** Boş maddeli aksiyon atılır (tablo/kişi listesinde `-` yok); liste birleştirmede boş madde oranı > %20 ya da dolu madde kaybı varsa yerel birleştirme. Kodda son işlemler: kişi adı + iş fiili olan karar aksiyona taşınır, aksiyona benzeyen karar düşer (`karar_aksiyon_ayikla`); karar sonundaki tek adlı `(Elif)` kalkar; sorumlusu belirsiz, ≤ 4 kelimelik ve kaynağı olmayan aksiyon düşer; açık sorular temizlenir (modelin kendi anlama soruları, alıntı parantezleri, tekrarlar, cevaplanmışlar; en fazla 10). MAP/LISTE promptları buna göre sıkılaştırıldı. |
+| K8 Sorumlu doğrulama | **Tamamlandı.** `motor.sorumlu_dogrula`: kaynak satırı birinci tekil şahıs taşıyorsa ("ben hazırlarım", "yapacağım") konuşan kişi esas alınır; `belirsiz` → o kişi, başka biri ve satırda adı geçmiyorsa `Ad (?)`. |
+| N10 Canlı ara özet | **Tamamlandı.** Canlı sekmesinde "Şu ana kadar: N karar, M aksiyon, K açık soru" (LLM'siz, her parça özetlenince). |
+| A11 Modüllere ayırma | **Tamamlandı.** `isler.py` (QThread'ler), `gorunum.py` (tema, `md_to_html`), `ayar.py` (`config.json`, `tls_dogrulama` yer tutucusu), `metin.py` (metin benzerliği). `llm.ayarla(cfg)`: Ayarlar → Kaydet sonrası LLM adresi/modeli yeniden başlatmadan geçerli. |
+| A12 CI | **Tamamlandı.** `.github/workflows/briefmind.yml`: Ubuntu + Python 3.11 ve Windows + Python 3.9 testleri; elle tetiklenince (`workflow_dispatch`) Windows'ta PyInstaller derlemesi, `BriefMind` artefaktı. |
+| Otomatik not (A) | **Tamamlandı.** Ayar `otomatik_not` (varsayılan açık): toplantı bitince inceleme beklenmez, not doğrudan üretilir; Not sekmesinde ilerleme şeridi (aşama + geçen süre, motorun `adim` olayları). Not üretilirken pencere kapatılırsa uyarı. Komut satırı: `--inceleme-yok`. |
+| Yeniden özetle (B) | **Tamamlandı.** Geçmiş → "Yeniden özetle": eski not `not.md.yedek-YYYYMMDD-HHMM`, sözlük tüm parçalara, **tüm** parçalar yeniden düzeltme + özet, yeni not ("Yarım kalanı tamamla"nın yerine; yarım kayıtlar için de çalışır). |
+
+**Aşama 1 tamamlandı** — ayrıntı ve kabul ölçütleri: [`UYGULAMA_PLANI_v2.md`](UYGULAMA_PLANI_v2.md) (bölüm 0, A, B, C). Bu sırada düzeltilen hata: paralel özetlemede bir parça, önceki parçanın dosyası yazılırken okunup yarım JSON'la özetsiz kalabiliyordu (`parca_oku` artık kilitli).
+
+Kalanlar (Aşama 2): K5 (çakışmada altyazı), A5 (ses normalizasyonu), A6 (`ikisi` modu), A7 (UIA yükü), A8 (CA sertifikası, bilgi bekliyor), N7 (konuşma payı), N9 (Jira/Planner CSV).
