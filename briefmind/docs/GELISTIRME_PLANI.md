@@ -100,3 +100,17 @@ Parça özetleri iyi, sorun birleştirme adımında. Koddan çıkan nedenler:
 - [ ] vLLM `--reasoning-parser` ile mi çalışıyor? (Değilse düşünce metni artık temizleniyor ama bütçeyi hâlâ harcıyor.)
 - [ ] Olaylar panelinde "yerel birleştirme kullanıldı" ya da "bölüm özetleri sırayla kullanıldı" satırları çıkıyor mu? Sık çıkıyorsa LLM ayarına bakılmalı (A1, A2).
 - [ ] "STT yavaş, N parça sırada" uyarısı sık görünüyor mu? Görünüyorsa STT servisinin kapasitesi yetmiyor.
+
+## 7. Teşhis sonuçları (2026-09-29, iş bilgisayarı)
+
+| Konu | Bulgu | Sonuç |
+|---|---|---|
+| vLLM | 0.16.0rc2, `--max-model-len 16384`, `--reasoning-parser qwen3`, MTP spekülatif çözümleme, structured outputs backend `auto` | Düşünme metni ayrı alana düşüyor; N3 (İngilizce `<think>` sızıntısı) bu sunucuda olmuyor. Temizlik yine de güvenlik için kodda kalıyor. |
+| `reasoning_effort` | `low` düşünmeyi kısaltıyor (549 → 163 karakter) | N2 bu model için geçersiz: parametre çalışıyor. |
+| `json_schema` + düşünme | Düşünme açıkken şema **uygulanmıyor**, model düz metin döndürüyor. Düşünme kapalıyken uygulanıyor. | **Yeni kök neden.** Parça özeti düşünmeli istendiği için bazen düz metin geliyordu. Kod bu metni "JSON onarımı"na gönderiyor, onarım yanlış anahtarlı bir JSON üretiyor, bu da **boş parça özeti** demek. Tam notun eksik kalmasının güçlü bir nedeni. **Düzeltildi:** düz metin gelirse istek düşünmesiz (şema zorunlu) tekrarlanıyor, zorunlu anahtarı olmayan JSON reddediliyor. |
+| Tokenizer | Türkçede 3,10 karakter/token | `token_tahmin` (karakter/3) doğru ölçekte. |
+| `config.json` | `context` alanı yok, varsayılan 16384 kullanılıyor | Sunucuyla aynı, sorun yok. |
+| STT (ARGE) | `/health` 200; `verbose_json` segmentlerinde yalnızca `id, temperature, text, tokens` var. `start`, `end`, `avg_logprob` ve `no_speech_prob` **yok**. | Güven skoruna dayalı Whisper filtreleri bu serviste etkisiz; yalnızca metin sezgileri çalışıyor. Cümle zamanları klip süresine orantılı dağıtılıyor. ARGE'ye sorulmalı: segment zaman ve olasılık alanları açılabilir mi? |
+| STT sessizlik testi | 2 sn sessizliğe `...` döndü | Kod bunu zaten eliyor (harf yok). |
+| STT `test.wav` | `...` döndü, konuşma tanınmadı | Kayıt sessiz olabilir (yanlış mikrofon) ya da STT sorunlu. Dosya dinlenerek ayırt edilmeli. |
+| Kayıtlar | Tek kayıt: 40 katılımcı, 0 parça, 0 satır | Ya kısa bir deneme, ya kayıtlar başka klasörde (`dist\BriefMind\toplantilar`), ya da yakalama hiç satır üretmemiş. `--kayit` ile doğru klasör verilerek tekrar bakılmalı. |

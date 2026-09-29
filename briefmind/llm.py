@@ -226,23 +226,43 @@ def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusun
     return dusunce_temizle(c.message.content), c.finish_reason
 
 
+def _sema_json(metin, sema):
+    """JSON'u ayiklar ve semanin zorunlu anahtarlarini tasiyip tasimadigini dogrular; degilse ValueError."""
+    v = json_ayikla(metin)
+    eksik = [k for k in (sema or {}).get("required", []) if k not in v]
+    if eksik:
+        raise ValueError(f"eksik alanlar: {eksik}")
+    return v
+
+
 def _json_sor(mesajlar, max_tokens, sema, effort="medium", temperature=0.6, dusunme=True):
-    """JSON ister; kesilirse dusunmesiz ve daha genis tekrar dener, bozuksa onarim. Basarisizsa None."""
+    """JSON ister; kesilirse dusunmesiz ve daha genis tekrar dener, bozuksa onarim. Basarisizsa None.
+    Teshis (vLLM 0.16 + qwen3 reasoning parser): dusunme aciksa json_schema UYGULANMIYOR, model duz metin
+    donebiliyor. Duz metni 'onarmak' yanlis anahtarli JSON'a, yani sessizce bos bir parca ozetine yol
+    aciyordu. Bu yuzden once istek dusunmesiz (sema zorunlu) tekrarlanir, onarim en son denenir."""
     metin, neden = sor(mesajlar, max_tokens, sema=sema, effort=effort, temperature=temperature, dusunme=dusunme)
     if neden == "length" or not metin:
         metin, neden = sor(mesajlar, int(max_tokens * 1.5), sema=sema, temperature=temperature, dusunme=False)
+        dusunme = False
     try:
-        return json_ayikla(metin)
+        return _sema_json(metin, sema)
     except Exception:
-        if not metin:
-            return None
-        onarim = [{"role": "system", "content": "Bozuk JSON'u düzelt. Yalnızca geçerli JSON döndür."},
-                  {"role": "user", "content": metin}]
-        onarilmis, _ = sor(onarim, max_tokens, temperature=0.1, dusunme=False)
+        pass
+    if dusunme:
+        metin, neden = sor(mesajlar, max_tokens, sema=sema, temperature=temperature, dusunme=False)
         try:
-            return json_ayikla(onarilmis)
+            return _sema_json(metin, sema)
         except Exception:
-            return None
+            pass
+    if not metin or "{" not in metin:
+        return None
+    onarim = [{"role": "system", "content": "Bozuk JSON'u düzelt. Yalnızca geçerli JSON döndür."},
+              {"role": "user", "content": metin}]
+    onarilmis, _ = sor(onarim, max_tokens, sema=sema, temperature=0.1, dusunme=False)
+    try:
+        return _sema_json(onarilmis, sema)
+    except Exception:
+        return None
 
 
 def _json_tam(mesajlar, max_tokens, sema, temperature=0.2):
@@ -253,7 +273,7 @@ def _json_tam(mesajlar, max_tokens, sema, temperature=0.2):
         if neden == "length":
             continue
         try:
-            return json_ayikla(metin)
+            return _sema_json(metin, sema)
         except Exception:
             continue
     return None

@@ -165,3 +165,29 @@ def test_motor_notu_uret_eksik_bolumu_soyler(tmp_path, monkeypatch):
     assert "## Eksik bölümler" in md and "10:25:00–10:25:00" in md
     assert "Jira kaydı açılacak" in md
     assert (tmp_path / "t" / "not.md").read_text(encoding="utf-8") == md
+
+
+def test_dusunmeli_duz_metin_semasiz_tekrarlanir(monkeypatch):
+    """Sunucu dusunme acikken json_schema uygulamiyor (teshis): duz metin onarilmaz, dusunmesiz tekrar edilir."""
+    parca = {"ozet": "Ahmet PD kolonunun number olacağını söyledi.", "konular": ["PD kolonu"], "kararlar": [],
+             "aksiyonlar": [], "acik_sorular": [], "belirsiz_terimler": []}
+    cagrilar = []
+
+    def sahte(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
+        cagrilar.append(dusunme)
+        if dusunme:
+            return "Bu bölümde Ahmet PD kolonundan bahsetti.", "stop"
+        return json.dumps(parca, ensure_ascii=False), "stop"
+
+    monkeypatch.setattr(llm, "sor", sahte)
+    o = llm.bolum_ozetle("Ahmet: PD kolonu number olacak.", 1, "Toplantı: test")
+    assert o["ozet"] == parca["ozet"]
+    assert cagrilar == [True, False]
+
+
+def test_yanlis_anahtarli_json_kabul_edilmez(monkeypatch):
+    def sahte(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
+        return '{"summary": "The meeting was short."}', "stop"
+
+    monkeypatch.setattr(llm, "sor", sahte)
+    assert llm.bolum_ozetle("Ahmet: tamam.", 1, "Toplantı: test") is None

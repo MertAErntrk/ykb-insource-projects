@@ -211,8 +211,14 @@ def stt_testleri(cfg, wav_yolu=None):
             alanlar = sorted(seg[0].keys()) if seg else []
             yaz(f"  [{etiket} / {bicim}] {sure:.2f}s  ust_alanlar={sorted(v.keys())}  segment={len(seg)}  "
                 f"segment_alanlari={alanlar}  metin_uzunlugu={len(v.get('text') or '')}")
-            if etiket.startswith("2 sn") and (v.get("text") or "").strip():
-                yaz(f"      ! sessizlige metin uretti (halusinasyon): {v['text'][:80]!r}")
+            metin = (v.get("text") or "").strip()
+            if etiket.startswith("2 sn") and metin:
+                yaz(f"      ! sessizlige metin uretti (halusinasyon): {metin[:80]!r}")
+            elif not etiket.startswith("2 sn") and len(re.findall(r"\w+", metin)) < 3:
+                yaz("      ! dosyadaki konusma TANINMADI (bos ya da '...'). Once dosyayi dinle: ses var mi? "
+                    "Varsa STT sorunu, yoksa mikrofon/kayit cihazi sorunu.")
+            else:
+                yaz(f"      tanınan kelime sayısı: {len(metin.split())}")
             for s in seg[:5]:
                 yaz(f"      segment {s.get('start')}-{s.get('end')}  no_speech_prob={s.get('no_speech_prob')}  "
                     f"avg_logprob={s.get('avg_logprob')}  compression_ratio={s.get('compression_ratio')}")
@@ -234,11 +240,12 @@ def _sn(ts):
         return None
 
 
-def kayit_istatistikleri(son=10):
+def kayit_istatistikleri(son=10, kok="toplantilar"):
     baslik(f"5) Son {son} toplantı kaydı (yalnızca sayılar, içerik yok)")
-    klasorler = sorted(glob.glob(os.path.join("toplantilar", "*")), key=os.path.getmtime)[-son:]
+    klasorler = sorted(glob.glob(os.path.join(kok, "*")), key=os.path.getmtime)[-son:]
     if not klasorler:
-        yaz("toplantilar/ klasörü boş ya da yok")
+        yaz(f"{kok} klasörü boş ya da yok. Uygulamayı başka klasörden (ör. dist\\BriefMind) çalıştırıyorsan "
+            "--kayit ile o klasördeki 'toplantilar' yolunu ver.")
         return
     for i, k in enumerate(klasorler, 1):
         try:
@@ -321,6 +328,7 @@ def main():
     warnings.filterwarnings("ignore")
     a = argparse.ArgumentParser()
     a.add_argument("--wav", help="STT'yi bu dosyayla da dene (metin çıktıya yazılmaz)")
+    a.add_argument("--kayit", default="toplantilar", help="toplantilar klasörünün yolu (varsayılan: ./toplantilar)")
     a.add_argument("--atla-llm", action="store_true")
     a.add_argument("--atla-stt", action="store_true")
     a = a.parse_args()
@@ -328,7 +336,7 @@ def main():
     paket_surumleri()
     cfg = ayarlar()
     for adim, atla in ((lambda: llm_testleri(cfg), a.atla_llm), (lambda: stt_testleri(cfg, a.wav), a.atla_stt),
-                       (kayit_istatistikleri, False), (hata_logu, False), (testler, False)):
+                       (lambda: kayit_istatistikleri(kok=a.kayit), False), (hata_logu, False), (testler, False)):
         if atla:
             continue
         try:
