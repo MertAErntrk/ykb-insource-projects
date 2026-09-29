@@ -16,6 +16,8 @@ import time
 import httpx
 from openai import BadRequestError, OpenAI, UnprocessableEntityError
 
+from metin import ad_geciyor, cift_yonlu_benzerlik, tr_kucuk
+
 CONFIG = "config.json"
 _cfg = {}
 if os.path.exists(CONFIG):
@@ -25,14 +27,30 @@ if os.path.exists(CONFIG):
     except Exception:
         _cfg = {}
 
-ROUTE = _cfg.get("route") or "http://localhost:8000/v1"          # config.json: LLM adresi (OpenAI uyumlu)
-# OpenShift icinden: "http://<servis>.<namespace>.svc.cluster.local:8000/v1"
-MODEL = _cfg.get("model") or "Qwen3.8-27B-FP8"
-BAGLAM_PENCERESI = int(_cfg.get("context") or 16384)   # sunucunun max-model-len'i
 MARJ = 350                                             # sablon + guvenlik payi
+ROUTE = MODEL = client = _http = None
+BAGLAM_PENCERESI = 16384
 
-client = OpenAI(base_url=ROUTE, api_key="x",
-                http_client=httpx.Client(verify=False, trust_env=False, timeout=900))
+
+def ayarla(cfg):
+    """LLM adresi/model/baglam penceresi ve istemciler calisirken yeniden kurulur (Ayarlar -> Kaydet
+    sonrasi uygulamayi yeniden baslatmak gerekmez). cfg: config.json sozlugu."""
+    global ROUTE, MODEL, BAGLAM_PENCERESI, client, _http
+    cfg = cfg or {}
+    ROUTE = cfg.get("route") or "http://localhost:8000/v1"          # config.json: LLM adresi (OpenAI uyumlu)
+    # OpenShift icinden: "http://<servis>.<namespace>.svc.cluster.local:8000/v1"
+    MODEL = cfg.get("model") or "Qwen3.8-27B-FP8"
+    try:
+        BAGLAM_PENCERESI = int(cfg.get("context") or 16384)   # sunucunun max-model-len'i
+    except (TypeError, ValueError):
+        BAGLAM_PENCERESI = 16384
+    # eski istemciler kapatilmaz: o an baska bir is parcaciginda suren istek yarida kesilmesin
+    client = OpenAI(base_url=ROUTE, api_key="x",
+                    http_client=httpx.Client(verify=False, trust_env=False, timeout=900))
+    _http = httpx.Client(verify=False, trust_env=False, timeout=30)
+
+
+ayarla(_cfg)
 
 GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
@@ -82,11 +100,15 @@ MAP_SISTEM = (
     "tartışıldı, neye varıldı). Yorum yok, genelleme yok, transkriptte olmayan bilgi yok.\n"
     "- konular: ele alınan başlıklar (kısa, 2-6 kelime).\n"
     "- kararlar: AÇIKÇA karara bağlanmış şeyler. Öneri, niyet ya da 'bakarız' düzeyindeki ifadeler karar "
-    "DEĞİLDİR; onlar 'acik_sorular'a gider. Kararı kimin verdiği belliyse belirt.\n"
-    "- aksiyonlar: birinin üstlendiği somut işler; sorumlu katılımcı listesindeki yazımla, belli değilse "
-    "'belirsiz'; tarih toplantı tarihine göre gerçek tarihe çevrilir ('perşembeye' -> 'YYYY-MM-DD (Perşembe)'), "
-    "belli değilse '-'.\n"
-    "- acik_sorular: cevaplanmadan kalan sorular, ertelenen konular, netleşmemiş öneriler.\n"
+    "DEĞİLDİR; onlar 'acik_sorular'a gider. Kararı vereni yalnızca gerçekten tartışmalı ya da tek kişinin "
+    "verdiği kararlarda, cümle içinde yaz ('Elif'in önerisiyle ...'); sonuna parantezle tek ad ekleme.\n"
+    "- aksiyonlar: bir kişinin üstlendiği, BİTİNCE BELLİ OLAN somut işler; 'madde' alanı asla boş kalmaz. "
+    "Sorumlusu belirsiz ve fiili genel ('anlamak', 'değerlendirmek', 'bakmak') olan ifadeler aksiyon değildir, "
+    "'konular'a gider. Sorumlu katılımcı listesindeki yazımla, belli değilse 'belirsiz'; tarih toplantı "
+    "tarihine göre gerçek tarihe çevrilir ('perşembeye' -> 'YYYY-MM-DD (Perşembe)'), belli değilse '-'.\n"
+    "- acik_sorular: yalnızca bu bölümde cevapsız kalan ve bir sonraki adımı etkileyen sorular; en fazla 4. "
+    "Şunları YAZMA: kendi anlama soruların (kim/ne olduğu belirsiz ad ve terimler 'belirsiz_terimler'e "
+    "gider), transkriptten alıntı ya da parantez içi açıklama, aynı bölümde cevaplanan soru.\n"
     "- belirsiz_terimler: bozuk duyulduğunu düşündüğün kelime/terimler (transkriptteki yazımıyla).\n"
     "Kurallar: emin olamadığın yeri olduğu gibi aktar ve sonuna (?) koy. Sözlük ve gündem yalnızca yazım "
     "ipucudur; oradan içerik üretme. Bölümde bir şey yoksa ilgili liste boş kalır, ozet 1 cümle olur.\n"
@@ -116,7 +138,10 @@ LISTE_SISTEM = (
     "değil AKSİYONDUR: kararlar listesinden çıkar, aksiyonlara (sorumlusuyla) taşı. Aynı iş hem kararda hem "
     "aksiyonda yazılmasın.\n"
     "- Aynı işi farklı bölümlerde farklı kişiler üstlendiyse tek satırda birleştir, sorumluları virgülle yaz.\n"
-    "- Aksiyonlarda sorumlu adını katılımcı listesindeki yazımla ver, belli değilse 'belirsiz'; tarih yoksa '-'.\n"
+    "- Aksiyonlarda sorumlu adını katılımcı listesindeki yazımla ver, belli değilse 'belirsiz'; tarih yoksa '-'. "
+    "Aksiyonun 'madde' alanını asla boş bırakma.\n"
+    "- Açık sorularda aynı konudaki soruları tek soruda birleştir; birleştirilmiş kararlar ya da aksiyonlarla "
+    "cevaplanan soruyu çıkar; toplam en fazla 8 açık soru.\n"
     "- Yeni madde EKLEME; sözlük, gündem ya da genel bilgiden içerik üretme. İfadeleri kısaltabilirsin, anlamı "
     "değiştirme. [B..] etiketlerini çıktıya yazma. (?) işaretli belirsizlikleri koru.\n"
     + TURKCE_KURAL + " Yalnızca JSON döndür."
@@ -138,9 +163,6 @@ GENEL_SISTEM = (
 
 def token_tahmin(s):
     return max(1, len(s) // 3)
-
-
-_http = httpx.Client(verify=False, trust_env=False, timeout=30)
 
 
 def token_say(metin):
@@ -378,12 +400,20 @@ def normalize_ozet(o):
     temiz["aksiyonlar"] = []
     for a in aks:
         if isinstance(a, dict):
-            temiz["aksiyonlar"].append({"madde": _metin(a.get("madde") or ""),
+            madde = _metin(a.get("madde") or "").strip()
+            if not madde_dolu(madde):
+                continue          # bos maddeli aksiyon: tabloda '-' satiri, kisi listesinde bos is olur
+            temiz["aksiyonlar"].append({"madde": madde,
                                         "sorumlu": _metin(a.get("sorumlu") or "belirsiz") or "belirsiz",
                                         "tarih": _metin(a.get("tarih") or "-") or "-"})
-        elif _metin(a).strip():
-            temiz["aksiyonlar"].append({"madde": _metin(a), "sorumlu": "belirsiz", "tarih": "-"})
+        elif madde_dolu(_metin(a)):
+            temiz["aksiyonlar"].append({"madde": _metin(a).strip(), "sorumlu": "belirsiz", "tarih": "-"})
     return temiz
+
+
+def madde_dolu(madde):
+    """Aksiyon maddesi gercekten bir sey soyluyor mu? ('', '-', tek harf degil)"""
+    return len(_metin(madde).strip().strip(" -.")) >= 2
 
 
 def _ozet_dili(o):
@@ -458,7 +488,8 @@ def listeleri_tekille(bolumler):
         for k in b.get("kararlar") or []:
             ekle(sonuc["kararlar"], k, str)
         for a in b.get("aksiyonlar") or []:
-            ekle(sonuc["aksiyonlar"], a, lambda x: x.get("madde", ""), _aksiyon_birlestir)
+            if isinstance(a, dict) and madde_dolu(a.get("madde")):
+                ekle(sonuc["aksiyonlar"], a, lambda x: x.get("madde", ""), _aksiyon_birlestir)
         for q in b.get("acik_sorular") or []:
             ekle(sonuc["acik_sorular"], q, str)
     return sonuc
@@ -504,13 +535,19 @@ def listeleri_birlestir(bolumler, baglam, ilerleme=print):
     if not v:
         ilerleme("  ! liste birleştirme kesildi/bozuk, yerel birleştirme kullanıldı")
         return yedek
+    ham_aks = [a for a in (v.get("aksiyonlar") or []) if a]
+    bos_madde = sum(1 for a in ham_aks if not madde_dolu(a.get("madde") if isinstance(a, dict) else a))
+    if ham_aks and bos_madde / len(ham_aks) > 0.2:
+        ilerleme(f"  ! liste birleştirmesinde {bos_madde} aksiyonun maddesi boş, yerel birleştirme kullanıldı")
+        return yedek
     n = normalize_ozet({"ozet": "", **v})
     sonuc = {k: n[k] for k in ("kararlar", "aksiyonlar", "acik_sorular")}
     for alan in ("kararlar", "acik_sorular"):
         sonuc[alan] = [re.sub(r"^\[B\d+\]\s*", "", x) for x in sonuc[alan]]
     for a in sonuc["aksiyonlar"]:
         a["madde"] = re.sub(r"^\[B\d+\]\s*", "", a["madde"])
-    # karar->aksiyon tasimasi olabilecegi icin kayip iki listenin TOPLAMINDAN olculur
+    # karar->aksiyon tasimasi olabilecegi icin kayip iki listenin TOPLAMINDAN olculur; yalniz DOLU maddeler
+    # sayilir (bos maddeli aksiyonlar normalize_ozet'te atildi, eskiden 'var' sayilip yedege dusulmuyordu)
     kayip = (len(sonuc["kararlar"]) + len(sonuc["aksiyonlar"])
              < (len(yedek["kararlar"]) + len(yedek["aksiyonlar"]) + 1) // 2)
     if kayip or ingilizce_mi(_liste_dili(sonuc)):
@@ -639,6 +676,8 @@ def kisi_bazli(aksiyonlar):
     'Elif Bala, Cemil Kahveci' gibi ortak sorumlu her iki kisiye de yazilir."""
     gruplar = {}
     for a in aksiyonlar:
+        if not madde_dolu(a.get("madde")):
+            continue
         adlar = [x.strip() for x in re.split(r",|/| ve ", a.get("sorumlu") or "") if x.strip()] or ["belirsiz"]
         for ad in adlar:
             gruplar.setdefault(ad, [])
@@ -682,15 +721,126 @@ def not_markdown(genel, listeler, kaynak_fn=None):
     return "\n".join(parcalar) + "\n"
 
 
-def birlestir(bolumler, baglam, ilerleme=print, kaynak_fn=None, sablon="genel"):
+# ---------- not kalitesi: deterministik son islemler ----------
+# Karar/aksiyon ayrimi, bos maddeler ve gurultulu acik sorular yalnizca prompt'a birakilinca notta kaliyordu
+# (2026-09-23 notu: kararlarda aksiyonlar, 4-15. aksiyonlarin maddesi '-', 19 acik soru). Bunlar LLM'siz.
+
+_GELECEK_FIIL = re.compile(r"[ae]c[ae]k(?:t[ıi]r|l[ae]r(?:d[ıi]r)?)?$")     # -ecek/-acak(tır), paylaşılacak...
+_SON_PARANTEZ = re.compile(r"\s*\([^()]*\)\s*\.?\s*$")
+_TEK_AD_PARANTEZ = re.compile(r"\s*\((\w+)\)\s*(\.?)\s*$")                  # "... (Elif)" / "... (Elif)."
+_ALINTI_PARANTEZ = re.compile(r"\s*\([^()]*['\"“”‘’][^()]*\)\s*\.?\s*$")   # "... (Cemil: '...')"
+_ANLAMA_SORUSU = ("kimdir", "hangi sistemdir", "katılımcı listesinde", "katılımcılar arasında",
+                  "ne olduğu belirsiz", "ne olduğu anlaşılmadı")
+_BELIRSIZ = ("", "-", "belirsiz", "?")
+
+
+def _gecen_adlar(metin, katilimcilar):
+    """Metinde (ad ya da ad+soyad olarak) gecen katilimcilar, listedeki yazimla."""
+    adlar = []
+    for ad in katilimcilar or []:
+        ad = normalize_bosluk(ad)
+        if not ad or ad in _BELIRSIZ or tr_kucuk(ad) == "ben":
+            continue
+        if (ad_geciyor(ad, metin) or ad_geciyor(ad.split()[0], metin)) and ad not in adlar:
+            adlar.append(ad)
+    return adlar
+
+
+def karar_aksiyon_ayikla(listeler, katilimcilar=None):
+    """(a) bir aksiyona benzeyen karar (kelime koku benzerligi >= 0.6) kararlardan duser: ayni is iki yerde
+    yazilmasin. (b) metninde bir katilimci adi gecen VE gelecek zaman/edilgen is fiiliyle biten karar
+    ('Girdi tablolari Cemil tarafindan paylasilacak') bir istir: aksiyonlara o kisiyle tasinir.
+    Sondaki '(Cemil onerdi, Elif onayladi)' gibi karar vereni gosteren parantez ad olarak sayilmaz."""
+    aksiyonlar = [dict(a) for a in listeler.get("aksiyonlar") or []]
+    kararlar = []
+    for k in listeler.get("kararlar") or []:
+        if any(cift_yonlu_benzerlik(k, a.get("madde", "")) >= 0.6 for a in aksiyonlar):
+            continue
+        govde = _SON_PARANTEZ.sub("", k).strip()
+        adlar = _gecen_adlar(govde, katilimcilar)
+        kelimeler = re.findall(r"\w+", tr_kucuk(govde))
+        if adlar and kelimeler and _GELECEK_FIIL.search(kelimeler[-1]):
+            aksiyonlar.append({"madde": govde.rstrip(" ."), "sorumlu": ", ".join(adlar), "tarih": "-"})
+            continue
+        kararlar.append(k)
+    return dict(listeler, kararlar=kararlar, aksiyonlar=aksiyonlar)
+
+
+def karar_parantez_temizle(kararlar):
+    """Karar sonundaki tek kelimelik '(Elif)' parantezi anlamsiz: kaldirilir. '(?)' belirsizlik isareti kalir."""
+    return [_TEK_AD_PARANTEZ.sub(r"\2", k).strip() or k for k in kararlar]
+
+
+def belirsiz_aksiyonlari_ele(aksiyonlar, kaynak_fn=None):
+    """Sorumlusu belirsiz, en fazla 4 kelimelik ve transkriptte kaynak satiri bulunamayan aksiyon
+    ('Gereksinimleri anlamak') is degil genel ifadedir: duser. Kaynak bulucu yoksa dokunulmaz."""
+    if not kaynak_fn:
+        return list(aksiyonlar)
+    kalan = []
+    for a in aksiyonlar:
+        if (normalize_bosluk(a.get("sorumlu")).lower() in _BELIRSIZ and len(a.get("madde", "").split()) <= 4
+                and not kaynak_fn(a.get("madde", ""), None)):
+            continue
+        kalan.append(a)
+    return kalan
+
+
+def _soru_govdesi(q):
+    """Tekrar karsilastirmasi icin soru ekleri ('mi', 'var mi') atilir; iki soru bunlarla benzer gorunmesin
+    ya da bunlar yuzunden ayri kalmasin."""
+    return re.sub(r"(?<!\w)(mi|mı|mu|mü|var|yok|acaba)(?!\w)", " ", tr_kucuk(q))
+
+
+def acik_sorulari_temizle(sorular, kararlar=(), aksiyonlar=(), sonraki_adim="", en_fazla=10):
+    """(a) modelin kendi anlama sorulari ('X kimdir?', 'katilimci listesinde gecmiyor') atilir; (b) sondaki
+    alinti parantezi kirpilir; (c) birbirine benzeyenlerden (>= 0.6) ilki tutulur; (d) bir karar, aksiyon ya
+    da sonraki adimla cevaplanmis olan (>= 0.5) atilir; (e) en fazla `en_fazla` soru."""
+    cevaplar = [x for x in list(kararlar) + [a.get("madde", "") for a in aksiyonlar] if x]
+    cevaplar += [c for c in re.split(r"[.;]\s+", sonraki_adim or "") if c.strip(" -.")]
+    tutulan = []
+    for q in sorular:
+        q = normalize_bosluk(q)
+        k = tr_kucuk(q)
+        if any(i in k for i in _ANLAMA_SORUSU):
+            continue
+        if "(?)" in q and re.search(r"(?<!\w)(kim|kimin|nedir|hangi|ne olduğu)(?!\w)", k):
+            continue
+        q = _ALINTI_PARANTEZ.sub("", q).strip()
+        if len(q.strip(" -.?")) < 3:
+            continue
+        if any(cift_yonlu_benzerlik(_soru_govdesi(q), _soru_govdesi(t)) >= 0.6 for t in tutulan):
+            continue
+        if any(cift_yonlu_benzerlik(q, c) >= 0.5 for c in cevaplar):
+            continue
+        tutulan.append(q)
+    return tutulan[:en_fazla]
+
+
+def listeleri_temizle(listeler, katilimcilar=None, kaynak_fn=None):
+    """Birlestirilmis listelere karar/aksiyon ayrimi, karar parantezi ve belirsiz aksiyon temizligi."""
+    v = karar_aksiyon_ayikla(listeler, katilimcilar)
+    v["kararlar"] = karar_parantez_temizle(v["kararlar"])
+    v["aksiyonlar"] = belirsiz_aksiyonlari_ele([a for a in v["aksiyonlar"] if madde_dolu(a.get("madde"))], kaynak_fn)
+    return v
+
+
+def birlestir(bolumler, baglam, ilerleme=print, kaynak_fn=None, sablon="genel", katilimcilar=None,
+              aksiyon_fn=None, adim_fn=None):
+    """aksiyon_fn(aksiyonlar) -> aksiyonlar: cagiranin son islemi (motor: sorumlu dogrulama).
+    adim_fn(metin): arayuzdeki ilerleme seridi icin asama bildirimi."""
+    adim = adim_fn or (lambda m: None)
     bolumler = [b for b in bolumler if b]
     if not bolumler:
         return "_(özetlenebilen bölüm yok)_"
     talimat = SABLONLAR.get(sablon, SABLONLAR["genel"])[1]
     if talimat:
         baglam = f"{baglam}\nNot şablonu: {talimat}"
+    adim("Kararlar ve aksiyonlar birleştiriliyor")
     ilerleme("  kararlar, aksiyonlar ve açık sorular birleştiriliyor...")
-    listeler = listeleri_birlestir(bolumler, baglam, ilerleme)
+    listeler = listeleri_temizle(listeleri_birlestir(bolumler, baglam, ilerleme), katilimcilar, kaynak_fn)
+    if aksiyon_fn:
+        listeler["aksiyonlar"] = aksiyon_fn(listeler["aksiyonlar"])
+    adim("Özet paragrafı yazılıyor")
     ilerleme("  özet paragrafı yazılıyor...")
     genel = genel_ozet(bolumler, listeler, baglam, ilerleme)
     if len(genel["ozet"].strip(" -.")) < 40:
@@ -699,6 +849,8 @@ def birlestir(bolumler, baglam, ilerleme=print, kaynak_fn=None, sablon="genel"):
         genel["sonraki_adim"] = yedek_sonraki_adim(listeler)
     if len(bolumler) > 1:
         genel["konu_akisi"] = konu_akisi(bolumler)
+    listeler["acik_sorular"] = acik_sorulari_temizle(listeler["acik_sorular"], listeler["kararlar"],
+                                                     listeler["aksiyonlar"], genel.get("sonraki_adim", ""))
     return not_markdown(genel, listeler, kaynak_fn)
 
 

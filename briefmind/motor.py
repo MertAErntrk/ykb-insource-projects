@@ -6,14 +6,15 @@ Akis:  satir_ekle() -> sozluk (birebir+bulanik) -> altyazi.jsonl -> parca
        bitir()             -> son parcayi kapatir, ozetleri bekler, bekleyen onerileri verir
        kararlari_uygula()  -> onaylananlar sozluge + tum parcalara uygulanir, degisen parcalar
                               yeniden ozetlenir (sadece onlar)
-       notu_uret()         -> birlestirme -> not.md
+       notu_uret()         -> birlestirme -> sorumlu dogrulama -> dayanak kontrolu -> not.md
+       yeniden_ozetle()    -> (Gecmis) sozluk tum parcalara, TUM parcalar yeniden duzeltme + ozet
 
 Disk (toplantilar/<tarih>_<slug>/): meta.json, altyazi.jsonl, parcalar/parca_NNN.json, oneriler.json, not.md
-olay(tip, veri) geri cagrisi: "satir", "parca_kapandi", "parca_ozetlendi", "oneri", "log"
+olay(tip, veri) geri cagrisi: "satir", "parca_kapandi", "parca_ozetlendi", "oneri", "log",
+       "adim" ({"metin", "no", "toplam"}: not uretiminin/yeniden ozetlemenin o anki asamasi; arayuz seridi)
 """
 import concurrent.futures as cf
 import datetime as dt
-import difflib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import time
 
 import llm
 import tarih as tarih_mod
+from metin import ad_geciyor, metin_benzerligi, tr_kucuk
 from sozluk import Sozluk, normalize
 
 KOK = "toplantilar"
@@ -140,30 +142,6 @@ def _sn(x):
         return 0
 
 
-def _kelimeler(metin):
-    m = (metin or "").replace("İ", "i").replace("I", "ı").lower()
-    for a, b in zip("çğıöşüâî", "cgiosuai"):
-        m = m.replace(a, b)
-    return [k[:4] for k in re.findall(r"[a-z0-9]+", m)]
-
-
-def metin_benzerligi(a, b):
-    """Whisper cumlesi ile altyazi satiri ayni sozu mu tasiyor? (0-1)
-    Kelime kokleri (ilk 4 harf) sirali eslenir; Teams'in bozuk yazdigi kelimelerde bile ortak kokler kalir.
-    Eskiden harf duzeyinde bakiliyordu: alakasiz iki Turkce cumle bile 0.29-0.35 cikip esigi (0.25) asiyor,
-    birden fazla kisi konusurken cumle rastgele birine yaziliyordu. Altyazi satiri uzun bir paragraf
-    olabilecegi icin 4+ kelimelik cumlede 'kapsanma' orani da hesaba katilir."""
-    ka, kb = _kelimeler(a), _kelimeler(b)
-    if not ka or not kb:
-        return 0.0
-    sm = difflib.SequenceMatcher(None, ka, kb, autojunk=False)
-    oran = sm.ratio()
-    if len(ka) >= 4:
-        ortak = sum(blok.size for blok in sm.get_matching_blocks())
-        oran = max(oran, ortak / len(ka))
-    return oran
-
-
 def blok_metni(satirlar):
     birlesik = []
     for s in satirlar:
@@ -218,6 +196,10 @@ class Motor:
     def log(self, m):
         self._olay("log", m)
 
+    def adim(self, metin, no=None, toplam=None):
+        """Uzun islerin (not uretimi, yeniden ozetleme) asamasi: arayuz ilerleme seridine yazar."""
+        self._olay("adim", {"metin": metin, "no": no, "toplam": toplam})
+
     def _llm_gunluk(self, kayit):
         """LLM cagri istatistigi (finish_reason, token, sure; icerik yok) -> llm_log.jsonl.
         'Not neden yarim/Ingilizce?' sorusunda ilk bakilacak yer."""
@@ -244,8 +226,11 @@ class Motor:
         return os.path.join(self.parca_klasor, f"parca_{no:03d}.json")
 
     def parca_oku(self, no):
-        with open(self.parca_yolu(no), encoding="utf-8") as f:
-            return json.load(f)
+        # kilit: paralel isciler ayni anda yazarken (parca_yaz dosyayi once bosaltir) yarim JSON okunmasin;
+        # _onceki_konular bir onceki parcayi okurken o parcanin ozeti yaziliyor olabilir
+        with self.kilit:
+            with open(self.parca_yolu(no), encoding="utf-8") as f:
+                return json.load(f)
 
     def parca_yaz(self, veri):
         with self.kilit:
@@ -572,9 +557,27 @@ class Motor:
         self.onerileri_yaz()
         if not onay:
             return 0
+        kirli = self.sozlugu_uygula()
+        if kirli:
+            self.log(f"{len(kirli)} parça düzeltmelerle yeniden özetleniyor...")
+
+            def isle(iv):
+                i, v = iv
+                self.adim(f"Parça {v['sira']} düzeltmelerle yeniden özetleniyor ({i}/{len(kirli)})", i, len(kirli))
+                self._isle(v, False)
+            with cf.ThreadPoolExecutor(max_workers=PARALEL) as ex:
+                list(ex.map(isle, enumerate(kirli, 1)))
+        return len(kirli)
+
+    def sozlugu_uygula(self):
+        """Sozlugu (onayli alias'lar) tum parcalarin satirlarina uygular; metni degisen parcalarin ozeti
+        silinir ve diske yazilir. Dondurur: degisen parcalar (veri sozlukleri)."""
         kirli = []
         for no in range(1, self.parca_no + 1):
-            veri = self.parca_oku(no)
+            try:
+                veri = self.parca_oku(no)
+            except Exception:
+                continue
             degisti = False
             for s in veri["satirlar"]:
                 yeni, deg = self.sozluk.uygula(s["text"])
@@ -584,17 +587,55 @@ class Motor:
                 veri["ozet"] = None
                 self.parca_yaz(veri)
                 kirli.append(veri)
-        if kirli:
-            self.log(f"{len(kirli)} parça düzeltmelerle yeniden özetleniyor...")
-            with cf.ThreadPoolExecutor(max_workers=PARALEL) as ex:
-                list(ex.map(lambda v: self._isle(v, False), kirli))
-        return len(kirli)
+        return kirli
+
+    def not_yedekle(self):
+        """Var olan not.md'yi not.md.yedek-YYYYMMDD-HHMM olarak kopyalar (yeniden ozetleme eskisini ezmesin).
+        Dondurur: yedek yolu ya da None."""
+        yol = os.path.join(self.klasor, "not.md")
+        if not os.path.exists(yol):
+            return None
+        hedef = yol + dt.datetime.now().strftime(".yedek-%Y%m%d-%H%M")
+        n = 2
+        while os.path.exists(hedef):
+            hedef = yol + dt.datetime.now().strftime(".yedek-%Y%m%d-%H%M") + f"-{n}"
+            n += 1
+        with open(yol, encoding="utf-8") as f, open(hedef, "w", encoding="utf-8") as g:
+            g.write(f.read())
+        return hedef
+
+    def yeniden_ozetle(self):
+        """Gecmis -> 'Yeniden ozetle': sozluk (sonradan buyumus olabilir) tum parcalara bir kez uygulanir,
+        sonra TUM parcalar sifirdan (duzeltme + ozet) PARALEL islenir. Dondurur: islenen parca sayisi."""
+        self.adim("Sözlük parçalara uygulanıyor")
+        degisen = self.sozlugu_uygula()
+        if degisen:
+            self.log(f"sözlük {len(degisen)} parçada metni düzeltti")
+        toplam = self.parca_no
+        if not toplam:
+            return 0
+        self.log(f"{toplam} parça yeniden özetleniyor ({PARALEL} paralel)...")
+
+        def isle(no):
+            self.adim(f"Parça {no}/{toplam} yeniden özetleniyor", no, toplam)
+            try:
+                veri = self.parca_oku(no)
+            except Exception as e:
+                self.log(f"✖ parça {no} okunamadı: {e!r}")
+                return
+            veri["ozet"], veri["duzeltmeler"] = None, []
+            self._isle(veri, self.duzelt)
+
+        with cf.ThreadPoolExecutor(max_workers=PARALEL) as ex:
+            list(ex.map(isle, range(1, toplam + 1)))
+        return toplam
 
     def notu_uret(self):
         bolumler, eksik = [], []
         for no in range(1, self.parca_no + 1):
             veri = self.parca_oku(no)
             if veri.get("ozet") is None:
+                self.adim(f"Parça {no}/{self.parca_no} özetleniyor", no, self.parca_no)
                 self.log(f"  parça {no} özetleniyor...")
                 self._isle(veri, False)
                 veri = self.parca_oku(no)
@@ -608,9 +649,15 @@ class Motor:
                 self.log(f"  ! parça {no} notta yer almayacak ({aralik})")
         self.log("bölümler birleştiriliyor...")
         transkript = self.transkript_metni()
-        kaynak_fn = kaynak_bulucu(self.tum_satirlar())
+        satirlar = self.tum_satirlar()
+        kaynak_fn = kaynak_bulucu(satirlar)
+        asamalar = {"Kararlar ve aksiyonlar birleştiriliyor": 1, "Özet paragrafı yazılıyor": 2}
         not_md = f"# {self.baslik} — {self.tarih.isoformat()}\n\n" + llm.birlestir(
-            bolumler, self.baglam(transkript), self.log, kaynak_fn=kaynak_fn, sablon=self.sablon)
+            bolumler, self.baglam(transkript), self.log, kaynak_fn=kaynak_fn, sablon=self.sablon,
+            katilimcilar=self.katilimcilar,
+            aksiyon_fn=lambda aks: sorumlu_dogrula(aks, satirlar, self.ben),
+            adim_fn=lambda m: self.adim(m, asamalar.get(m), 4))
+        self.adim("Dayanak kontrolü", 3, 4)
         bolum_ozetleri = "\n".join(b.get("ozet", "") for b in bolumler)
         not_md, atilan = dayanak_kontrolu(not_md, transkript, ozet_kaynak=bolum_ozetleri)
         for madde in atilan:
@@ -619,6 +666,7 @@ class Motor:
             # sessizce eksik not yerine okuyana hangi araligin notta olmadigini soyle
             not_md = not_md.rstrip("\n") + "\n\n## Eksik bölümler\n" + "\n".join(
                 f"- {a} arası özetlenemedi; ayrıntı için transkripte bakın." for a in eksik) + "\n"
+        self.adim("Not kaydediliyor", 4, 4)
         with open(os.path.join(self.klasor, "not.md"), "w", encoding="utf-8") as f:
             f.write(not_md)
         self.meta_yaz("tamam")
@@ -654,34 +702,92 @@ class Motor:
 
     # ---------- diskten devam ----------
     @classmethod
-    def yukle(cls, klasor, sozluk=None, olay=None):
+    def yukle(cls, klasor, sozluk=None, olay=None, duzelt=True, ben=None, sablon="genel"):
         with open(os.path.join(klasor, "meta.json"), encoding="utf-8") as f:
             meta = json.load(f)
         m = cls(klasor, meta["baslik"], dt.date.fromisoformat(meta["tarih"]), sozluk,
-                meta.get("katilimcilar"), meta.get("gundem", ""), olay=olay,
-                kaynak=meta.get("kaynak", "altyazi"))
+                meta.get("katilimcilar"), meta.get("gundem", ""), duzelt=duzelt, olay=olay,
+                kaynak=meta.get("kaynak", "altyazi"), ben=ben, sablon=sablon)
         return m
 
 
-def kaynak_bulucu(satirlar, esik=0.3):
-    """Notun her maddesini transkriptte en iyi karsilayan satira baglar -> fn(metin, sorumlu) -> 'HH:MM:SS'.
-    Kelime kokleri ortakligi olculur; aksiyonda sorumlunun kendi satiri hafifce one alinir
+def kaynak_satiri_bulucu(satirlar, esik=0.3):
+    """Notun maddesini transkriptte en iyi karsilayan SATIRA baglar -> fn(metin, sorumlu) -> satir | None.
+    Kelime kokleri ortakligi olculur; sorumlu verilirse onun kendi satiri hafifce one alinir
     ('ben yaparim' diyen kisi)."""
-    dizin = [(s["ts"], s.get("speaker", ""), _kokler(s.get("text", ""))) for s in satirlar if s.get("text")]
+    dizin = [(s, _kokler(s.get("text", ""))) for s in satirlar if s.get("text")]
 
     def bul(metin, sorumlu=None):
         mk = _kokler(metin) - {"ve", "ile", "icin", "olan", "olarak", "yapil", "edil"}
         if not mk or not dizin:
             return None
         en_iyi, en_puan = None, 0.0
-        for ts, kim, kk in dizin:
+        for s, kk in dizin:
             puan = len(mk & kk) / len(mk)
+            kim = s.get("speaker", "")
             if sorumlu and kim and normalize(sorumlu).split()[:1] == normalize(kim).split()[:1]:
                 puan += 0.1
             if puan > en_puan:
-                en_iyi, en_puan = ts, puan
+                en_iyi, en_puan = s, puan
         return en_iyi if en_puan >= esik else None
     return bul
+
+
+def kaynak_bulucu(satirlar, esik=0.3):
+    """Notun her maddesini transkriptte en iyi karsilayan satira baglar -> fn(metin, sorumlu) -> 'HH:MM:SS'."""
+    bul = kaynak_satiri_bulucu(satirlar, esik)
+
+    def ts(metin, sorumlu=None):
+        s = bul(metin, sorumlu)
+        return s["ts"] if s else None
+    return ts
+
+
+_BIRINCI_TEKIL = re.compile(
+    r"(?<!\w)(ben|bana|benim|bende|bizzat)(?!\w)"
+    r"|\w{2,}(?:[ae]c[ae]ğ[ıi]m|[ıiuü]yorum)(?!\w)"            # yapacağım, hazırlayacağım, bakıyorum
+    r"|\w{3,}(?:[ae]r[ıi]m|[ıi]r[ıi]m|[uü]r[uü]m)(?!\w)")   # yaparım, hazırlarım, gönderirim, bulurum
+
+
+def _ayni_kisi(a, b):
+    """'Mert' ~ 'Mert Ali Erenturk': ilk ad ayniysa ayni kisi."""
+    a, b = normalize(a or "").split()[:1], normalize(b or "").split()[:1]
+    return bool(a) and a == b
+
+
+def sorumlu_dogrula(aksiyonlar, satirlar, ben=None):
+    """K8: aksiyon sorumlusunu transkriptteki kaynak satiriyla dogrular. Kaynak satiri birinci tekil sahis
+    tasiyorsa ('ben hazirlarim', 'yapacagim', 'bana iletin') o sozu SOYLEYEN kisi (S) isin sahibidir:
+    sorumlu 'belirsiz' ise S yazilir; sorumlu X, S degilse ve X o satirda adiyla gecmiyorsa 'X (?)' olur.
+    Konusmacisi bilinmeyen ('?') satira dokunulmaz. Dondurur: yeni liste (girdi degismez)."""
+    bul = kaynak_satiri_bulucu(satirlar)
+    sonuc = []
+    for a in aksiyonlar:
+        a = dict(a)
+        sonuc.append(a)
+        s = bul(a.get("madde", ""))
+        if not s:
+            continue
+        kim = (s.get("speaker") or "").strip()
+        if kim in ("ben", "Ben") and ben:
+            kim = ben
+        if not kim or kim == "?":
+            continue
+        if not _BIRINCI_TEKIL.search(tr_kucuk(s.get("text"))):
+            continue
+        sorumlu = (a.get("sorumlu") or "").strip()
+        if sorumlu.lower() in ("", "-", "belirsiz", "?"):
+            a["sorumlu"] = kim
+            continue
+        if sorumlu.endswith("(?)"):
+            continue
+        adlar = [x.strip() for x in re.split(r",|/| ve ", sorumlu) if x.strip()]
+        if any(_ayni_kisi(x, kim) for x in adlar):
+            continue
+        if any(ad_geciyor(x, s.get("text")) or ad_geciyor(x.split()[0], s.get("text")) for x in adlar):
+            continue                    # 'Berk'e ilet, o baksin' gibi: X satirda adiyla geciyor
+        a["sorumlu"] = f"{sorumlu} (?)"
+    return sonuc
 
 
 def saklama_uygula(gun, kok=None, bugun=None):
