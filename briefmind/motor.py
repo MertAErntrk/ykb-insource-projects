@@ -176,12 +176,13 @@ def blok_metni(satirlar):
 
 class Motor:
     def __init__(self, klasor, baslik, tarih, sozluk=None, katilimcilar=None, gundem="",
-                 duzelt=True, olay=None, kaynak="altyazi", ben=None):
+                 duzelt=True, olay=None, kaynak="altyazi", ben=None, sablon="genel"):
         self.klasor, self.baslik, self.tarih = klasor, baslik, tarih
         self.sozluk = sozluk or Sozluk()
         self.katilimcilar = list(katilimcilar or [])
         self.gundem = gundem
         self.duzelt = duzelt
+        self.sablon = sablon                 # not sablonu (llm.SABLONLAR)
         self._olay = olay or (lambda tip, veri: None)
         self.parca_klasor = os.path.join(klasor, "parcalar")
         os.makedirs(self.parca_klasor, exist_ok=True)
@@ -203,7 +204,15 @@ class Motor:
         self.kilit = threading.Lock()
         self._gunluk_kilit = threading.Lock()
         llm.GUNLUK_FN = self._llm_gunluk
-        self.meta_yaz("devam")
+        # Var olan kaydi yuklerken durumunu koru: eskiden Gecmis'te bir notu yalnizca ACMAK bile toplantiyi
+        # 'devam' (yarim) olarak isaretliyordu (ve saklama suresi 'tamam' kayitlari bulamiyordu).
+        onceki = None
+        try:
+            with open(os.path.join(klasor, "meta.json"), encoding="utf-8") as f:
+                onceki = json.load(f).get("durum")
+        except Exception:
+            pass
+        self.meta_yaz(onceki or "devam")
 
     # ---------- olay/log ----------
     def log(self, m):
@@ -218,11 +227,18 @@ class Motor:
 
     # ---------- disk ----------
     def meta_yaz(self, durum):
-        with open(os.path.join(self.klasor, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"baslik": self.baslik, "tarih": self.tarih.isoformat(), "durum": durum,
-                       "katilimcilar": self.katilimcilar, "gundem": self.gundem, "parca": self.parca_no,
-                       "kaynak": self.kaynak},
-                      f, ensure_ascii=False, indent=1)
+        yol = os.path.join(self.klasor, "meta.json")
+        meta = {}
+        try:                                  # bilinmeyen alanlar (ör. transkript_silindi) korunur
+            with open(yol, encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+        meta.update({"baslik": self.baslik, "tarih": self.tarih.isoformat(), "durum": durum,
+                     "katilimcilar": self.katilimcilar, "gundem": self.gundem, "parca": self.parca_no,
+                     "kaynak": self.kaynak})
+        with open(yol, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=1)
 
     def parca_yolu(self, no):
         return os.path.join(self.parca_klasor, f"parca_{no:03d}.json")
@@ -592,7 +608,9 @@ class Motor:
                 self.log(f"  ! parça {no} notta yer almayacak ({aralik})")
         self.log("bölümler birleştiriliyor...")
         transkript = self.transkript_metni()
-        not_md = f"# {self.baslik} — {self.tarih.isoformat()}\n\n" + llm.birlestir(bolumler, self.baglam(transkript), self.log)
+        kaynak_fn = kaynak_bulucu(self.tum_satirlar())
+        not_md = f"# {self.baslik} — {self.tarih.isoformat()}\n\n" + llm.birlestir(
+            bolumler, self.baglam(transkript), self.log, kaynak_fn=kaynak_fn, sablon=self.sablon)
         bolum_ozetleri = "\n".join(b.get("ozet", "") for b in bolumler)
         not_md, atilan = dayanak_kontrolu(not_md, transkript, ozet_kaynak=bolum_ozetleri)
         for madde in atilan:
@@ -606,6 +624,31 @@ class Motor:
         self.meta_yaz("tamam")
         return not_md
 
+    def tum_satirlar(self):
+        """Tum parcalarin (duzeltilmis) satirlari + acik parca, kronolojik."""
+        satirlar = []
+        for no in range(1, self.parca_no + 1):
+            try:
+                satirlar += self.parca_oku(no)["satirlar"]
+            except Exception:
+                pass
+        return satirlar + list(self.mevcut)
+
+    def soru_sor(self, soru):
+        """Toplantiya soru: transkript bolumleri (zaman damgali) uzerinden kurum ici LLM cevaplar."""
+        bolumler = []
+        for no in range(1, self.parca_no + 1):
+            try:
+                v = self.parca_oku(no)
+            except Exception:
+                continue
+            satirlar = "\n".join(f"[{s['ts']}] {s['speaker']}: {s['text']}" for s in v["satirlar"])
+            if satirlar:
+                bolumler.append((f"{v.get('baslangic', '')}–{v.get('bitis', '')}", satirlar))
+        if self.mevcut:
+            bolumler.append(("açık parça", "\n".join(f"[{s['ts']}] {s['speaker']}: {s['text']}" for s in self.mevcut)))
+        return llm.toplantiya_sor(soru, bolumler, self.baglam())
+
     def kapat(self):
         self.havuz.shutdown(wait=True)
 
@@ -618,6 +661,67 @@ class Motor:
                 meta.get("katilimcilar"), meta.get("gundem", ""), olay=olay,
                 kaynak=meta.get("kaynak", "altyazi"))
         return m
+
+
+def kaynak_bulucu(satirlar, esik=0.3):
+    """Notun her maddesini transkriptte en iyi karsilayan satira baglar -> fn(metin, sorumlu) -> 'HH:MM:SS'.
+    Kelime kokleri ortakligi olculur; aksiyonda sorumlunun kendi satiri hafifce one alinir
+    ('ben yaparim' diyen kisi)."""
+    dizin = [(s["ts"], s.get("speaker", ""), _kokler(s.get("text", ""))) for s in satirlar if s.get("text")]
+
+    def bul(metin, sorumlu=None):
+        mk = _kokler(metin) - {"ve", "ile", "icin", "olan", "olarak", "yapil", "edil"}
+        if not mk or not dizin:
+            return None
+        en_iyi, en_puan = None, 0.0
+        for ts, kim, kk in dizin:
+            puan = len(mk & kk) / len(mk)
+            if sorumlu and kim and normalize(sorumlu).split()[:1] == normalize(kim).split()[:1]:
+                puan += 0.1
+            if puan > en_puan:
+                en_iyi, en_puan = ts, puan
+        return en_iyi if en_puan >= esik else None
+    return bul
+
+
+def saklama_uygula(gun, kok=None, bugun=None):
+    """KVKK: notu uretilmis ('tamam') ve `gun` gunden eski toplantilarin TRANSKRIPTINI siler; not.md,
+    meta.json ve parca ozetleri kalir. gun <= 0: kapali. Dondurur: temizlenen klasor sayisi."""
+    kok = kok or KOK
+    if not gun or gun <= 0 or not os.path.isdir(kok):
+        return 0
+    bugun = bugun or dt.date.today()
+    sayi = 0
+    for ad in os.listdir(kok):
+        k = os.path.join(kok, ad)
+        try:
+            with open(os.path.join(k, "meta.json"), encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("durum") != "tamam" or meta.get("transkript_silindi"):
+                continue
+            if (bugun - dt.date.fromisoformat(meta["tarih"])).days < gun:
+                continue
+        except Exception:
+            continue
+        for dosya in ("altyazi.jsonl", "oneriler.json"):
+            if os.path.exists(os.path.join(k, dosya)):
+                os.remove(os.path.join(k, dosya))
+        pk = os.path.join(k, "parcalar")
+        for f_ in (os.listdir(pk) if os.path.isdir(pk) else []):
+            yol = os.path.join(pk, f_)
+            try:
+                with open(yol, encoding="utf-8") as f:
+                    v = json.load(f)
+                v["satirlar"], v["duzeltmeler"] = [], []
+                with open(yol, "w", encoding="utf-8") as f:
+                    json.dump(v, f, ensure_ascii=False, indent=1)
+            except Exception:
+                continue
+        meta["transkript_silindi"] = bugun.isoformat()
+        with open(os.path.join(k, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=1)
+        sayi += 1
+    return sayi
 
 
 def yeni_klasor(baslik, tarih):

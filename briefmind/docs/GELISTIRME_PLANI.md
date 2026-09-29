@@ -156,7 +156,7 @@ BriefMind'in bu ürünlerde olmayan güçlü yanı: **Veri kurum dışına çık
 | Maddeden kaynağa gitme | Maddeye tıklayınca kaydın o anı açılır | Yok | **N2:** her karar/aksiyon için kaynak satırı ve zamanı; Not sekmesinde tıklayınca transkript | Yüksek |
 | Notu düzenleme | Var | Yok (yalnızca yeniden üretme) | **A13:** Not sekmesinde düzenleme ve kaydetme | Orta |
 | Toplantı türüne göre şablon | Var (satış, 1:1, stand-up…) | Tek şablon | **N3:** haftalık durum, karar toplantısı, 1:1, çalıştay şablonları | Orta |
-| Önceki toplantıdan devam | Seri toplantıda açık aksiyonları hatırlatır | Yok (seri bilgisi var: `seri` slug) | **N4:** aynı serinin önceki notundaki açık aksiyon ve soruları yeni notta "Önceki toplantıdan" olarak göster | Yüksek |
+| Önceki toplantıdan devam | Seri toplantıda açık aksiyonları hatırlatır | — | **İstenmedi** (kullanıcı kararı, 2026-09-29) | — |
 | Toplantıya soru sorma ("Ask") | Var | Yok | **N5:** Not sekmesinde "Bu toplantıda X hakkında ne dendi?" (transkript + kurum içi LLM) | Orta |
 | Toplantılar arası arama | Var | Yok | **N6:** Geçmiş sekmesinde tüm transkript ve notlarda arama | Orta |
 | Konuşmacı istatistikleri | Konuşma süresi ve payı | Yok | **N7:** kişi başına konuşma süresi (satır zamanlarından) | Düşük |
@@ -167,6 +167,25 @@ BriefMind'in bu ürünlerde olmayan güçlü yanı: **Veri kurum dışına çık
 | Bilgilendirme ve saklama | Katılımcılara bildirim, saklama süresi | Yok | **N11:** toplantı sohbetine "not alınıyor" bildirimi taslağı, `toplantilar/` için saklama süresi (ör. 90 gün sonra transkripti sil). KVKK açısından önemli. | Yüksek |
 
 ### Yol haritasına etkisi
-- **Faz 3 (not kalitesi)** öne alındı: N1, N2, N4, N11.
+- **Faz 3 (not kalitesi)** öne alındı: N1, N2, N11. (N4 istenmedi.)
 - **Faz 4'e eklenenler:** N5, N6, N8, A13.
 - **Faz 5'e eklenenler:** N3, N7, N9, N10.
+
+## 11. Durum güncellemesi (2026-09-29, akşam)
+
+Tamamlanan karşılaştırma maddeleri:
+
+| Madde | Nasıl kullanılır |
+|---|---|
+| N1 Kişiye göre iş listesi | Notta "## Kişiye göre iş listesi": kişi başına iş sayısı ve işler; ortak sorumlu iki kişiye de yazılır, `belirsiz` sonda |
+| N2 Kaynağa gitme | Karar ve aksiyonların yanında `⏱10:12:03`. Not sekmesinde tıklayınca transkript o anda açılır (±90 sn, satır vurgulu) |
+| N3 Not şablonları | Ayarlar → Not şablonu: Genel, Haftalık durum, Karar toplantısı, Birebir, Çalıştay |
+| N5 Toplantıya soru | Not sekmesi → "Bu toplantıya soru sor". Cevap yalnızca transkriptten, zamanlarıyla (tıklanabilir) |
+| N6 Toplantılar arası arama | Geçmiş sekmesi → arama kutusu. Transkript ve notlarda arar; büyük/küçük harf ve Türkçe karakter duyarsız; sonuca tıklayınca o an açılır |
+| N8 Paylaşım | Not sekmesi → "Kişiye özel e-postalar" (herkese yalnızca kendi işleri, taslak olarak), "Word", "PDF" |
+| N11 Bilgilendirme ve saklama | Canlı sekmesi → "Katılımcıları bilgilendir" (metni panoya kopyalar, Teams sohbetine yapıştırılır). Ayarlar → Transkript saklama süresi: notu üretilmiş toplantıların transkripti N gün sonra silinir, not ve özetler kalır. Varsayılan: kapalı. |
+| A13 Not düzenleme | Not sekmesi → "Düzenle" / "Kaydet" (not.md'ye yazılır) |
+
+Bu sırada düzeltilen hata: Geçmiş'te bir notu yalnızca açmak toplantıyı "yarım" olarak işaretliyordu.
+
+Kalanlar: K5 (çakışmada altyazı), K8 (sorumlu doğrulama), A5 (ses normalizasyonu), A6, A7, A8 (CA sertifikası, bilgi bekliyor), A11, A12, N7 (konuşma süreleri), N9 (Jira/Planner), N10 (canlı ara özet).

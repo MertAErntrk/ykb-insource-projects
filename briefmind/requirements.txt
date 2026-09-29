@@ -8,3 +8,4 @@ numpy
 sounddevice
 soundcard
 soundfile
+python-docx

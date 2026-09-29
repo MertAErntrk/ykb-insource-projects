@@ -61,6 +61,15 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 
 Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplantılarımda her zaman alt yazıları göster*.
 
+## Notla çalışma
+
+- **Kaynağa git:** Karar ve aksiyonların yanındaki `⏱10:12:03`'e tıklayınca transkript o anda açılır.
+- **Soru sor:** Not sekmesindeki kutuya "Test ortamı ne zaman hazır, kim söyledi?" gibi sorular yazılır; cevap yalnızca bu toplantının transkriptinden gelir.
+- **Ara:** Geçmiş sekmesinde tüm toplantıların transkript ve notlarında arama yapılır.
+- **Düzenle / Word / PDF / Kişiye özel e-postalar:** Not sekmesindeki düğmeler.
+- **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi.
+- **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
+
 ## Test
 
 ```powershell

@@ -622,18 +622,59 @@ def _hucre(x):
     return normalize_bosluk(x).replace("|", "/") or "-"
 
 
-def not_markdown(genel, listeler):
-    """Notun Markdown'u kodda kurulur: basliklar sabit ve Turkce, tablo hic yarim kalmaz."""
-    def maddeler(lst):
-        return "\n".join(f"- {normalize_bosluk(x)}" for x in lst) or "-"
+KAYNAK_ISARETI = "⏱"         # "⏱10:12:03": notta kaynak zamani; arayuz tiklaninca transkripti o anda acar
+
+SABLONLAR = {
+    "genel": ("Genel", ""),
+    "haftalik": ("Haftalık durum", "Özet paragrafını ilerleme, engeller ve bir sonraki dönem planı ekseninde yaz."),
+    "karar": ("Karar toplantısı", "Özet paragrafında hangi seçeneklerin konuşulduğunu ve kararların gerekçesini öne çıkar."),
+    "birebir": ("Birebir (1:1)", "Özet kısa olsun; konuşulan konuları, geri bildirimleri ve varılan anlaşmaları yaz."),
+    "calistay": ("Çalıştay / beyin fırtınası", "Özet paragrafında ortaya atılan fikirleri ve öne çıkanları grupla; "
+                                               "fikirleri karar gibi yazma."),
+}
+
+
+def kisi_bazli(aksiyonlar):
+    """Aksiyonlari sorumluya gore gruplar: [(ad, [madde, ...])], en cok isi olan once, 'belirsiz' sonda.
+    'Elif Bala, Cemil Kahveci' gibi ortak sorumlu her iki kisiye de yazilir."""
+    gruplar = {}
+    for a in aksiyonlar:
+        adlar = [x.strip() for x in re.split(r",|/| ve ", a.get("sorumlu") or "") if x.strip()] or ["belirsiz"]
+        for ad in adlar:
+            gruplar.setdefault(ad, [])
+            if a["madde"] not in gruplar[ad]:
+                gruplar[ad].append(a["madde"])
+    return sorted(gruplar.items(), key=lambda kv: (kv[0] == "belirsiz", -len(kv[1]), kv[0]))
+
+
+def not_markdown(genel, listeler, kaynak_fn=None):
+    """Notun Markdown'u kodda kurulur: basliklar sabit ve Turkce, tablo hic yarim kalmaz.
+    kaynak_fn(metin, sorumlu) -> 'HH:MM:SS' | None: maddenin transkriptte gectigi an."""
+    def kaynak(metin, sorumlu=None):
+        ts = kaynak_fn(metin, sorumlu) if kaynak_fn else None
+        return f"{KAYNAK_ISARETI}{ts}" if ts else ""
+
+    def maddeler(lst, isaret=False):
+        return "\n".join(f"- {normalize_bosluk(x)}" + (f" {kaynak(x)}".rstrip() if isaret else "")
+                         for x in lst) or "-"
     parcalar = ["## Özet", genel["ozet"] or "-", ""]
     if genel.get("konu_akisi"):
         parcalar += ["## Konu akışı", genel["konu_akisi"], ""]
-    parcalar += ["## Kararlar", maddeler(listeler["kararlar"]), "", "## Aksiyonlar"]
+    parcalar += ["## Kararlar", maddeler(listeler["kararlar"], isaret=True), "", "## Aksiyonlar"]
     if listeler["aksiyonlar"]:
-        parcalar += ["| # | Madde | Sorumlu | Tarih |", "|---|---|---|---|"]
-        parcalar += [f"| {i} | {_hucre(a['madde'])} | {_hucre(a['sorumlu'])} | {_hucre(a['tarih'])} |"
-                     for i, a in enumerate(listeler["aksiyonlar"], 1)]
+        basliklar = "| # | Madde | Sorumlu | Tarih |" + (" Kaynak |" if kaynak_fn else "")
+        parcalar += [basliklar, "|---|---|---|---|" + ("---|" if kaynak_fn else "")]
+        for i, a in enumerate(listeler["aksiyonlar"], 1):
+            satir = f"| {i} | {_hucre(a['madde'])} | {_hucre(a['sorumlu'])} | {_hucre(a['tarih'])} |"
+            if kaynak_fn:
+                satir += f" {kaynak(a['madde'], a['sorumlu']) or '-'} |"
+            parcalar.append(satir)
+        gruplar = kisi_bazli(listeler["aksiyonlar"])
+        if len(listeler["aksiyonlar"]) >= 4 and len(gruplar) >= 2:
+            # 'aksiyon/karar/soru' kelimesi gecmeyen baslik: dayanak kontrolu bu ozet satirlarini denetlemez
+            parcalar += ["", "## Kişiye göre iş listesi"]
+            parcalar += [f"- {ad} ({len(isler)}): " + "; ".join(normalize_bosluk(x).rstrip(".") for x in isler)
+                         for ad, isler in gruplar]
     else:
         parcalar.append("-")
     parcalar += ["", "## Açık sorular", maddeler(listeler["acik_sorular"]), "",
@@ -641,10 +682,13 @@ def not_markdown(genel, listeler):
     return "\n".join(parcalar) + "\n"
 
 
-def birlestir(bolumler, baglam, ilerleme=print):
+def birlestir(bolumler, baglam, ilerleme=print, kaynak_fn=None, sablon="genel"):
     bolumler = [b for b in bolumler if b]
     if not bolumler:
         return "_(özetlenebilen bölüm yok)_"
+    talimat = SABLONLAR.get(sablon, SABLONLAR["genel"])[1]
+    if talimat:
+        baglam = f"{baglam}\nNot şablonu: {talimat}"
     ilerleme("  kararlar, aksiyonlar ve açık sorular birleştiriliyor...")
     listeler = listeleri_birlestir(bolumler, baglam, ilerleme)
     ilerleme("  özet paragrafı yazılıyor...")
@@ -655,4 +699,46 @@ def birlestir(bolumler, baglam, ilerleme=print):
         genel["sonraki_adim"] = yedek_sonraki_adim(listeler)
     if len(bolumler) > 1:
         genel["konu_akisi"] = konu_akisi(bolumler)
-    return not_markdown(genel, listeler)
+    return not_markdown(genel, listeler, kaynak_fn)
+
+
+# ---------- toplantiya soru ----------
+
+SORU_SISTEM = (
+    "Sen bir toplantı asistanısın. Sana bir toplantının transkriptinden seçilmiş bölümler verilecek; her satır "
+    "[SS:DD:ss] Konuşmacı: metin biçiminde. Kullanıcının sorusunu YALNIZCA bu satırlara dayanarak cevapla.\n"
+    "- Kim ne dediyse adıyla yaz; dayandığın satırın zamanını ⏱SS:DD:ss biçiminde ekle (örn. ⏱10:12:03).\n"
+    "- Transkriptte cevap yoksa 'Bu toplantının transkriptinde bu konu geçmiyor.' de; tahmin yürütme, genel "
+    "bilgiyle doldurma.\n- Kısa ve net yaz.\n" + TURKCE_KURAL
+)
+
+
+def toplantiya_sor(soru, bolumler, baglam, cikti=1500):
+    """bolumler: [(aralik, '[ts] Kim: metin' satirlari)], kronolojik. Soruyla en ilgili bolumler baglama
+    sigdigi kadar secilir (kelime koku ortakligina gore), kronolojik sirayla verilir."""
+    def kokler(m):
+        return {k[:5] for k in re.findall(r"[a-z0-9]+", _sade(m)) if len(k) >= 3}
+    sk = kokler(soru)
+    puanli = sorted(((len(sk & kokler(metin)), i) for i, (_, metin) in enumerate(bolumler)), reverse=True)
+    butce = BAGLAM_PENCERESI - MARJ - cikti - token_say(SORU_SISTEM + baglam + soru) - 200
+    secilen, tok = [], 0
+    for puan, i in puanli:
+        t = token_say(bolumler[i][1])
+        if secilen and tok + t > butce:
+            continue
+        if t > butce:                                 # tek bolum bile sigmiyorsa sonundan kirp
+            secilen.append((i, bolumler[i][1][-int(butce * 3):]))
+            break
+        secilen.append((i, bolumler[i][1]))
+        tok += t
+    if not secilen:
+        return "Bu toplantının transkripti boş."
+    icerik = "\n\n".join(f"### Bölüm {i + 1} ({bolumler[i][0]})\n{metin}" for i, metin in sorted(secilen))
+    mesajlar = [{"role": "system", "content": SORU_SISTEM},
+                {"role": "user", "content": f"{baglam}\n\nTranskript:\n{icerik}\n\nSoru: {soru}"}]
+    metin, neden = sor(mesajlar, cikti + 1500, effort="low", temperature=0.3)
+    if neden == "length" or not metin.strip() or ingilizce_mi(metin):
+        metin, neden = sor(mesajlar, cikti, temperature=0.3, dusunme=False)
+    if len(secilen) < len(bolumler):
+        metin += f"\n\n(Not: {len(bolumler)} bölümden soruyla en ilgili {len(secilen)} tanesine bakıldı.)"
+    return metin

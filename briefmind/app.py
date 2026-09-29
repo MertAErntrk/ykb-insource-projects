@@ -21,6 +21,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 import llm
 import motor as motor_mod
+import not_araclari
 import outlook
 from motor import Motor
 from sozluk import Sozluk
@@ -90,7 +91,8 @@ class YakalamaIsi(QtCore.QThread):
         self.motor = Motor(klasor, self.baslik, tarih, self.sozluk, self.ctx.get("katilimcilar"),
                            self.ctx.get("gundem", ""), duzelt=self.duzelt,
                            olay=lambda t, v: self.olay.emit(t, v),
-                           kaynak=kaynak, ben=self.ayar.get("ben") or None)
+                           kaynak=kaynak, ben=self.ayar.get("ben") or None,
+                           sablon=self.ayar.get("not_sablonu", "genel"))
         self.olay.emit("log", f"Klasör: {klasor}")
         if kaynak in ("ses", "ikisi"):
             try:
@@ -254,6 +256,21 @@ class ParcaIsi(QtCore.QThread):
         self.bitti.emit(self.no)
 
 
+class SoruIsi(QtCore.QThread):
+    """Toplantiya soru: LLM cagrisi arayuzu dondurmesin."""
+    bitti = QtCore.pyqtSignal(str)
+
+    def __init__(self, m, soru):
+        super().__init__()
+        self.m, self.soru = m, soru
+
+    def run(self):
+        try:
+            self.bitti.emit(self.m.soru_sor(self.soru))
+        except Exception as e:
+            self.bitti.emit(f"Cevap alınamadı: {e!r}")
+
+
 # ====================================================================== pencere
 
 
@@ -265,8 +282,13 @@ NOT_CSS = ("body{font-family:'Plus Jakarta Sans','Segoe UI',sans-serif;font-size
            "td{border-bottom:1px solid #e5e7eb}")
 
 def md_to_html(md):
-    """Notun sinirli Markdown'ini (basliklar, maddeler, tablolar, paragraflar) stilli HTML'e cevirir."""
+    """Notun sinirli Markdown'ini (basliklar, maddeler, tablolar, paragraflar) stilli HTML'e cevirir.
+    '⏱10:12:03' kaynak isaretleri tiklanabilir baglanti olur (transkriptte o ani acar)."""
     import html as _h
+    import re as _re
+
+    def kac(x):
+        return _re.sub(r"⏱(\d{1,2}:\d{2}:\d{2})", r'<a href="ts:\1">⏱\1</a>', _h.escape(x))
     cikti, tablo, liste = [], [], False
     def liste_kapat():
         nonlocal liste
@@ -286,19 +308,19 @@ def md_to_html(md):
             if all(set(c) <= set("-: ") for c in hucreler):
                 continue
             etiket = "th" if not tablo else "td"
-            tablo.append("<tr>" + "".join(f"<{etiket}>{_h.escape(c)}</{etiket}>" for c in hucreler) + "</tr>")
+            tablo.append("<tr>" + "".join(f"<{etiket}>{kac(c)}</{etiket}>" for c in hucreler) + "</tr>")
             continue
         tablo_kapat()
         if s_.startswith("# "):
-            liste_kapat(); cikti.append(f"<h1>{_h.escape(s_[2:])}</h1>")
+            liste_kapat(); cikti.append(f"<h1>{kac(s_[2:])}</h1>")
         elif s_.startswith("## "):
-            liste_kapat(); cikti.append(f"<h2>{_h.escape(s_[3:])}</h2>")
+            liste_kapat(); cikti.append(f"<h2>{kac(s_[3:])}</h2>")
         elif s_.startswith(("- ", "* ")):
             if not liste:
                 cikti.append("<ul>"); liste = True
-            cikti.append(f"<li>{_h.escape(s_[2:])}</li>")
+            cikti.append(f"<li>{kac(s_[2:])}</li>")
         elif s_:
-            liste_kapat(); cikti.append(f"<p>{_h.escape(s_)}</p>")
+            liste_kapat(); cikti.append(f"<p>{kac(s_)}</p>")
     liste_kapat(); tablo_kapat()
     return "<html><head><style>" + NOT_CSS + "</style></head><body>" + "".join(cikti) + "</body></html>"
 
@@ -428,6 +450,7 @@ class Pencere(QtWidgets.QMainWindow):
         self._takvim_zamanlayici.start(60000)
         QtCore.QTimer.singleShot(800, lambda: self.toplantilari_yenile(False))
         self.zamanlayici.start(1000)
+        QtCore.QTimer.singleShot(1500, self.saklama_uygula)
         if self.ayar.get("otomatik_basla"):
             QtCore.QTimer.singleShot(500, self.baslat)
 
@@ -544,6 +567,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.canli_not = QtWidgets.QListWidget(objectName="liste")
         self.canli_not.setWordWrap(True)
         sag.addWidget(self.canli_not, 2)
+        b_bilgi = QtWidgets.QPushButton("Katılımcıları bilgilendir (metni kopyala)")
+        b_bilgi.setToolTip("Toplantı sohbetine yapıştırılacak 'not alınıyor' bilgilendirmesini panoya kopyalar")
+        b_bilgi.clicked.connect(self.bilgilendirme_kopyala)
+        sag.addWidget(b_bilgi)
         sag.addWidget(QtWidgets.QLabel("Olaylar"))
         self.gunluk = QtWidgets.QPlainTextEdit()
         self.gunluk.setReadOnly(True)
@@ -594,17 +621,46 @@ class Pencere(QtWidgets.QMainWindow):
         v.addWidget(self.not_bilgi)
         self.not_goster = QtWidgets.QTextBrowser()
         self.not_goster.document().setDocumentMargin(16)
+        self.not_goster.setOpenLinks(False)
+        self.not_goster.anchorClicked.connect(lambda u: self._baglanti(u, self.motor.klasor if self.motor else None))
         v.addWidget(self.not_goster, 1)
+        self.not_duzen = QtWidgets.QPlainTextEdit()
+        self.not_duzen.hide()
+        v.addWidget(self.not_duzen, 1)
+        # toplantiya soru
+        hs = QtWidgets.QHBoxLayout()
+        self.soru = QtWidgets.QLineEdit()
+        self.soru.setPlaceholderText("Bu toplantıya soru sor (örn. Test ortamı ne zaman hazır olacak, kim söyledi?)")
+        self.soru.returnPressed.connect(self.soru_sor)
+        self.b_sor = QtWidgets.QPushButton("Sor")
+        self.b_sor.clicked.connect(self.soru_sor)
+        hs.addWidget(self.soru, 1)
+        hs.addWidget(self.b_sor)
+        v.addLayout(hs)
+        self.cevap = QtWidgets.QTextBrowser()
+        self.cevap.setOpenLinks(False)
+        self.cevap.anchorClicked.connect(lambda u: self._baglanti(u, self.motor.klasor if self.motor else None))
+        self.cevap.setMaximumHeight(170)
+        self.cevap.hide()
+        v.addWidget(self.cevap)
         h = QtWidgets.QHBoxLayout()
         self.b_outlook = QtWidgets.QPushButton("Outlook'ta taslak aç", objectName="birincil")
         self.b_outlook.clicked.connect(self.outlook_ac)
+        b_kisi = QtWidgets.QPushButton("Kişiye özel e-postalar")
+        b_kisi.setToolTip("Sorumlusu belli her kişi için yalnızca kendi işlerini içeren bir Outlook taslağı açar")
+        b_kisi.clicked.connect(self.kisiye_ozel_eposta)
         b2 = QtWidgets.QPushButton("Panoya kopyala")
         b2.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(self.not_md))
+        self.b_duzenle = QtWidgets.QPushButton("Düzenle")
+        self.b_duzenle.clicked.connect(self.not_duzenle)
+        b_word = QtWidgets.QPushButton("Word")
+        b_word.clicked.connect(lambda: self.not_disa_aktar("docx"))
+        b_pdf = QtWidgets.QPushButton("PDF")
+        b_pdf.clicked.connect(lambda: self.not_disa_aktar("pdf"))
         b3 = QtWidgets.QPushButton("Klasörü aç")
         b3.clicked.connect(self.klasor_ac)
-        h.addWidget(self.b_outlook)
-        h.addWidget(b2)
-        h.addWidget(b3)
+        for b in (self.b_outlook, b_kisi, b2, self.b_duzenle, b_word, b_pdf, b3):
+            h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
         return w
@@ -643,6 +699,16 @@ class Pencere(QtWidgets.QMainWindow):
 
     def _gecmis(self):
         w, v = self._sayfa()
+        ha = QtWidgets.QHBoxLayout()
+        self.g_ara = QtWidgets.QLineEdit()
+        self.g_ara.setPlaceholderText("Tüm toplantılarda ara (transkript ve notlar; örn. test ortamı)")
+        self.g_ara.returnPressed.connect(self.gecmiste_ara)
+        b_ara = QtWidgets.QPushButton("Ara")
+        b_ara.clicked.connect(self.gecmiste_ara)
+        ha.addWidget(self.g_ara, 1)
+        ha.addWidget(b_ara)
+        v.addLayout(ha)
+        self._arama_sonuclari = []
         h = QtWidgets.QHBoxLayout()
         self.g_liste = QtWidgets.QListWidget(objectName="liste")
         self.g_liste.currentItemChanged.connect(self._gecmis_secildi)
@@ -658,6 +724,8 @@ class Pencere(QtWidgets.QMainWindow):
         sag.addWidget(self.g_parcalar)
         self.g_detay = QtWidgets.QTextBrowser()
         self.g_detay.document().setDocumentMargin(16)
+        self.g_detay.setOpenLinks(False)
+        self.g_detay.anchorClicked.connect(lambda u: self._baglanti(u, self._secili_klasor()))
         sag.addWidget(self.g_detay, 1)
         h.addLayout(sag, 3)
         v.addLayout(h, 1)
@@ -719,6 +787,16 @@ class Pencere(QtWidgets.QMainWindow):
         self.a_altyazi_oto.setChecked(bool(self.ayar.get("altyazi_otomatik", True)))
         self.a_altyazi_tr = QtWidgets.QCheckBox("Altyazı bulununca konuşulan dili Türkçe yapmayı dene (Teams seçimi hatırlar)")
         self.a_altyazi_tr.setChecked(bool(self.ayar.get("altyazi_turkce", True)))
+        self.a_sablon = QtWidgets.QComboBox()
+        for anahtar, (etiket, _) in llm.SABLONLAR.items():
+            self.a_sablon.addItem(etiket, anahtar)
+        self.a_sablon.setCurrentIndex(max(0, self.a_sablon.findData(self.ayar.get("not_sablonu", "genel"))))
+        self.a_saklama = QtWidgets.QSpinBox()
+        self.a_saklama.setRange(0, 3650)
+        self.a_saklama.setSuffix(" gün")
+        self.a_saklama.setSpecialValueText("süresiz (kapalı)")
+        self.a_saklama.setValue(int(self.ayar.get("saklama_gun", 0) or 0))
+        self.a_saklama.setToolTip("Notu üretilmiş toplantıların transkripti bu süreden sonra silinir; not.md kalır.")
         b_test = QtWidgets.QPushButton("STT servisini test et")
         b_test.clicked.connect(self.stt_test)
         f.addRow("Kaynak", self.a_kaynak)
@@ -739,6 +817,9 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow(self.a_duzelt)
         f.addRow(self.a_outlook)
         f.addRow(self.a_oto)
+        f.addRow(QtWidgets.QLabel("— Not —", objectName="alt_bilgi"))
+        f.addRow("Not şablonu", self.a_sablon)
+        f.addRow("Transkript saklama süresi", self.a_saklama)
         b = QtWidgets.QPushButton("Kaydet", objectName="birincil")
         b.clicked.connect(self.ayar_kaydet)
         f.addRow(b)
@@ -1171,6 +1252,7 @@ class Pencere(QtWidgets.QMainWindow):
         self._durum_ayarla("Not üretiliyor…", "#EA580C")
         self.not_bilgi.setText("Not üretiliyor — düzeltmeler uygulanıyor, parçalar birleştiriliyor…")
         self.nav.setCurrentRow(2)
+        self.motor.sablon = self.ayar.get("not_sablonu", "genel")
         self.tamamla = TamamlamaIsi(self.motor, self.kararlar())
         self.tamamla.olay.connect(self.olay)
         self.tamamla.bitti.connect(self.not_hazir)
@@ -1187,6 +1269,7 @@ class Pencere(QtWidgets.QMainWindow):
     def not_hazir(self, md):
         self.not_md = md
         self.not_goster.setHtml(md_to_html(md))
+        self._not_gorunumu()
         self.ilerleme.hide()
         self._durum_ayarla("Not hazır", "#14B8A6")
         self.not_bilgi.setText(f"Kaydedildi: {os.path.join(self.motor.klasor, 'not.md')}")
@@ -1369,6 +1452,7 @@ class Pencere(QtWidgets.QMainWindow):
                 self.not_md = f.read()
             self.motor = Motor.yukle(k, self.sozluk)
             self.not_goster.setHtml(md_to_html(self.not_md))
+            self._not_gorunumu()
             self.not_bilgi.setText(f"Kaydedildi: {yol}")
             self.nav.setCurrentRow(2)
         else:
@@ -1458,7 +1542,8 @@ class Pencere(QtWidgets.QMainWindow):
                           "stt_model": self.a_stt_model.text().strip(), "stt_key": self.a_stt_key.text().strip(),
                           "mikrofon_modu": "otomatik", "ben": self.a_ben.text().strip(),
                           "altyazi_otomatik": self.a_altyazi_oto.isChecked(),
-                          "altyazi_turkce": self.a_altyazi_tr.isChecked()})
+                          "altyazi_turkce": self.a_altyazi_tr.isChecked(),
+                          "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value()})
         ayar_yaz(self.ayar)
         self.durum.setText("Ayarlar kaydedildi")
 
@@ -1497,6 +1582,172 @@ class Pencere(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "STT testi", f"Test yapılamadı: {e!r}\n\n"
                                           f"Gerekli paketler: pip install sounddevice soundcard numpy requests")
+
+    # ================================================================== not araclari
+    def bilgilendirme_kopyala(self):
+        metin = self.ayar.get("bilgilendirme_metni") or not_araclari.BILGILENDIRME
+        QtWidgets.QApplication.clipboard().setText(metin)
+        self.log("bilgilendirme metni panoya kopyalandı — Teams toplantı sohbetine yapıştır (Ctrl+V)")
+
+    def saklama_uygula(self):
+        gun = int(self.ayar.get("saklama_gun", 0) or 0)
+        if gun <= 0:
+            return
+        try:
+            n = motor_mod.saklama_uygula(gun)
+        except Exception as e:
+            self.log(f"! saklama süresi uygulanamadı: {e!r}")
+            return
+        if n:
+            self.log(f"saklama süresi ({gun} gün): {n} toplantının transkripti silindi, notları duruyor")
+            self.gecmis_yenile()
+
+    def _baglanti(self, url, klasor):
+        """Not/cevap/arama baglantilari: 'ts:HH:MM:SS' (o toplantida), 'git:N' (arama sonucu N)."""
+        u = url.toString()
+        if u.startswith("git:"):
+            try:
+                r = self._arama_sonuclari[int(u[4:])]
+            except (ValueError, IndexError):
+                return
+            if r["ts"]:
+                self._transkript_goster(r["klasor"], r["ts"], f"{r['tarih']} — {r['baslik']}")
+            return
+        if u.startswith("ts:"):
+            if not klasor:
+                QtWidgets.QMessageBox.information(self, "Kaynak", "Önce bir toplantı seçin ya da notu açın.")
+                return
+            self._transkript_goster(klasor, u[3:])
+
+    def _transkript_goster(self, klasor, ts, baslik=None):
+        import html as _h
+        satirlar = not_araclari.ana_git(klasor, ts)
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle(f"Transkript — {ts}" + (f" · {baslik}" if baslik else ""))
+        d.resize(760, 480)
+        v = QtWidgets.QVBoxLayout(d)
+        t = QtWidgets.QTextBrowser()
+        if not satirlar:
+            t.setHtml("<p>Bu ana ait transkript satırı yok (transkript saklama süresi nedeniyle silinmiş olabilir).</p>")
+        else:
+            parcalar = []
+            for zaman, kim, metin, hedef in satirlar:
+                stil = " style='background:#FEF3C7'" if hedef else ""
+                parcalar.append(f"<p{stil}><span style='color:#64748B'>{_h.escape(str(zaman))}</span> "
+                                f"<b>{_h.escape(str(kim))}</b>: {_h.escape(str(metin))}</p>")
+            t.setHtml("".join(parcalar))
+            hedef_no = next(i for i, x in enumerate(satirlar) if x[3])
+            QtCore.QTimer.singleShot(50, lambda: t.verticalScrollBar().setValue(
+                int(t.verticalScrollBar().maximum() * hedef_no / max(1, len(satirlar) - 1))))
+        v.addWidget(t)
+        b = QtWidgets.QPushButton("Kapat")
+        b.clicked.connect(d.accept)
+        v.addWidget(b, 0, QtCore.Qt.AlignRight)
+        d.show()
+
+    def soru_sor(self):
+        soru = self.soru.text().strip()
+        if not soru:
+            return
+        if not self.motor:
+            QtWidgets.QMessageBox.information(self, "Soru", "Önce bir toplantı notu açın (Geçmiş → Notu aç).")
+            return
+        self.b_sor.setEnabled(False)
+        self.cevap.show()
+        self.cevap.setHtml("<p>Cevap hazırlanıyor…</p>")
+        self._soru_isi = SoruIsi(self.motor, soru)
+        self._soru_isi.bitti.connect(self._cevap_geldi)
+        self._soru_isi.start()
+
+    def _cevap_geldi(self, metin):
+        self.b_sor.setEnabled(True)
+        self.cevap.setHtml(md_to_html(metin))
+
+    def kisiye_ozel_eposta(self):
+        if not self.not_md or not self.motor:
+            return
+        epostalar = not_araclari.kisiye_ozel_epostalar(self.not_md, self.motor.baslik, self.motor.tarih.isoformat())
+        if not epostalar:
+            QtWidgets.QMessageBox.information(self, "E-posta", "Sorumlusu belli aksiyon yok.")
+            return
+        c = QtWidgets.QMessageBox.question(
+            self, "Kişiye özel e-postalar",
+            f"{len(epostalar)} kişi için Outlook taslağı açılacak (gönderilmez):\n"
+            + ", ".join(ad for ad, _, _ in epostalar))
+        if c != QtWidgets.QMessageBox.Yes:
+            return
+        for ad, konu, govde in epostalar:
+            outlook.taslak(konu, govde, [ad])
+
+    def _not_gorunumu(self):
+        """Yeni not acilinca duzenleme kipini ve onceki soru cevabini kapat."""
+        self.not_duzen.hide()
+        self.not_goster.show()
+        self.b_duzenle.setText("Düzenle")
+        self.cevap.hide()
+
+    def not_duzenle(self):
+        if not self.not_md:
+            return
+        if self.not_duzen.isHidden():
+            self.not_duzen.setPlainText(self.not_md)
+            self.not_goster.hide()
+            self.not_duzen.show()
+            self.b_duzenle.setText("Kaydet")
+            return
+        self.not_md = self.not_duzen.toPlainText()
+        if self.motor:
+            with open(os.path.join(self.motor.klasor, "not.md"), "w", encoding="utf-8") as f:
+                f.write(self.not_md)
+        self.not_goster.setHtml(md_to_html(self.not_md))
+        self.not_duzen.hide()
+        self.not_goster.show()
+        self.b_duzenle.setText("Düzenle")
+        self.log("not düzenlendi ve kaydedildi")
+
+    def not_disa_aktar(self, tur):
+        if not self.not_md:
+            return
+        klasor = self.motor.klasor if self.motor else os.getcwd()
+        filtre = {"docx": "Word belgesi (*.docx)", "pdf": "PDF (*.pdf)"}[tur]
+        yol, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Dışa aktar", os.path.join(klasor, f"not.{tur}"), filtre)
+        if not yol:
+            return
+        try:
+            if tur == "docx":
+                not_araclari.word_kaydet(self.not_md, yol)
+            else:
+                from PyQt5 import QtPrintSupport
+                yazici = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.HighResolution)
+                yazici.setOutputFormat(QtPrintSupport.QPrinter.PdfFormat)
+                yazici.setOutputFileName(yol)
+                belge = QtGui.QTextDocument()
+                belge.setHtml(md_to_html(self.not_md))
+                belge.print_(yazici)
+        except ImportError:
+            QtWidgets.QMessageBox.warning(self, "Word", "Word'e aktarmak için: pip install python-docx")
+            return
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Dışa aktarma", repr(e))
+            return
+        self.log(f"not dışa aktarıldı: {yol}")
+
+    def gecmiste_ara(self):
+        import html as _h
+        sorgu = self.g_ara.text().strip()
+        if not sorgu:
+            return
+        self._arama_sonuclari = not_araclari.ara(sorgu)
+        if not self._arama_sonuclari:
+            self.g_detay.setHtml(f"<p>'{_h.escape(sorgu)}' hiçbir toplantıda bulunamadı.</p>")
+            return
+        satirlar = [f"<h2>'{_h.escape(sorgu)}' — {len(self._arama_sonuclari)} sonuç</h2>"]
+        for i, r in enumerate(self._arama_sonuclari):
+            bag = f" <a href='git:{i}'>⏱{_h.escape(r['ts'])}</a>" if r["ts"] else ""
+            kim = f"<b>{_h.escape(r['kim'])}</b>: " if r["kim"] else ""
+            satirlar.append(f"<p><span style='color:#64748B'>{_h.escape(r['tarih'])} · {_h.escape(r['baslik'])} · "
+                            f"{r['tur']}</span>{bag}<br>{kim}{_h.escape(r['metin'][:300])}</p>")
+        self.g_detay.setHtml("".join(satirlar))
 
     def closeEvent(self, e):
         if self.is_ and self.is_.isRunning():
