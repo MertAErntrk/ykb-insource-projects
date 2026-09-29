@@ -15,6 +15,7 @@ Ses diske YAZILMAZ: parca bellekte tutulur, STT cevabi gelince silinir.
 """
 import datetime as dt
 import io
+import itertools
 import queue
 import threading
 import time
@@ -87,9 +88,10 @@ def kulaklik_var_mi(sure=1.2):
 class AkisYakalayici(threading.Thread):
     """Tek bir ses akisini (loopback ya da mikrofon) parcalara boler, kuyruga koyar."""
 
-    def __init__(self, kaynak, kuyruk, loopback=False, cihaz=None, olay=None):
+    def __init__(self, kaynak, kuyruk, loopback=False, cihaz=None, olay=None, sayac=None):
         super().__init__(daemon=True)
         self.kaynak, self.kuyruk, self.loopback, self.cihaz = kaynak, kuyruk, loopback, cihaz
+        self._sayac = sayac                     # paylasilan sira sayaci: cikti kuyruga giris sirasinda yayilir
         self._olay = olay or (lambda t, v: None)
         self._dur = threading.Event()
         self.hata = None
@@ -204,8 +206,8 @@ class AkisYakalayici(threading.Thread):
         if birikmis and birikmis % KUYRUK_UYARI == 0:
             # Eskiden 12'de parca atiliyordu: STT kisa bir sure yavasladiginda konusma kayboluyordu.
             self._olay("stt_gecikme", {"kuyruk": birikmis, "atlandi": False})
-        self.kuyruk.put({"kaynak": self.kaynak, "basla": basla,
-                         "bitis": dt.datetime.now(), "ses": ses})
+        self.kuyruk.put({"kaynak": self.kaynak, "basla": basla, "bitis": dt.datetime.now(), "ses": ses,
+                         "no": next(self._sayac) if self._sayac is not None else None})
 
 
 def bolme_noktasi(enerji, pencere=BOLME_PENCERE):
@@ -462,6 +464,11 @@ class SesServisi:
         self._bicim_bildirildi = False
         self.elenen = 0
         self._kilit = threading.Lock()
+        # Sirali yayim: 2 STT iscisi parcalari farkli hizda cozer; cumleler kuyruga giris sirasiyla yayilir.
+        # Eskiden kisa bir parca uzun olandan once donunce satirlar transkripte ters sirayla giriyordu.
+        self._sayac = itertools.count()
+        self._sonraki = 0
+        self._hazir = {}
 
     def baslat(self):
         if not self.stt.saglik():
@@ -472,8 +479,9 @@ class SesServisi:
                           + (" (kulaklık: ayrı akışlar)" if self.kulaklik else " (hoparlör: eko tekilleştirme açık)"))
         # Mikrofon HER ZAMAN yakalanir: yalniz toplantida ya da sadece sen konusurken
         # loopback'te ses olmaz. Kulaklik yoksa ayni cumle iki akistan gelebilir -> tekillestirilir.
-        self.akislar = [AkisYakalayici("loopback", self.kuyruk, loopback=True, olay=self._olay),
-                        AkisYakalayici("mikrofon", self.kuyruk, cihaz=self.mik_cihaz, olay=self._olay)]
+        self.akislar = [AkisYakalayici("loopback", self.kuyruk, loopback=True, olay=self._olay, sayac=self._sayac),
+                        AkisYakalayici("mikrofon", self.kuyruk, cihaz=self.mik_cihaz, olay=self._olay,
+                                       sayac=self._sayac)]
         for a in self.akislar:
             a.start()
         self._isciler = [threading.Thread(target=self._calis, daemon=True) for _ in range(ISCI_SAYISI)]
@@ -488,6 +496,9 @@ class SesServisi:
         self._dur.set()
         for i in getattr(self, "_isciler", []):
             i.join(timeout=60)
+        with self._kilit:                      # takilan/eksik numara kaldiysa kalanlari sirayla bosalt
+            for no in sorted(self._hazir):
+                self._yay(self._hazir.pop(no))
 
     def _calis(self):
         while not (self._dur.is_set() and self.kuyruk.empty()):
@@ -500,6 +511,7 @@ class SesServisi:
             self._olay("ses_parca", {"kaynak": p["kaynak"], "sn": round(sure, 1),
                                      "kuyruk": self.kuyruk.qsize()})
             t0 = time.time()
+            adaylar = []
             try:
                 once = self.stt.yeniden_deneme
                 segmentler = self.stt.coz(p["ses"])
@@ -511,29 +523,44 @@ class SesServisi:
                 self._olay("ses_metin", {"kaynak": p["kaynak"], "segment": len(segmentler),
                                          "sn": round(sure, 1), "islem": round(time.time() - t0, 2),
                                          "gecikme": gecikme})
-            except Exception as e:
-                self.son_hata = e
-                self._olay("log", f"✖ STT hatası: {e!r}")
-                continue
-            finally:
-                p["ses"] = None                       # ses bellekten dusurulur
-            kim = "ben" if p["kaynak"] == "mikrofon" else None
-            if not self._bicim_bildirildi:
-                self._bicim_bildirildi = True
-                self._olay("log", "STT zaman damgası: " + ("segment bazlı (verbose_json)" if self.stt.verbose
-                                                          else "yok (json) — cümleler süreye orantılı dağıtılır"))
-            with self._kilit:
+                if not self._bicim_bildirildi:
+                    self._bicim_bildirildi = True
+                    self._olay("log", "STT zaman damgası: " + ("segment bazlı (verbose_json)" if self.stt.verbose
+                                                              else "yok (json) — cümleler süreye orantılı dağıtılır"))
                 for gorel, ham, s in cumlelere_bol(segmentler, sure):
                     metin = tekrar_temizle(ham)
                     if len(metin) < 2 or not sonuc_gecerli(s, metin):
                         self.elenen += 1
                         continue
-                    an = p["basla"] + dt.timedelta(seconds=gorel)
-                    # once tekrar kontrolu (kaydi eklemez), sonra eko kontrolu (kaydi ekler)
-                    if self._tekrar_mi(an, p["kaynak"], metin) or self._eko_mu(an, p["kaynak"], metin):
-                        self.elenen += 1
-                        continue
-                    self._satir(an.strftime("%H:%M:%S"), kim, metin, p["kaynak"])
+                    adaylar.append((p["basla"] + dt.timedelta(seconds=gorel), p["kaynak"], metin))
+            except Exception as e:
+                self.son_hata = e
+                self._olay("log", f"✖ STT hatası: {e!r}")
+            finally:
+                p["ses"] = None                       # ses bellekten dusurulur
+                self._sirali_yay(p.get("no"), adaylar)   # hata olsa da numara kapanir, sira takilmaz
+
+    def _sirali_yay(self, no, adaylar):
+        with self._kilit:
+            if no is None:
+                self._yay(adaylar)
+                return
+            self._hazir[no] = adaylar
+            while self._sonraki in self._hazir:
+                self._yay(self._hazir.pop(self._sonraki))
+                self._sonraki += 1
+
+    def _yay(self, adaylar):
+        """Kilit altinda cagrilir. Tekrar/eko kontrolu de yayim sirasinda yapilir (sira onlar icin de onemli)."""
+        for an, kaynak, metin in adaylar:
+            # once tekrar kontrolu (kaydi eklemez), sonra eko kontrolu (kaydi ekler)
+            if self._tekrar_mi(an, kaynak, metin) or self._eko_mu(an, kaynak, metin):
+                self.elenen += 1
+                continue
+            try:
+                self._satir(an.strftime("%H:%M:%S"), "ben" if kaynak == "mikrofon" else None, metin, kaynak)
+            except Exception as e:
+                self._olay("log", f"✖ satır işlenemedi: {e!r}")
 
     def _tekrar_mi(self, an, kaynak, metin):
         """Ayni akista son 90 sn icinde ayni cumle, ya da toplanti boyunca 3+ kez birebir ayni cumle

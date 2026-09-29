@@ -13,6 +13,7 @@ olay(tip, veri) geri cagrisi: "satir", "parca_kapandi", "parca_ozetlendi", "oner
 """
 import concurrent.futures as cf
 import datetime as dt
+import difflib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import threading
 import time
 
 import llm
+import tarih as tarih_mod
 from sozluk import Sozluk, normalize
 
 KOK = "toplantilar"
@@ -130,6 +132,38 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
     return md, atilan
 
 
+def _sn(x):
+    try:
+        p = [int(k) for k in str(x).split(":")]
+        return p[0] * 3600 + p[1] * 60 + (p[2] if len(p) > 2 else 0)
+    except (ValueError, IndexError):
+        return 0
+
+
+def _kelimeler(metin):
+    m = (metin or "").replace("İ", "i").replace("I", "ı").lower()
+    for a, b in zip("çğıöşüâî", "cgiosuai"):
+        m = m.replace(a, b)
+    return [k[:4] for k in re.findall(r"[a-z0-9]+", m)]
+
+
+def metin_benzerligi(a, b):
+    """Whisper cumlesi ile altyazi satiri ayni sozu mu tasiyor? (0-1)
+    Kelime kokleri (ilk 4 harf) sirali eslenir; Teams'in bozuk yazdigi kelimelerde bile ortak kokler kalir.
+    Eskiden harf duzeyinde bakiliyordu: alakasiz iki Turkce cumle bile 0.29-0.35 cikip esigi (0.25) asiyor,
+    birden fazla kisi konusurken cumle rastgele birine yaziliyordu. Altyazi satiri uzun bir paragraf
+    olabilecegi icin 4+ kelimelik cumlede 'kapsanma' orani da hesaba katilir."""
+    ka, kb = _kelimeler(a), _kelimeler(b)
+    if not ka or not kb:
+        return 0.0
+    sm = difflib.SequenceMatcher(None, ka, kb, autojunk=False)
+    oran = sm.ratio()
+    if len(ka) >= 4:
+        ortak = sum(blok.size for blok in sm.get_matching_blocks())
+        oran = max(oran, ortak / len(ka))
+    return oran
+
+
 def blok_metni(satirlar):
     birlesik = []
     for s in satirlar:
@@ -167,11 +201,20 @@ class Motor:
         self.havuz = cf.ThreadPoolExecutor(max_workers=PARALEL)
         self.isler = []
         self.kilit = threading.Lock()
+        self._gunluk_kilit = threading.Lock()
+        llm.GUNLUK_FN = self._llm_gunluk
         self.meta_yaz("devam")
 
     # ---------- olay/log ----------
     def log(self, m):
         self._olay("log", m)
+
+    def _llm_gunluk(self, kayit):
+        """LLM cagri istatistigi (finish_reason, token, sure; icerik yok) -> llm_log.jsonl.
+        'Not neden yarim/Ingilizce?' sorusunda ilk bakilacak yer."""
+        with self._gunluk_kilit:
+            with open(os.path.join(self.klasor, "llm_log.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(kayit, ensure_ascii=False) + "\n")
 
     # ---------- disk ----------
     def meta_yaz(self, durum):
@@ -240,6 +283,8 @@ class Motor:
             kim, benzer = self._konusmaci_bul(satir["ts"], satir["text"], puanla=True)
             if benzer is not None and (benzer >= 0.25 or simdi >= son):
                 self.uyum = (self.uyum + [benzer])[-30:]
+            if kim and benzer < 0.25 and simdi >= son and not self._tek_konusmaci(satir["ts"], kim):
+                kim = None      # sure doldu, metin hic eslesmedi ve pencerede baska konusan da var: tahmin etme
             if kim and (benzer >= 0.25 or simdi >= son):
                 satir["speaker"] = kim
                 if kim not in self.katilimcilar:
@@ -253,6 +298,11 @@ class Motor:
         """Whisper'dan gelen satir. konusmaci None ise altyaziyla zaman hizalamasi yapilir."""
         if konusmaci == "ben":
             kim, benzer = (self.ben or "Ben"), None
+            # Kulakliksiz (hoparlorle) calisilirken karsi tarafin sesi mikrofona da girer; eko tekillestirmesi
+            # iki Whisper cikisi farkli yazinca kacirir. Altyazida bu cumleyi baskasi soylediyse ona yaz.
+            alt_kim, alt_benzer = self._konusmaci_bul(ts, metin, puanla=True)
+            if alt_kim and (alt_benzer or 0) >= 0.6 and not self._ben_mi(alt_kim):
+                kim = alt_kim
         else:
             kim, benzer = self._konusmaci_bul(ts, metin, puanla=True)
             if benzer is not None:
@@ -266,11 +316,27 @@ class Motor:
                     if alt_kok and not any(_kokler(k) & alt_kok for k in kelime):
                         self._olay("log", f"  · elendi (altyazı doğrulamadı): {metin[:40]}")
                         return None
+        if konusmaci != "ben" and kim and (benzer or 0) < 0.25 and not self._tek_konusmaci(ts, kim):
+            # Metin hicbir altyazi satiriyla eslesmedi, yalnizca zamana gore tahmin: o aralikta birden fazla
+            # kisi konusuyorsa yanlis kisiye yazmamak icin '?' ile baslar; altyazi gelince atanir.
+            kim = None
         yeni = self.satir_ekle({"ts": ts, "speaker": kim or "?", "text": metin}, kaynak="ses")
         if konusmaci != "ben" and yeni is not None and (not kim or (benzer or 0) < 0.25):
             # altyazi henuz gelmemis olabilir: 8 sn boyunca yeniden dene
             self.bekleyen_ses.append((yeni, time.time() + 8))
         return yeni
+
+    def _ben_mi(self, ad):
+        """Altyazidaki ad uygulamayi kullanan kisi mi? ('Mert' ~ 'Mert Ali Erenturk')"""
+        if not self.ben or not ad:
+            return False
+        a, b = set(normalize(self.ben).split()), set(normalize(ad).split())
+        return bool(a & b)
+
+    def _tek_konusmaci(self, ts, kim, pencere_sn=10):
+        """ts cevresinde (±pencere) altyazida yalnizca `kim` mi konusuyor?"""
+        hedef = _sn(ts)
+        return all(k == kim for t, k, *_ in self.konusmaci_izi if abs(hedef - _sn(t)) <= pencere_sn)
 
     def _altyazi_kokleri(self, ts, pencere_sn=20):
         """ts cevresindeki (±pencere) altyazi satirlarinin kelime kokleri."""
@@ -295,7 +361,6 @@ class Motor:
     def _konusmaci_bul(self, ts, metin="", pencere_sn=30, puanla=False):
         """Whisper cumlesine konusmaci atar: altyazi izindeki satirlarla hem ZAMAN yakinligi hem
         METIN benzerligi (Teams'in bozuk altyazisi bile ayni cumlenin izini tasir) puanlanir."""
-        import difflib
 
         def sn(x):
             try:
@@ -321,7 +386,7 @@ class Motor:
             zaman = 1.0 - abs(fark) / pencere_sn
             if fark < 0:
                 zaman *= 0.6                                   # gelecekteki altyazi daha az guvenilir
-            benzer = difflib.SequenceMatcher(None, m1, sade(alt)).ratio() if m1 and alt else 0.0
+            benzer = metin_benzerligi(metin, alt) if m1 and alt else 0.0
             en_benzer = max(en_benzer, benzer)
             if benzer >= 0.45:                                 # altyazi ayni cumleyi tasiyor: kesin eslesme
                 puan = 1.0 + benzer + 0.2 * zaman
@@ -402,6 +467,8 @@ class Motor:
             onceki = self._onceki_konular(veri["sira"])
             metin = blok_metni(veri["satirlar"])
             ozet = llm.bolum_ozetle(metin, veri["sira"], self.baglam(metin), onceki)
+            for a in (ozet or {}).get("aksiyonlar", []):
+                a["tarih"] = tarih_mod.tarih_coz(a.get("tarih"), self.tarih)
             veri["ozet"] = ozet
             if ozet:
                 for t in ozet.get("belirsiz_terimler", []):

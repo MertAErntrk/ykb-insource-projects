@@ -114,3 +114,29 @@ Parça özetleri iyi, sorun birleştirme adımında. Koddan çıkan nedenler:
 | STT sessizlik testi | 2 sn sessizliğe `...` döndü | Kod bunu zaten eliyor (harf yok). |
 | STT `test.wav` | `...` döndü, konuşma tanınmadı | Kayıt sessiz olabilir (yanlış mikrofon) ya da STT sorunlu. Dosya dinlenerek ayırt edilmeli. |
 | Kayıtlar | Tek kayıt: 40 katılımcı, 0 parça, 0 satır | Ya kısa bir deneme, ya kayıtlar başka klasörde (`dist\BriefMind\toplantilar`), ya da yakalama hiç satır üretmemiş. `--kayit` ile doğru klasör verilerek tekrar bakılmalı. |
+
+## 8. Birden fazla kişi konuşunca: kimin ne dediği karışır mı?
+
+### Uygulama konuşmacıyı nasıl buluyor
+- **Karşı taraf (hoparlör/loopback):** Teams'teki herkesin sesi tek bir karışık akış olarak gelir. Whisper kimin konuştuğunu bilmez. Konuşmacı, Teams canlı altyazısındaki satırlarla eşleştirilerek bulunur: aynı zaman aralığı (±30 sn) ve aynı söz.
+- **Siz (mikrofon):** Ayrı bir akış, doğrudan "ben" olarak yazılır.
+- **Teams altyazısı** her konuşmacıyı ayrı satırda ve adıyla verir; üst üste konuşmada da ayırır. Konuşmacı bilgisinin en güvenilir kaynağı budur.
+
+### Bulunan riskler ve durumları
+
+| # | Risk | Etkisi | Durum |
+|---|---|---|---|
+| K1 | Whisper cümlesi altyazıyla **harf düzeyinde** karşılaştırılıyordu. Alakasız iki Türkçe cümle bile %29-35 "benzer" çıkıyor, eşik %25'ti. | Birden fazla kişi konuşurken cümle neredeyse **rastgele birine** yazılıyordu. | **Düzeltildi.** Kelime kökü düzeyinde karşılaştırma: alakasız cümle 0, bozuk yazılmış aynı cümle 0,75-0,8. |
+| K2 | Metin hiç eşleşmediğinde cümle, zamanca en yakın konuşmacıya **tahminle** yazılıyordu. | Sessiz dönemde yanlış kişi. Aksiyonun sorumlusu da yanlış çıkabiliyordu. | **Düzeltildi.** O aralıkta tek kişi konuşuyorsa ona yazılıyor. Birden fazla kişi konuşuyorsa `?` ile başlıyor; altyazı gelirse (8 sn içinde) atanıyor, gelmezse `?` kalıyor. |
+| K3 | Kulaklıksız kullanımda karşı tarafın sesi mikrofona da giriyor. Eko tekilleştirmesi kaçırırsa satır **"ben"** olarak yazılıyordu. | Başkasının sözü size yazılıyordu. | **Düzeltildi.** Mikrofon satırı altyazıda başka birinin satırıyla güçlü eşleşirse o kişiye yazılıyor. Sizin kendi sözünüz (altyazıda kendi adınızla) "ben" olarak kalıyor. |
+| K4 | 2 STT işçisi parçaları farklı hızda çözünce satırlar **ters sırayla** transkripte giriyordu (A3). | Konuşma akışı ve konuşmacı sırası bozuluyordu. | **Düzeltildi.** Satırlar kuyruğa giriş sırasıyla yayılıyor; hata olsa bile sıra takılmıyor. |
+| K5 | İki kişi **aynı anda** konuşunca karışık ses tek parça olarak gidiyor. Whisper genelde baskın sesi yazıyor ya da iki sözü birleştiriyor. | Cümle tek kişiye yazılır, diğerinin sözü kaybolabilir. | **Plan.** Çakışma anını altyazıdan tespit et: aynı aralıkta iki farklı konuşmacı satırı varsa o aralık için Teams altyazısı metnini kullan (karma kaynak). |
+| K6 | Tek Whisper parçasında iki kişi arka arkaya konuşuyorsa (araya 0,55 sn'den kısa sessizlik), ARGE servisi segment zamanı vermediği için cümle zamanları tahminle dağıtılıyor. | Sıradaki konuşmacıya geçiş kayabilir. | **Plan.** (a) ARGE'den `verbose_json` segment zamanlarını iste. (b) Bir cümle iki farklı kişinin altyazısıyla eşleşiyorsa kelime hizalamasıyla böl. |
+| K7 | Altyazı kapalıysa ya da açılamazsa karşı taraftaki herkes `?` olur. | Konuşmacı ayrımı yok. | Mevcut: uygulama altyazıyı otomatik açmayı dener. **Plan (Faz 5):** ses tabanlı konuşmacı ayrımı (diarization). |
+| K8 | Aksiyon sorumlusu yalnızca LLM'in yorumuna dayanıyor. | "Ben yaparım" diyen kişi yanlış atanırsa sorumlu da yanlış çıkar. | **Plan.** Sorumluyu transkriptte o sözü söyleyen satırın konuşmacısıyla doğrula; uyuşmazsa `(?)` ekle. |
+
+## 9. Durum güncellemesi
+
+- **Tamamlandı:** A2 (her LLM çağrısının istatistiği `llm_log.jsonl`'e yazılıyor: görev, düşünme, token, `finish_reason`, süre, İngilizce mi; içerik yazılmıyor), A3/K4 (sıralı yayım), A10 (aksiyon tarihleri kodda çözülüyor; gün adı ile tarih çelişirse gün adı esas alınıyor), K1, K2, K3. Ayrıca STT kopmalarına karşı yeniden deneme, bozuk `config.json` uyarısı, mikrofon cihaz seçimi.
+- **Sıradaki:** K8 (sorumlu doğrulama), K5 (çakışmada altyazı), A5 (ses normalizasyonu), A6 (`ikisi` modu), A11 (modüllere ayırma), A12 (CI).
+- **Bilgi bekleyenler:** A8 (kurum CA sertifikası), K6(a) ve STT güven alanları (ARGE'ye soru), A9 (örnek toplantılarla ölçüm).

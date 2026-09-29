@@ -6,10 +6,12 @@ Birlestirme (tam not) tek uzun Markdown cevabi istemez: once karar/aksiyon/acik 
 Boylece cevap max_tokens'a takilip yarim kalmaz, basliklar hep Turkce olur; Ingilizce ya da
 kesik cevapta LLM'siz yedege (bolum notlarinin kendisi) dusulur.
 """
+import datetime as dt
 import difflib
 import json
 import os
 import re
+import time
 
 import httpx
 from openai import BadRequestError, OpenAI, UnprocessableEntityError
@@ -203,7 +205,41 @@ def ingilizce_mi(metin):
     return en >= 3 and en > tr
 
 
+GUNLUK_FN = None          # motor ayarlar: her LLM cagrisinin istatistigi (icerik degil) toplanti klasorune yazilir
+
+
+def _gorev_adi(mesajlar):
+    sistem = mesajlar[0]["content"] if mesajlar else ""
+    for ad, sablon in (("duzeltme", DUZELT_SISTEM), ("bolum", MAP_SISTEM), ("liste", LISTE_SISTEM),
+                       ("genel", GENEL_SISTEM)):
+        if sistem.startswith(sablon):
+            return ad
+    return "onarim" if sistem.startswith("Bozuk JSON") else "diger"
+
+
+def _gunluge_yaz(**kayit):
+    if GUNLUK_FN:
+        try:
+            GUNLUK_FN(kayit)
+        except Exception:
+            pass
+
+
 def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
+    t0 = time.time()
+    kayit = {"zaman": dt.datetime.now().strftime("%H:%M:%S"), "gorev": _gorev_adi(mesajlar),
+             "dusunme": effort if dusunme else False, "sema": bool(sema)}
+    try:
+        metin, neden, ek = _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme)
+    except Exception as e:
+        _gunluge_yaz(**kayit, sure_sn=round(time.time() - t0, 1), hata=f"{type(e).__name__}: {str(e)[:200]}")
+        raise
+    _gunluge_yaz(**kayit, **ek, finish=neden, sure_sn=round(time.time() - t0, 1), cevap_karakter=len(metin),
+                 ingilizce=ingilizce_mi(metin))
+    return metin, neden
+
+
+def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
     giris = _giris_token(mesajlar)
     izin = BAGLAM_PENCERESI - giris - MARJ
     if izin < 256:
@@ -223,7 +259,11 @@ def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusun
     else:
         r = client.chat.completions.create(**ortak)
     c = r.choices[0]
-    return dusunce_temizle(c.message.content), c.finish_reason
+    u = getattr(r, "usage", None)
+    dusunce = getattr(c.message, "reasoning_content", None) or getattr(c.message, "reasoning", None) or ""
+    ek = {"giris_token": giris, "max_tokens": max_tokens,
+          "cikti_token": getattr(u, "completion_tokens", None), "dusunce_karakter": len(dusunce)}
+    return dusunce_temizle(c.message.content), c.finish_reason, ek
 
 
 def _sema_json(metin, sema):
