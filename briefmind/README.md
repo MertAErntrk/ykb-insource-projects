@@ -48,6 +48,7 @@ python app.py
 | `kaynak` | `ses` (Whisper) / `ikisi` / `altyazi` |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
 | `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
+| `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
 
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 

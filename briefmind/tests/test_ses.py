@@ -97,3 +97,46 @@ def test_mikrofon_48khz_cihaz_16khz_bloga_iner(monkeypatch):
     assert acilan == {"hiz": 48000, "blok": 4800}
     assert len(blok) == ses.BLOK and blok.dtype == np.float32
     assert 0.6 < float(np.sqrt(np.mean(np.square(blok)))) < 0.8          # sinus enerjisi korunur
+
+
+class _Cevap:
+    def __init__(self, kod, govde=None):
+        self.status_code, self._govde = kod, govde or {}
+
+    def json(self):
+        return self._govde
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise ses.requests.HTTPError(str(self.status_code))
+
+
+def test_stt_kopmada_yeniden_dener(monkeypatch):
+    monkeypatch.setattr(ses.time, "sleep", lambda s: None)
+    s = ses.SttIstemci("https://stt.ornek", proxy=False)
+    assert s._oturum.trust_env is False
+    sira = [ses.requests.exceptions.ChunkedEncodingError("10053"), ses.requests.ConnectionError("10053"),
+            _Cevap(200, {"text": "Raporu perşembeye yetiştirelim."})]
+
+    def istek(ses_, bicim, onceki=""):
+        x = sira.pop(0)
+        if isinstance(x, Exception):
+            raise x
+        return x
+
+    monkeypatch.setattr(s, "_istek", istek)
+    segler = s.coz(np.zeros(16000, dtype="float32"))
+    assert segler[0]["text"].startswith("Raporu") and s.yeniden_deneme == 1
+
+
+def test_stt_kalici_kopmada_hata_verir(monkeypatch):
+    monkeypatch.setattr(ses.time, "sleep", lambda s: None)
+    s = ses.SttIstemci("https://stt.ornek")
+
+    def istek(ses_, bicim, onceki=""):
+        raise ses.requests.ConnectionError("10053")
+
+    monkeypatch.setattr(s, "_istek", istek)
+    import pytest
+    with pytest.raises(ses.requests.ConnectionError):
+        s.coz(np.zeros(16000, dtype="float32"))

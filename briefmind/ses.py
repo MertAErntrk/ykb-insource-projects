@@ -347,7 +347,13 @@ class SttIstemci:
     """OpenAI uyumlu /v1/audio/transcriptions istemcisi. ARGE'nin GPU'lu Turkce servisi
     (model whisper-large-v3-turbo-prod, Bearer EMPTY) ve kendi CPU servisimiz ayni arayuzle calisir."""
 
-    def __init__(self, adres, ipucu_fn=None, zaman_asimi=180, model="whisper", api_key=""):
+    DENEME = 3                                   # baglanti kopmasinda toplam deneme
+    BEKLEME = (0.5, 1.5)                         # denemeler arasi (sn)
+
+    def __init__(self, adres, ipucu_fn=None, zaman_asimi=180, model="whisper", api_key="", proxy=True):
+        self.proxy = proxy                        # False: Windows/ortam proxy'si atlanir, dogrudan baglanilir
+        self._oturum = self._yeni_oturum()
+        self.yeniden_deneme = 0                   # kopma sonrasi basarili tekrar sayisi (teshis)
         self.adres = adres.rstrip("/")
         if self.adres.endswith("/v1/audio/transcriptions"):
             self.adres = self.adres[:-len("/v1/audio/transcriptions")]
@@ -357,13 +363,18 @@ class SttIstemci:
         self.api_key = api_key
         self.verbose = True                       # servis verbose_json bilmiyorsa json'a duser
 
+    def _yeni_oturum(self):
+        o = requests.Session()
+        o.trust_env = bool(self.proxy)
+        return o
+
     def _basliklar(self):
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
     def saglik(self):
         for yol in ("/health", "/v1/models"):
             try:
-                r = requests.get(f"{self.adres}{yol}", headers=self._basliklar(), verify=False, timeout=6)
+                r = self._oturum.get(f"{self.adres}{yol}", headers=self._basliklar(), verify=False, timeout=6)
                 if r.status_code == 200:
                     return True
             except Exception:
@@ -376,17 +387,40 @@ class SttIstemci:
         veri = {"language": "tr", "model": self.model, "temperature": "0", "response_format": bicim}
         if IPUCU_GONDER:
             veri["prompt"] = self._ipucu()[:200]
-        return requests.post(f"{self.adres}/v1/audio/transcriptions", verify=False,
-                             timeout=self.zaman_asimi, headers=self._basliklar(),
-                             files={"file": ("parca.wav", wav_bayt(ses), "audio/wav")}, data=veri)
+        return self._oturum.post(f"{self.adres}/v1/audio/transcriptions", verify=False,
+                                 timeout=self.zaman_asimi, headers=self._basliklar(),
+                                 files={"file": ("parca.wav", wav_bayt(ses), "audio/wav")}, data=veri)
+
+    def _dayanikli_istek(self, ses, bicim, onceki=""):
+        """Baglanti koparsa (Windows 10053/10054, proxy/VPN/OpenShift router bosta kalan baglantiyi
+        kapatti, pod yeniden basladi) ya da sunucu 502/503/504 donerse, yeni bir baglantiyla tekrar dener.
+        Eskiden tek kopma o ses parcasini (konusmayi) kaybettiriyordu."""
+        son_hata = None
+        for deneme in range(self.DENEME):
+            if deneme:
+                time.sleep(self.BEKLEME[min(deneme - 1, len(self.BEKLEME) - 1)])
+            try:
+                r = self._istek(ses, bicim, onceki)
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
+                son_hata = e
+                self._oturum.close()
+                self._oturum = self._yeni_oturum()      # bozuk/yari kapali baglanti havuzunu at
+                continue
+            if r.status_code in (502, 503, 504) and deneme < self.DENEME - 1:
+                son_hata = requests.HTTPError(f"{r.status_code}", response=r)
+                continue
+            if deneme:
+                self.yeniden_deneme += 1
+            return r
+        raise son_hata
 
     def coz(self, ses, onceki=""):
         """Ses -> [{'start','end','text'}] (parca icindeki goreli saniyeler).
         onceki: ayni akisin bir onceki cumlesi (baglam kosullamasi, dogrulugu artirir)."""
-        r = self._istek(ses, "verbose_json" if self.verbose else "json", onceki)
+        r = self._dayanikli_istek(ses, "verbose_json" if self.verbose else "json", onceki)
         if r.status_code == 400 and self.verbose:
             self.verbose = False
-            r = self._istek(ses, "json", onceki)
+            r = self._dayanikli_istek(ses, "json", onceki)
         r.raise_for_status()
         v = r.json()
         return v.get("segments") or ([{"start": 0, "end": 0, "text": v.get("text", "")}]
@@ -400,9 +434,9 @@ class SesServisi:
     konusmaci: mikrofon akisi icin 'ben', loopback icin None (motor altyazidan esler)."""
 
     def __init__(self, stt_adres, ipucu_fn=None, mod="otomatik", mik_cihaz=None, olay=None, satir_fn=None,
-                 model="whisper", api_key=""):
+                 model="whisper", api_key="", proxy=True):
         self.kuyruk = queue.Queue()
-        self.stt = SttIstemci(stt_adres, ipucu_fn, model=model, api_key=api_key)
+        self.stt = SttIstemci(stt_adres, ipucu_fn, model=model, api_key=api_key, proxy=proxy)
         self.mod = mod                       # otomatik | cift | tek
         self.mik_cihaz = mik_cihaz
         self._olay = olay or (lambda t, v: None)
@@ -458,8 +492,12 @@ class SesServisi:
                                      "kuyruk": self.kuyruk.qsize()})
             t0 = time.time()
             try:
+                once = self.stt.yeniden_deneme
                 segmentler = self.stt.coz(p["ses"])
                 self.cozulen += 1
+                if self.stt.yeniden_deneme != once:
+                    self._olay("log", f"  · STT bağlantısı koptu, yeniden denendi ve kurtarıldı "
+                                      f"(toplam {self.stt.yeniden_deneme})")
                 gecikme = round(time.time() - p["bitis"].timestamp(), 2) if isinstance(p["bitis"], dt.datetime) else None
                 self._olay("ses_metin", {"kaynak": p["kaynak"], "segment": len(segmentler),
                                          "sn": round(sure, 1), "islem": round(time.time() - t0, 2),
