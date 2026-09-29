@@ -1,0 +1,70 @@
+"""Ses parcalama ve Whisper sonuc filtreleri (cihaz/STT gerekmez)."""
+import queue
+
+import numpy as np
+
+import ses
+
+
+def test_sonuc_gecerli_gurultulu_gercek_cumleyi_tutar():
+    # sessizlik olasiligi yuksek ama model emin: gercek konusma (eskiden atiliyordu)
+    assert ses.sonuc_gecerli({"no_speech_prob": 0.7, "avg_logprob": -0.4}, "Raporu perşembeye yetiştirelim.")
+    # aksanli/gurultulu: -1.3 artik gecerli
+    assert ses.sonuc_gecerli({"avg_logprob": -1.3}, "Jira kaydını açalım mı?")
+
+
+def test_sonuc_gecerli_halusinasyonu_eler():
+    assert not ses.sonuc_gecerli({"no_speech_prob": 0.8, "avg_logprob": -1.1}, "Evet evet.")
+    assert not ses.sonuc_gecerli({"avg_logprob": -1.7}, "Bir şeyler söyledi galiba.")
+    assert not ses.sonuc_gecerli({}, "İzlediğiniz için teşekkür ederim.")
+
+
+def test_bolme_noktasi_en_sessiz_blok():
+    enerji = [0.1] * 120
+    enerji[112] = 0.001
+    assert ses.bolme_noktasi(enerji) == 112
+    assert 1 <= ses.bolme_noktasi([0.2, 0.2]) < 2
+
+
+class SahteAkis(ses.AkisYakalayici):
+    def __init__(self, bloklar, kuyruk):
+        super().__init__("mikrofon", kuyruk)
+        self._sahte = bloklar
+
+    def _bloklar_mikrofon(self):
+        yield from self._sahte
+
+
+def _blok(genlik, rng):
+    return (genlik * rng.standard_normal(ses.BLOK)).astype("float32")
+
+
+def test_uzun_konusma_nefeste_bolunur_ses_kaybolmaz():
+    rng = np.random.default_rng(0)
+    # 1 sn sessizlik, 20 sn araliksiz konusma (tek bir kisa enerji cukuru 11.4. sn'de), 1 sn sessizlik
+    bloklar = [_blok(0.0005, rng) for _ in range(10)]
+    konusma = [_blok(0.1, rng) for _ in range(200)]
+    konusma[114] = _blok(0.02, rng)
+    bloklar += konusma + [_blok(0.0005, rng) for _ in range(10)]
+    q = queue.Queue()
+    a = SahteAkis(bloklar, q)
+    a.run()
+    parcalar = []
+    while not q.empty():
+        parcalar.append(q.get())
+    assert len(parcalar) >= 2
+    toplam = sum(len(p["ses"]) for p in parcalar) / ses.ORNEK
+    assert toplam >= 20.0                       # konusmanin tamami gonderildi
+    ilk = len(parcalar[0]["ses"]) / ses.ORNEK
+    assert ilk < ses.ZORLA_SN                   # zorla sinira gelmeden, enerji cukurunda bolundu
+    assert parcalar[1]["basla"] > parcalar[0]["basla"]
+
+
+def test_kuyruk_kisa_gecikmede_parca_atmaz():
+    q = queue.Queue()
+    for _ in range(ses.KUYRUK_UYARI + 3):
+        q.put({"ses": None})
+    olaylar = []
+    a = ses.AkisYakalayici("mikrofon", q, olay=lambda t, v: olaylar.append((t, v)))
+    a._gonder([np.full(ses.ORNEK * 2, 0.1, dtype="float32")], None)
+    assert q.qsize() == ses.KUYRUK_UYARI + 4

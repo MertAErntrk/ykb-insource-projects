@@ -36,7 +36,9 @@ ACILIS_BLOK = 3              # konusma sayilmasi icin ust uste bu kadar "sesli" 
 KONUSMA_ORANI = 0.35         # parcadaki sesli blok orani bundan azsa gonderilmez
 IPUCU_GONDER = False         # Whisper prompt'u: sozluk terimleri sessizlikte halusinasyona donusuyor ("ODS'i kullandiginda")
 BLOK = 1600                  # 0.1 sn
-KUYRUK_TAVAN = 12            # bu kadar cumle birikirse STT yetisemiyor demektir
+KUYRUK_UYARI = 12            # bu kadar cumle birikirse STT yetisemiyor: uyar (parca atilmaz)
+KUYRUK_TAVAN = 60            # ancak bu kadar birikirse (STT fiilen yok) parca atilir; ~45 MB bellek
+BOLME_PENCERE = 15           # zorla kesimde son 1.5 sn icindeki en sessiz blokta bolunur
 ISCI_SAYISI = 2
 
 
@@ -120,9 +122,9 @@ class AkisYakalayici(threading.Thread):
 
     # --- parcalama ---
     def run(self):
-        tampon, sessiz_sn, parca_bas = [], 0.0, None
-        onyuk, aday = [], []                                    # on-yuk; acilis adayi bloklar
-        sesli_sayac = 0                                         # parcadaki sesli blok sayisi
+        tampon, enerji, bayrak = [], [], []                     # bloklar, RMS'leri, sesli mi
+        sessiz_sn, parca_bas = 0.0, None
+        onyuk, aday = [], []                                    # on-yuk (blok, rms, sesli); acilis adayi bloklar
         taban = SESSIZ_ESIK                                     # uyarlanan gurultu tabani
         self._olay("log", f"  {self.kaynak} akışı açılıyor…")
         try:
@@ -138,28 +140,37 @@ class AkisYakalayici(threading.Thread):
                 esik = max(SESSIZ_ESIK, taban * GURULTU_KATI)
                 sesli = rms >= esik
                 if not tampon:
-                    onyuk.append(blok)
+                    onyuk.append((blok, rms, sesli))
                     onyuk = onyuk[-(ONYUK_BLOK + ACILIS_BLOK):]
                     aday = (aday + [blok]) if sesli else []
                     if len(aday) < ACILIS_BLOK:
                         continue                               # tek klik/tus sesi acmaz
-                    tampon.extend(onyuk)                       # on-yuk + acilis bloklari
-                    sesli_sayac, aday, onyuk = ACILIS_BLOK, [], []
+                    tampon = [b for b, _, _ in onyuk]          # on-yuk + acilis bloklari
+                    enerji = [r for _, r, _ in onyuk]
+                    bayrak = [False] * (len(onyuk) - ACILIS_BLOK) + [True] * ACILIS_BLOK
+                    aday, onyuk = [], []
                     parca_bas = dt.datetime.now() - dt.timedelta(seconds=len(tampon) * sn)
                     sessiz_sn = 0.0
                     continue
                 tampon.append(blok)
-                sesli_sayac += 1 if sesli else 0
+                enerji.append(rms)
+                bayrak.append(sesli)
                 sessiz_sn = 0.0 if sesli else sessiz_sn + sn
                 uzunluk = sum(len(b) for b in tampon) / ORNEK
-                kes = ((uzunluk >= MIN_SN and sessiz_sn >= CUMLE_SESSIZLIK)      # cumle bitti
-                       or (uzunluk >= TAVAN_SN and sessiz_sn >= NEFES_SESSIZLIK)  # uzun konusma, nefes payi
-                       or uzunluk >= ZORLA_SN)
-                if kes:
-                    self._gonder(tampon, parca_bas, sesli_sayac / max(1, len(tampon)))
-                    tampon, sessiz_sn, parca_bas, sesli_sayac = [], 0.0, None, 0
+                if ((uzunluk >= MIN_SN and sessiz_sn >= CUMLE_SESSIZLIK)          # cumle bitti
+                        or (uzunluk >= TAVAN_SN and sessiz_sn >= NEFES_SESSIZLIK)):  # uzun konusma, nefes payi
+                    self._gonder(tampon, parca_bas, sum(bayrak) / len(tampon))
+                    tampon, enerji, bayrak, sessiz_sn, parca_bas = [], [], [], 0.0, None
+                elif uzunluk >= ZORLA_SN:
+                    # Sessizlik hic gelmedi. Tam ZORLA_SN'de kesmek kelimeyi ortadan boler, iki parca da
+                    # Whisper'da bozuk cikar: son 1.5 sn'nin en sessiz blogunda bol, kalani sonraki parcaya.
+                    bol = bolme_noktasi(enerji)
+                    self._gonder(tampon[:bol], parca_bas, sum(bayrak[:bol]) / bol)
+                    parca_bas += dt.timedelta(seconds=sum(len(b) for b in tampon[:bol]) / ORNEK)
+                    tampon, enerji, bayrak = tampon[bol:], enerji[bol:], bayrak[bol:]
+                    sessiz_sn = 0.0
             if tampon:
-                self._gonder(tampon, parca_bas, sesli_sayac / max(1, len(tampon)))
+                self._gonder(tampon, parca_bas, sum(bayrak) / len(tampon))
         except Exception as e:
             self.hata = e
             ek = ""
@@ -175,11 +186,25 @@ class AkisYakalayici(threading.Thread):
             return
         if float(np.sqrt(np.mean(np.square(ses)))) < SESSIZ_ESIK:
             return
-        if self.kuyruk.qsize() >= KUYRUK_TAVAN:
-            self._olay("stt_gecikme", self.kuyruk.qsize())
-            return                                              # STT yetisemiyor: parcayi dusur
+        birikmis = self.kuyruk.qsize()
+        if birikmis >= KUYRUK_TAVAN:
+            self._olay("stt_gecikme", {"kuyruk": birikmis, "atlandi": True})
+            return                                              # STT fiilen yok: parcayi dusur
+        if birikmis and birikmis % KUYRUK_UYARI == 0:
+            # Eskiden 12'de parca atiliyordu: STT kisa bir sure yavasladiginda konusma kayboluyordu.
+            self._olay("stt_gecikme", {"kuyruk": birikmis, "atlandi": False})
         self.kuyruk.put({"kaynak": self.kaynak, "basla": basla,
                          "bitis": dt.datetime.now(), "ses": ses})
+
+
+def bolme_noktasi(enerji, pencere=BOLME_PENCERE):
+    """Zorla kesimde bolunecek blok indeksi: son `pencere` blok icindeki en sessiz blok.
+    Donen i icin tampon[:i] gonderilir, tampon[i:] sonraki parcaya kalir (1 <= i < len)."""
+    n = len(enerji)
+    if n < 2:
+        return n
+    bas = max(1, n - pencere)
+    return min(range(bas, n), key=lambda k: enerji[k])
 
 
 def tekrar_temizle(metin):
@@ -260,15 +285,26 @@ def cumlelere_bol(segmentler, sure):
 
 KISA_GECERLI = {"evet", "hayır", "hayir", "tamam", "peki", "yok", "ok", "olur", "aynen", "doğru", "dogru", "hı", "hıhı"}
 
+# Whisper'in sessizlige/muzige yapistirdigi, egitim verisindeki video altyazilarindan gelen kaliplar
+HALUSINASYON = ("izlediğiniz için teşekkür", "izlediginiz icin tesekkur", "abone olmayı unutmayın",
+                "abone olmayi unutmayin", "beğenmeyi unutmayın", "altyazı m.k", "altyazı: m.k",
+                "bir sonraki videoda görüşmek", "kanalıma abone")
+
 
 def sonuc_gecerli(segment, metin):
     """Whisper ciktisi gercek konusma mi? Halusinasyon belirtilerini eler."""
     import re
     nsp = segment.get("no_speech_prob")
-    if isinstance(nsp, (int, float)) and nsp > 0.6:
-        return False
     lp = segment.get("avg_logprob")
-    if isinstance(lp, (int, float)) and lp < -1.2:
+    lp_var = isinstance(lp, (int, float))
+    # Whisper'in kendi kurali: sessizlik olasiligi yuksek VE guven dusukse konusma yoktur. Yalniz
+    # no_speech_prob'a bakmak, arka plan gurultulu gercek cumleleri de atiyordu.
+    if isinstance(nsp, (int, float)) and nsp > 0.6 and (not lp_var or lp < -1.0):
+        return False
+    if lp_var and lp < -1.5:                   # -1.2 esigi aksanli/gurultulu gercek konusmayi da eliyordu
+        return False
+    ml = metin.replace("İ", "i").replace("I", "ı").lower()
+    if any(h in ml for h in HALUSINASYON):
         return False
     kelimeler = re.findall(r"[^\W\d_]+", metin, flags=re.UNICODE)
     if not kelimeler:

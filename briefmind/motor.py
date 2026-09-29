@@ -61,10 +61,12 @@ def ilgili_terimler(terimler, metin):
     return secilen
 
 
-def dayanak_kontrolu(not_md, transkript, esik=0.34):
+def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
     """Nottaki Karar/Aksiyon maddelerini ve ozet cumlelerini transkriptle karsilastirir; kelime
     koklerinin yeterli kismi transkriptte gecmeyen maddeleri cikarir. Modelin sozluk/gundemden
-    ya da genel bilgisinden 'uydurdugu' satirlara karsi son sigorta. Dondurur (yeni_md, atilanlar)."""
+    ya da genel bilgisinden 'uydurdugu' satirlara karsi son sigorta. Dondurur (yeni_md, atilanlar).
+    ozet_kaynak: ozet paragrafi icin ek dayanak (bolum ozetleri). Ozet cumleleri soyutlayici fiiller
+    ('gorusuldu', 'ele alindi') tasir; yalniz transkriptle olculunce dogru cumleler de atiliyordu."""
     kokler = _kokler(transkript)
     if len(kokler) < 6:
         return not_md, []
@@ -113,15 +115,18 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34):
     md = "\n".join(yeni)
     m = re.search(r"(## Özet\s*\n)(.*?)(\n## )", md, flags=re.S)
     if m:
+        ozet_kokler = kokler | (_kokler(ozet_kaynak) if ozet_kaynak else set())
         cumleler = re.split(r"(?<=[.!?])\s+", m.group(2).strip())
-        tutulan = []
+        tutulan, ozet_atilan = [], []
         for c in cumleler:
             ck = _kokler(c)
-            if not ck or len(ck & kokler) / len(ck) >= esik - 0.06:
+            if not ck or len(ck & ozet_kokler) / len(ck) >= esik - 0.06:
                 tutulan.append(c)
             else:
-                atilan.append(c)
-        md = md[:m.start(2)] + " ".join(tutulan) + "\n" + md[m.end(2):]
+                ozet_atilan.append(c)
+        if tutulan:                   # hepsi atiliyorsa olcut yanilmistir: ozeti bos birakma
+            atilan += ozet_atilan
+            md = md[:m.start(2)] + " ".join(tutulan) + "\n" + md[m.end(2):]
     return md, atilan
 
 
@@ -252,10 +257,11 @@ class Motor:
             kim, benzer = self._konusmaci_bul(ts, metin, puanla=True)
             if benzer is not None:
                 self.uyum = (self.uyum + [benzer])[-30:]
-                # Kisa (<=3 kelime) ve altyazinin hic dogrulamadigi parca: buyuk olasilikla Whisper
+                # Cok kisa (<=2 kelime) ve altyazinin hic dogrulamadigi parca: buyuk olasilikla Whisper
                 # gurultuye yazdi ("Rides", "Hesap etrafi"). Kisa onaylar (tamam/evet) haric elenir.
+                # 3 kelimelik gercek cumleler, Teams altyazisi bozuk oldugunda da korunur.
                 kelime = [k for k in re.findall(r"[^\W\d_]+", metin) if len(k) >= 3]
-                if len(kelime) <= 3 and metin.lower().strip(" .?!,") not in KISA_ONAY:
+                if len(kelime) <= 2 and metin.lower().strip(" .?!,") not in KISA_ONAY:
                     alt_kok = self._altyazi_kokleri(ts)
                     if alt_kok and not any(_kokler(k) & alt_kok for k in kelime):
                         self._olay("log", f"  · elendi (altyazı doğrulamadı): {metin[:40]}")
@@ -502,25 +508,32 @@ class Motor:
         return len(kirli)
 
     def notu_uret(self):
-        bolumler = []
+        bolumler, eksik = [], []
         for no in range(1, self.parca_no + 1):
             veri = self.parca_oku(no)
             if veri.get("ozet") is None:
                 self.log(f"  parça {no} özetleniyor...")
                 self._isle(veri, False)
                 veri = self.parca_oku(no)
+            aralik = f"{veri.get('baslangic', '')}–{veri.get('bitis', '')}"
             if veri.get("ozet"):
                 b = dict(veri["ozet"])
-                b["aralik"] = f"{veri.get('baslangic', '')}–{veri.get('bitis', '')}"
+                b["aralik"] = aralik
                 bolumler.append(b)
             else:
-                self.log(f"  ! parça {no} notta yer almayacak ({veri['baslangic']}–{veri['bitis']})")
+                eksik.append(aralik)
+                self.log(f"  ! parça {no} notta yer almayacak ({aralik})")
         self.log("bölümler birleştiriliyor...")
         transkript = self.transkript_metni()
         not_md = f"# {self.baslik} — {self.tarih.isoformat()}\n\n" + llm.birlestir(bolumler, self.baglam(transkript), self.log)
-        not_md, atilan = dayanak_kontrolu(not_md, transkript)
+        bolum_ozetleri = "\n".join(b.get("ozet", "") for b in bolumler)
+        not_md, atilan = dayanak_kontrolu(not_md, transkript, ozet_kaynak=bolum_ozetleri)
         for madde in atilan:
             self.log(f"  ! transkriptte dayanağı yok, nottan çıkarıldı: {madde[:90]}")
+        if eksik:
+            # sessizce eksik not yerine okuyana hangi araligin notta olmadigini soyle
+            not_md = not_md.rstrip("\n") + "\n\n## Eksik bölümler\n" + "\n".join(
+                f"- {a} arası özetlenemedi; ayrıntı için transkripte bakın." for a in eksik) + "\n"
         with open(os.path.join(self.klasor, "not.md"), "w", encoding="utf-8") as f:
             f.write(not_md)
         self.meta_yaz("tamam")

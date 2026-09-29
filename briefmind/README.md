@@ -59,6 +59,15 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 
 Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplantılarımda her zaman alt yazıları göster*.
 
+## Test
+
+```powershell
+pip install pytest
+python -m pytest tests
+```
+
+Testler LLM sunucusu ya da ses cihazı gerektirmez. Uçtan uca analiz ve yol haritası için bkz. [`docs/GELISTIRME_PLANI.md`](docs/GELISTIRME_PLANI.md).
+
 ## Gizlilik ve uyum
 
 - Ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir.

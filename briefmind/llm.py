@@ -1,12 +1,18 @@
 """
 llm.py — Qwen3.8 (vLLM): altyazi duzeltme, bolum ozeti, birlestirme.
+
+Birlestirme (tam not) tek uzun Markdown cevabi istemez: once karar/aksiyon/acik soru listeleri
+(kucuk JSON), sonra ozet paragrafi + sonraki adim (kucuk JSON) alinir, Markdown kodda kurulur.
+Boylece cevap max_tokens'a takilip yarim kalmaz, basliklar hep Turkce olur; Ingilizce ya da
+kesik cevapta LLM'siz yedege (bolum notlarinin kendisi) dusulur.
 """
+import difflib
 import json
 import os
 import re
 
 import httpx
-from openai import OpenAI
+from openai import BadRequestError, OpenAI, UnprocessableEntityError
 
 CONFIG = "config.json"
 _cfg = {}
@@ -22,7 +28,6 @@ ROUTE = _cfg.get("route") or "http://localhost:8000/v1"          # config.json: 
 MODEL = _cfg.get("model") or "Qwen3.8-27B-FP8"
 BAGLAM_PENCERESI = int(_cfg.get("context") or 16384)   # sunucunun max-model-len'i
 MARJ = 350                                             # sablon + guvenlik payi
-GRUP_BOYU = 10
 
 client = OpenAI(base_url=ROUTE, api_key="x",
                 http_client=httpx.Client(verify=False, trust_env=False, timeout=900))
@@ -64,6 +69,9 @@ DUZELT_SISTEM = (
     "Emin olmadığını listeye alma. En fazla 25 madde. Yalnızca JSON döndür."
 )
 
+TURKCE_KURAL = ("ÇIKTI DİLİ: Bütün alanları yalnızca TÜRKÇE yaz. Terimleri, ürün ve kişi adlarını olduğu gibi "
+                "bırak ama cümleleri asla İngilizce kurma.")
+
 MAP_SISTEM = (
     "Sen deneyimli bir toplantı not alıcısısın. Sana bir toplantının BİR bölümünün transkripti verilecek "
     "(konuşmadan yazıya çevrilmiş; kısmen düzeltilmiş, hâlâ bozuk kelimeler olabilir).\n"
@@ -79,31 +87,44 @@ MAP_SISTEM = (
     "- acik_sorular: cevaplanmadan kalan sorular, ertelenen konular, netleşmemiş öneriler.\n"
     "- belirsiz_terimler: bozuk duyulduğunu düşündüğün kelime/terimler (transkriptteki yazımıyla).\n"
     "Kurallar: emin olamadığın yeri olduğu gibi aktar ve sonuna (?) koy. Sözlük ve gündem yalnızca yazım "
-    "ipucudur; oradan içerik üretme. Bölümde bir şey yoksa ilgili liste boş kalır, ozet 1 cümle olur. "
-    "Türkçe yaz. Yalnızca JSON döndür."
+    "ipucudur; oradan içerik üretme. Bölümde bir şey yoksa ilgili liste boş kalır, ozet 1 cümle olur.\n"
+    + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
 
-REDUCE_SISTEM = (
-    "Sen deneyimli bir toplantı not alıcısısın. Sana bir toplantının bölüm bölüm çıkarılmış notları "
-    "verilecek (her bölümün özeti, kararları, aksiyonları, açık soruları). Bunları TEK bir toplantı notuna "
-    "dönüştür.\n"
-    "Nasıl:\n"
-    "1) ## Özet: bölüm özetlerini KRONOLOJİK sırayla birbirine bağla; toplantının akışını anlat (neyle "
-    "başladı, ne tartışıldı, nereye varıldı). Bölüm özetlerinde olmayan hiçbir bilgi ekleme; genel "
-    "bilginle boşluk doldurma. Uzunluk içerikle orantılı: kısa toplantı 2-3 cümle, uzun toplantı en fazla 8.\n"
-    "2) ## Kararlar: bölümlerdeki kararları birleştir; aynı karar birden fazla bölümde geçiyorsa tek satır; "
-    "çelişkide sonraki bölüm geçerli. Karar olmayanı (öneri/niyet) buraya taşıma.\n"
-    "3) ## Aksiyonlar: tablo; aynı iş tekrar ediyorsa tek satır; sorumlu adları katılımcı listesindeki "
-    "yazımla; tarih yoksa '-'.\n"
-    "4) ## Açık sorular: toplantı sonunda hâlâ açık kalanlar (sonraki bölümde cevaplananları çıkar).\n"
-    "5) ## Bir sonraki adım: 1-2 cümle, yalnızca kararlardan/aksiyonlardan türetilmiş.\n"
-    "KESİN KURALLAR: Yalnızca bölüm notlarında geçenleri yaz. Sözlük, gündem, katılımcı listesi ya da genel "
-    "bilginden konu, karar, aksiyon EKLEME. Bölüm notları azsa not da kısa olsun; yapıyı doldurmak için "
-    "uydurma; boş bölümü '-' bırak. (?) işaretli belirsizlikleri koru. Türkçe, kısa ve net.\n"
-    "Şu Markdown yapısını kullan:\n"
-    "## Özet\n...\n\n## Kararlar\n- ...\n\n"
-    "## Aksiyonlar\n| # | Madde | Sorumlu | Tarih |\n|---|---|---|---|\n| 1 | ... |\n\n"
-    "## Açık sorular\n- ...\n\n## Bir sonraki adım\n..."
+LISTE_SEMASI = {
+    "type": "object",
+    "properties": {k: BOLUM_SEMASI["properties"][k] for k in ("kararlar", "aksiyonlar", "acik_sorular")},
+    "required": ["kararlar", "aksiyonlar", "acik_sorular"],
+}
+
+GENEL_SEMASI = {
+    "type": "object",
+    "properties": {"ozet": {"type": "string"}, "sonraki_adim": {"type": "string"}},
+    "required": ["ozet", "sonraki_adim"],
+}
+
+LISTE_SISTEM = (
+    "Sen deneyimli bir toplantı not alıcısısın. Sana bir toplantının bölümlerinden çıkarılmış karar, aksiyon "
+    "ve açık soru listeleri verilecek; her maddenin başında hangi bölümden geldiği [B3] gibi yazılı.\n"
+    "Görev: listeleri TEK toplantı için birleştir.\n"
+    "- Aynı ya da çok benzer maddeleri tek maddede birleştir; çelişkide sonraki bölüm geçerlidir.\n"
+    "- Sonraki bir bölümde cevaplanan ya da karara bağlanan açık soruyu listeden çıkar.\n"
+    "- Öneri ya da niyet düzeyindeki ifadeyi karara çevirme.\n"
+    "- Aksiyonlarda sorumlu adını katılımcı listesindeki yazımla ver, belli değilse 'belirsiz'; tarih yoksa '-'.\n"
+    "- Yeni madde EKLEME; sözlük, gündem ya da genel bilgiden içerik üretme. İfadeleri kısaltabilirsin, anlamı "
+    "değiştirme. [B..] etiketlerini çıktıya yazma. (?) işaretli belirsizlikleri koru.\n"
+    + TURKCE_KURAL + " Yalnızca JSON döndür."
+)
+
+GENEL_SISTEM = (
+    "Sen deneyimli bir toplantı not alıcısısın. Sana bir toplantının bölüm bölüm çıkarılmış özetleri ve "
+    "birleştirilmiş kararları/aksiyonları verilecek.\n"
+    "- ozet: bölüm özetlerini KRONOLOJİK sırayla bağlayıp toplantının akışını anlatan TEK paragraf (neyle "
+    "başladı, ne tartışıldı, nereye varıldı). Bölüm özetlerinde olmayan bilgi ekleme; genel bilginle boşluk "
+    "doldurma. Uzunluk içerikle orantılı: kısa toplantı 2-3 cümle, uzun toplantı en fazla 8 cümle.\n"
+    "- sonraki_adim: 1-2 cümle, yalnızca verilen kararlardan ve aksiyonlardan türetilmiş; hiç karar ve "
+    "aksiyon yoksa '-'.\n"
+    + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
 
 
@@ -140,11 +161,46 @@ def _metin(x):
 
 
 def json_ayikla(metin):
-    metin = re.sub(r"```(?:json)?", "", metin).strip()
+    metin = re.sub(r"```(?:json)?", "", dusunce_temizle(metin)).strip()
     a, b = metin.find("{"), metin.rfind("}")
     if a < 0 or b < 0:
         raise ValueError("JSON yok")
     return json.loads(re.sub(r",\s*([}\]])", r"\1", metin[a:b + 1]))
+
+
+_DUSUNCE = re.compile(r"<think>.*?</think>", re.S)
+
+
+def dusunce_temizle(metin):
+    """Qwen dusunme blogunu cevaptan ayiklar. Sunucuda reasoning parser yoksa ya da cevap dusunme
+    sirasinda max_tokens'a takildiysa (Ingilizce) dusunce metni content'e duser; notta Ingilizce
+    paragraflar ve yarim kalan cevap olarak gorunur."""
+    if not metin:
+        return ""
+    metin = _DUSUNCE.sub("", metin)
+    if "<think>" in metin:                    # kapanmamis dusunce: cevap hic baslamamis
+        metin = metin.split("<think>", 1)[0]
+    if "</think>" in metin:                   # acilis etiketi sablonda verilmis, yalniz kapanis gelmis
+        metin = metin.split("</think>", 1)[1]
+    return metin.strip()
+
+
+_EN_KELIME = {"the", "and", "of", "to", "is", "are", "was", "were", "be", "been", "will", "with", "for",
+              "that", "this", "on", "in", "it", "we", "they", "should", "would", "which", "from", "by",
+              "as", "an", "at", "not", "have", "has", "about", "their", "there", "discussed", "meeting"}
+_TR_KELIME = {"ve", "bir", "bu", "için", "ile", "da", "de", "olarak", "olan", "gibi", "daha", "çok", "ama",
+              "ancak", "ise", "sonra", "önce", "üzerinde", "konusunda", "toplantı", "karar", "edildi",
+              "yapıldı", "belirtildi", "gerekiyor", "yapılacak", "ele", "alındı"}
+
+
+def ingilizce_mi(metin):
+    """Metin cogunlukla Ingilizce mi? (Turkce toplantida araya giren Ingilizce terimler sayilmaz.)"""
+    kelimeler = re.findall(r"[a-zçğıöşü]+", (metin or "").replace("İ", "i").replace("I", "ı").lower())
+    if len(kelimeler) < 6:
+        return False
+    en = sum(k in _EN_KELIME for k in kelimeler)
+    tr = sum(k in _TR_KELIME or any(c in "çğıöşü" for c in k) for k in kelimeler)
+    return en >= 3 and en > tr
 
 
 def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
@@ -162,29 +218,45 @@ def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusun
             r = client.chat.completions.create(
                 response_format={"type": "json_schema", "json_schema": {"name": "cikti", "schema": sema}},
                 **ortak)
-        except Exception:
+        except (BadRequestError, UnprocessableEntityError):   # json_schema desteklenmiyor; zaman asimi tekrarlanmaz
             r = client.chat.completions.create(**ortak)
     else:
         r = client.chat.completions.create(**ortak)
     c = r.choices[0]
-    return (c.message.content or "").strip(), c.finish_reason
+    return dusunce_temizle(c.message.content), c.finish_reason
 
 
 def _json_sor(mesajlar, max_tokens, sema, effort="medium", temperature=0.6, dusunme=True):
     """JSON ister; kesilirse dusunmesiz ve daha genis tekrar dener, bozuksa onarim. Basarisizsa None."""
     metin, neden = sor(mesajlar, max_tokens, sema=sema, effort=effort, temperature=temperature, dusunme=dusunme)
-    if neden == "length":
+    if neden == "length" or not metin:
         metin, neden = sor(mesajlar, int(max_tokens * 1.5), sema=sema, temperature=temperature, dusunme=False)
     try:
         return json_ayikla(metin)
     except Exception:
+        if not metin:
+            return None
         onarim = [{"role": "system", "content": "Bozuk JSON'u düzelt. Yalnızca geçerli JSON döndür."},
                   {"role": "user", "content": metin}]
-        onarilmis, _ = sor(onarim, max_tokens, effort="low", temperature=0.1)
+        onarilmis, _ = sor(onarim, max_tokens, temperature=0.1, dusunme=False)
         try:
             return json_ayikla(onarilmis)
         except Exception:
             return None
+
+
+def _json_tam(mesajlar, max_tokens, sema, temperature=0.2):
+    """Dusunmesiz JSON; kesilmis (length) cevabi KABUL ETMEZ — yarim liste sessizce eksik not demektir.
+    Bir kez daha genis butceyle dener; yine olmazsa None (cagiran LLM'siz yedege duser)."""
+    for butce in (max_tokens, int(max_tokens * 1.6)):
+        metin, neden = sor(mesajlar, butce, sema=sema, temperature=temperature, dusunme=False)
+        if neden == "length":
+            continue
+        try:
+            return json_ayikla(metin)
+        except Exception:
+            continue
+    return None
 
 
 def baglam_metni(baslik, tarih, konusmacilar, sozluk_metni, gundem=""):
@@ -219,7 +291,8 @@ def satirlari_duzelt(satirlar, baglam):
     for satir in satirlar:
         kim, _, ne = satir.partition(":")
         for o, y in duzeltmeler:
-            ne = re.sub(re.escape(o), y, ne, flags=re.IGNORECASE)
+            # kelime sinirli: 'ata' -> 'Ata' duzeltmesi 'hatalar'in icini bozmasin
+            ne = re.sub(r"(?<!\w)" + re.escape(o) + r"(?!\w)", lambda _, y=y: y, ne, flags=re.IGNORECASE)
         cikti.append(f"{kim}:{ne}")
     return cikti, duzeltmeler
 
@@ -249,55 +322,217 @@ def normalize_ozet(o):
     return temiz
 
 
+def _ozet_dili(o):
+    return " ".join([o["ozet"]] + o["kararlar"] + o["acik_sorular"] + [a["madde"] for a in o["aksiyonlar"]])
+
+
 def bolum_ozetle(blok, sira, baglam, onceki_konular=None):
     onceki = [_metin(k) for k in (onceki_konular or []) if _metin(k).strip()]
     devam = f"\nÖnceki bölümde konuşulanlar: {', '.join(onceki)}" if onceki else ""
-    mesajlar = [{"role": "system", "content": MAP_SISTEM},
-                {"role": "user", "content": f"{baglam}{devam}\n\nToplantının {sira}. bölümü:\n\n{blok}"}]
+    kullanici = {"role": "user", "content": f"{baglam}{devam}\n\nToplantının {sira}. bölümü:\n\n{blok}"}
+    mesajlar = [{"role": "system", "content": MAP_SISTEM}, kullanici]
     # JSON cikarimi derin dusunme istemez: "low" ile dusunme tokenleri kisa kalir, cevap kesilmez
-    return normalize_ozet(_json_sor(mesajlar, 3000, BOLUM_SEMASI, effort="low", temperature=0.3))
+    o = normalize_ozet(_json_sor(mesajlar, 3000, BOLUM_SEMASI, effort="low", temperature=0.3))
+    if o and ingilizce_mi(_ozet_dili(o)):
+        # Model (cogunlukla dusunme dilinin etkisiyle) Ingilizce yazdi: dusunmesiz, dil kurali vurgulu tekrar
+        tekrar = [{"role": "system", "content": MAP_SISTEM + "\n" + TURKCE_KURAL}, kullanici]
+        o2 = normalize_ozet(_json_sor(tekrar, 3000, BOLUM_SEMASI, temperature=0.2, dusunme=False))
+        if o2 and not ingilizce_mi(_ozet_dili(o2)):
+            o = o2
+    return o
 
 
-def bolum_metni(b, no):
-    """Bolum notunu modele JSON yerine okunur, kompakt metin olarak verir (daha az token, daha az kayma)."""
-    if "ara_not" in b:
-        return f"### Ara not {no}\n{b['ara_not']}"
-    aralik = f" ({b['aralik']})" if b.get("aralik") else ""
-    satirlar = [f"### Bölüm {no}{aralik}"]
-    if b.get("ozet"):
-        satirlar.append(f"Özet: {b['ozet']}")
-    if b.get("konular"):
-        satirlar.append("Konular: " + "; ".join(b["konular"]))
-    if b.get("kararlar"):
-        satirlar.append("Kararlar:\n" + "\n".join(f"- {k}" for k in b["kararlar"]))
-    if b.get("aksiyonlar"):
-        satirlar.append("Aksiyonlar:\n" + "\n".join(
-            f"- {a.get('madde', '')} — {a.get('sorumlu', 'belirsiz')} — {a.get('tarih', '-')}" for a in b["aksiyonlar"]))
-    if b.get("acik_sorular"):
-        satirlar.append("Açık sorular:\n" + "\n".join(f"- {q}" for q in b["acik_sorular"]))
-    return "\n".join(satirlar)
+# ---------- birlestirme (tam not) ----------
+
+def _sade(s):
+    s = normalize_bosluk(s).lower()
+    for a, b in zip("çğıöşüâî", "cgiosuai"):
+        s = s.replace(a, b)
+    return re.sub(r"[^a-z0-9 ]", "", s)
 
 
-def _birlestir(bolumler, baglam, ilerleme=print):
-    icerik = "\n\n".join(bolum_metni(b, i + 1) for i, b in enumerate(bolumler))
-    mesajlar = [{"role": "system", "content": REDUCE_SISTEM},
-                {"role": "user", "content": f"{baglam}\n\nBölüm notları ({len(bolumler)} bölüm):\n\n{icerik}"}]
-    # Olgusal birlestirme: dusuk sicaklik, kisa dusunme. Cevap kesilirse dusunmesiz ve daha genis tekrar.
-    metin, neden = sor(mesajlar, 3500, effort="low", temperature=0.3)
-    if neden == "length" or not metin.strip():
-        ilerleme("  birleştirme kesildi, düşünmesiz tekrar deneniyor...")
-        metin, neden = sor(mesajlar, 4500, temperature=0.3, dusunme=False)
-    return metin
+def normalize_bosluk(s):
+    return re.sub(r"\s+", " ", str(s or "")).strip()
+
+
+def _benzer(a, b, esik=0.85):
+    a, b = _sade(a), _sade(b)
+    return bool(a) and (a == b or difflib.SequenceMatcher(None, a, b).ratio() >= esik)
+
+
+def _aksiyon_birlestir(eski, yeni):
+    """Ayni is iki bolumde gectiyse sonrakini tut; sonrakinde sorumlu/tarih bossa oncekinden al."""
+    v = dict(yeni)
+    if v.get("sorumlu") in ("", "belirsiz", None) and eski.get("sorumlu") not in ("", "belirsiz", None):
+        v["sorumlu"] = eski["sorumlu"]
+    if v.get("tarih") in ("", "-", None) and eski.get("tarih") not in ("", "-", None):
+        v["tarih"] = eski["tarih"]
+    return v
+
+
+def listeleri_tekille(bolumler):
+    """LLM'siz birlestirme: bolum listelerini sirayla toplar, benzer maddelerde sonraki bolumu tutar.
+    Hem LLM birlestirmesi basarisiz olursa yedek, hem de onun sonucunu denetlemek icin olcut."""
+    sonuc = {"kararlar": [], "aksiyonlar": [], "acik_sorular": []}
+
+    def ekle(liste, oge, anahtar, birlestir=None):
+        for i, v in enumerate(liste):
+            if _benzer(anahtar(v), anahtar(oge)):
+                liste[i] = birlestir(v, oge) if birlestir else oge
+                return
+        liste.append(oge)
+
+    for b in bolumler:
+        for k in b.get("kararlar") or []:
+            ekle(sonuc["kararlar"], k, str)
+        for a in b.get("aksiyonlar") or []:
+            ekle(sonuc["aksiyonlar"], a, lambda x: x.get("madde", ""), _aksiyon_birlestir)
+        for q in b.get("acik_sorular") or []:
+            ekle(sonuc["acik_sorular"], q, str)
+    return sonuc
+
+
+def _liste_girdisi(bolumler):
+    bloklar, adet = [], 0
+    for alan, baslik in (("kararlar", "Kararlar"), ("aksiyonlar", "Aksiyonlar"), ("acik_sorular", "Açık sorular")):
+        ogeler = []
+        for i, b in enumerate(bolumler, 1):
+            for x in b.get(alan) or []:
+                if alan == "aksiyonlar":
+                    ogeler.append(f"- [B{i}] {x.get('madde', '')} — {x.get('sorumlu', 'belirsiz')} — {x.get('tarih', '-')}")
+                else:
+                    ogeler.append(f"- [B{i}] {x}")
+        adet += len(ogeler)
+        bloklar.append(f"{baslik}:\n" + ("\n".join(ogeler) or "-"))
+    return "\n\n".join(bloklar), adet
+
+
+def _liste_dili(v):
+    return " ".join(v["kararlar"] + v["acik_sorular"] + [a["madde"] for a in v["aksiyonlar"]])
+
+
+def listeleri_birlestir(bolumler, baglam, ilerleme=print):
+    """Karar/aksiyon/acik soru listelerini tekillestirir. LLM cevabi kesik, Ingilizce ya da supheli
+    derecede kisaysa (madde kaybi) LLM'siz tekillestirme kullanilir."""
+    yedek = listeleri_tekille(bolumler)
+    girdi, adet = _liste_girdisi(bolumler)
+    if adet <= 3:                                      # birlestirecek bir sey yok
+        return yedek
+    mesajlar = [{"role": "system", "content": LISTE_SISTEM},
+                {"role": "user", "content": f"{baglam}\n\nBölümlerden gelen maddeler:\n\n{girdi}"}]
+    cikti = min(6000, max(1000, int(token_say(girdi) * 1.3)))
+    if _giris_token(mesajlar) + cikti + MARJ > BAGLAM_PENCERESI:
+        ilerleme("  madde listesi bağlama sığmıyor, yerel birleştirme kullanıldı")
+        return yedek
+    try:
+        v = _json_tam(mesajlar, cikti, LISTE_SEMASI)
+    except Exception as e:
+        ilerleme(f"  ! liste birleştirme hatası, yerel birleştirme kullanıldı: {e!r}")
+        return yedek
+    if not v:
+        ilerleme("  ! liste birleştirme kesildi/bozuk, yerel birleştirme kullanıldı")
+        return yedek
+    n = normalize_ozet({"ozet": "", **v})
+    sonuc = {k: n[k] for k in ("kararlar", "aksiyonlar", "acik_sorular")}
+    for alan in ("kararlar", "acik_sorular"):
+        sonuc[alan] = [re.sub(r"^\[B\d+\]\s*", "", x) for x in sonuc[alan]]
+    for a in sonuc["aksiyonlar"]:
+        a["madde"] = re.sub(r"^\[B\d+\]\s*", "", a["madde"])
+    kayip = any(len(sonuc[k]) < (len(yedek[k]) + 1) // 2 for k in ("kararlar", "aksiyonlar"))
+    if kayip or ingilizce_mi(_liste_dili(sonuc)):
+        ilerleme("  ! liste birleştirmesi madde kaybetti ya da dili bozuk, yerel birleştirme kullanıldı")
+        return yedek
+    return sonuc
+
+
+def _genel_sor(ozetler, liste_metni, baglam, cikti=1500):
+    icerik = ("Bölüm özetleri (kronolojik):\n" + "\n".join(ozetler)
+              + "\n\nBirleştirilmiş kararlar ve aksiyonlar:\n" + (liste_metni or "-"))
+    kullanici = {"role": "user", "content": f"{baglam}\n\n{icerik}"}
+    for sistem in (GENEL_SISTEM, GENEL_SISTEM + "\n" + TURKCE_KURAL):
+        v = _json_tam([{"role": "system", "content": sistem}, kullanici], cikti, GENEL_SEMASI, temperature=0.3)
+        ozet = normalize_bosluk(_metin((v or {}).get("ozet")))
+        sonraki = normalize_bosluk(_metin((v or {}).get("sonraki_adim"))) or "-"
+        if ozet and not ingilizce_mi(f"{ozet} {sonraki}"):
+            return {"ozet": ozet, "sonraki_adim": sonraki}
+    return None
+
+
+def _grupla(metinler, butce):
+    gruplar, mevcut, tok = [], [], 0
+    for m in metinler:
+        t = token_say(m)
+        if mevcut and tok + t > butce:
+            gruplar.append(mevcut)
+            mevcut, tok = [], 0
+        mevcut.append(m)
+        tok += t
+    if mevcut:
+        gruplar.append(mevcut)
+    return gruplar
+
+
+def genel_ozet(bolumler, listeler, baglam, ilerleme=print):
+    """Ozet paragrafi + sonraki adim. Bolum ozetleri baglama sigmazsa once gruplar halinde ara ozet
+    cikarilir (hiyerarsik). Basarisizsa bolum ozetleri sirayla birlestirilir (LLM'siz yedek)."""
+    ozetler = [f"Bölüm {i} ({b.get('aralik') or '-'}): {b['ozet']}" for i, b in enumerate(bolumler, 1) if b.get("ozet")]
+    yedek = {"ozet": " ".join(b["ozet"] for b in bolumler if b.get("ozet")) or "-", "sonraki_adim": "-"}
+    if not ozetler:
+        return yedek
+    liste_metni = "\n".join([f"- Karar: {k}" for k in listeler["kararlar"]]
+                            + [f"- Aksiyon: {a['madde']} ({a['sorumlu']}, {a['tarih']})" for a in listeler["aksiyonlar"]])
+    cikti = 1500
+    butce = BAGLAM_PENCERESI - MARJ - cikti - token_say(GENEL_SISTEM + TURKCE_KURAL + baglam + liste_metni) - 200
+    for tur in range(3):
+        if len(ozetler) <= 1 or token_say("\n".join(ozetler)) <= butce:
+            break
+        gruplar = _grupla(ozetler, butce)
+        if len(gruplar) >= len(ozetler):
+            break
+        ilerleme(f"  özetler bağlama sığmıyor: {len(gruplar)} grupta ara özet çıkarılıyor...")
+        yeni = []
+        for n, g in enumerate(gruplar, 1):
+            v = _genel_sor(g, "-", baglam, cikti)
+            yeni.append(f"Ara özet {n}: {v['ozet']}" if v else " ".join(g))
+        ozetler = yeni
+    try:
+        v = _genel_sor(ozetler, liste_metni, baglam, cikti)
+    except Exception as e:
+        ilerleme(f"  ! özet paragrafı üretilemedi: {e!r}")
+        v = None
+    if not v:
+        ilerleme("  ! özet paragrafı kesildi ya da Türkçe değildi; bölüm özetleri sırayla kullanıldı")
+        return yedek
+    return v
+
+
+def _hucre(x):
+    return normalize_bosluk(x).replace("|", "/") or "-"
+
+
+def not_markdown(genel, listeler):
+    """Notun Markdown'u kodda kurulur: basliklar sabit ve Turkce, tablo hic yarim kalmaz."""
+    def maddeler(lst):
+        return "\n".join(f"- {normalize_bosluk(x)}" for x in lst) or "-"
+    parcalar = ["## Özet", genel["ozet"] or "-", "", "## Kararlar", maddeler(listeler["kararlar"]), "",
+                "## Aksiyonlar"]
+    if listeler["aksiyonlar"]:
+        parcalar += ["| # | Madde | Sorumlu | Tarih |", "|---|---|---|---|"]
+        parcalar += [f"| {i} | {_hucre(a['madde'])} | {_hucre(a['sorumlu'])} | {_hucre(a['tarih'])} |"
+                     for i, a in enumerate(listeler["aksiyonlar"], 1)]
+    else:
+        parcalar.append("-")
+    parcalar += ["", "## Açık sorular", maddeler(listeler["acik_sorular"]), "",
+                 "## Bir sonraki adım", genel.get("sonraki_adim") or "-"]
+    return "\n".join(parcalar) + "\n"
 
 
 def birlestir(bolumler, baglam, ilerleme=print):
     bolumler = [b for b in bolumler if b]
     if not bolumler:
         return "_(özetlenebilen bölüm yok)_"
-    if len(bolumler) <= GRUP_BOYU:
-        return _birlestir(bolumler, baglam, ilerleme)
-    ara = []
-    for g in range(0, len(bolumler), GRUP_BOYU):
-        ilerleme(f"  ara birleştirme {g // GRUP_BOYU + 1}...")
-        ara.append({"ara_not": _birlestir(bolumler[g:g + GRUP_BOYU], baglam, ilerleme)})
-    return _birlestir(ara, baglam, ilerleme)
+    ilerleme("  kararlar, aksiyonlar ve açık sorular birleştiriliyor...")
+    listeler = listeleri_birlestir(bolumler, baglam, ilerleme)
+    ilerleme("  özet paragrafı yazılıyor...")
+    genel = genel_ozet(bolumler, listeler, baglam, ilerleme)
+    return not_markdown(genel, listeler)

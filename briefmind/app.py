@@ -1060,7 +1060,10 @@ class Pencere(QtWidgets.QMainWindow):
                                          "ikisi": "Ses + Altyazı"}.get(v, str(v)))
             self.log(f"kaynak değişti: {v}")
         elif tip == "stt_gecikme":
-            self.log(f"! STT yetişemiyor, {v} parça bekliyor — bir parça atlandı")
+            if isinstance(v, dict) and not v.get("atlandi"):
+                self.log(f"! STT yavaş, {v['kuyruk']} parça sırada bekliyor (atlanmıyor)")
+            else:
+                self.log(f"! STT yanıt vermiyor, {v['kuyruk'] if isinstance(v, dict) else v} parça bekliyor — bir parça atlandı")
         elif tip == "oneri":
             self.oneri_satiri(v)
             self.nav.item(1).setText(f"{self.SAYFALAR[1]}  ({self.tablo.rowCount()})")

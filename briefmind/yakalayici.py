@@ -165,9 +165,23 @@ class Yakalayici:
             if self.canli:
                 yeni.append(self.canli)
             self.canli = {"ts": simdi, "speaker": son[0], "text": son[1]}
+        yeni = [s for s in yeni if not self._zaten_var(s)]
         self.kuyruk.extend(yeni)
         self.kuyruk = self.kuyruk[-30:]
         return yeni
+
+    def _zaten_var(self, s):
+        """Teams onceki bir satiri sonradan duzeltince hizalama kopar ve gorunen tum satirlar yeniden
+        'yeni' sayilir. Son satirlarda ayni konusmacinin ayni/cok benzer (>=20 karakter) cumlesi
+        varsa tekrar yayilmaz; kisa onaylar ('Evet.') gercekten tekrar edilebilir, elenmez."""
+        if len(s["text"]) < 20:
+            return False
+        for k in self.kuyruk:
+            if k["speaker"] == s["speaker"] and (
+                    k["text"] == s["text"] or difflib.SequenceMatcher(None, k["text"], s["text"]).ratio() > 0.9):
+                k["text"] = s["text"]         # duzeltilmis hali: sonraki okumada hizalama yeniden tutar
+                return True
+        return False
 
     def kayip_saniye(self):
         """Altyazi grubu kayboldugundan beri gecen sure (0 = kayip degil)."""
