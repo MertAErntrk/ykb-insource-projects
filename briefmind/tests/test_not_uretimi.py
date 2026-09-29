@@ -191,3 +191,29 @@ def test_yanlis_anahtarli_json_kabul_edilmez(monkeypatch):
 
     monkeypatch.setattr(llm, "sor", sahte)
     assert llm.bolum_ozetle("Ahmet: tamam.", 1, "Toplantı: test") is None
+
+
+def test_ozet_tire_donerse_bos_kalmaz(monkeypatch):
+    """Gercek vaka (2026-09-23 notu): listeler dolu, '## Ozet' ve 'Bir sonraki adim' '-' cikmisti."""
+    tire = (json.dumps({"ozet": "-", "sonraki_adim": "-"}), "stop")
+    monkeypatch.setattr(llm, "sor", SahteLLM(genel=[tire]))
+    md = llm.birlestir(BOLUMLER, "Toplantı: test")
+    ozet = md.split("## Özet\n", 1)[1].split("\n\n", 1)[0]
+    assert ozet.strip(" -.") and BOLUMLER[0]["ozet"] in ozet
+    sonraki = md.split("## Bir sonraki adım\n", 1)[1].strip()
+    assert sonraki.startswith("Öncelikli aksiyonlar:") and "(Ahmet)" in sonraki
+    assert "## Konu akışı" in md and "10:00:05–10:11:40: IFRS 9 raporu" in md
+
+
+def test_bolum_ozetleri_bossa_konulardan_kurulur(monkeypatch):
+    bos = [dict(b, ozet="") for b in BOLUMLER]
+    monkeypatch.setattr(llm, "sor", SahteLLM())
+    md = llm.birlestir(bos, "Toplantı: test")
+    ozet = md.split("## Özet\n", 1)[1].split("\n\n", 1)[0]
+    assert "IFRS 9 raporu" in ozet and "test ortamı" in ozet
+
+
+def test_dayanak_bos_sonraki_adima_nokta_eklemez():
+    md = "# T\n\n## Özet\nIFRS raporu görüşüldü.\n\n## Bir sonraki adım\n-\n"
+    yeni, _ = motor_mod.dayanak_kontrolu(md, "Ahmet: IFRS raporu hazır mı? Ayşe: hazır, görüşelim.")
+    assert yeni.rstrip().endswith("\n-") and "-." not in yeni

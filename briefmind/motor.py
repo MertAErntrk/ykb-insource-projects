@@ -90,7 +90,7 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
                 aday = hucreler[1]
             else:
                 aday = cizgisiz.lstrip("-* ").strip()
-        elif "sonraki" in bolum and cizgisiz:
+        elif "sonraki" in bolum and cizgisiz and cizgisiz.strip(" -.") :
             # cumleyi ';' ile parcalara ayir, dayanagi olmayan parcayi dusur
             parcalar, tutulan = [x.strip() for x in cizgisiz.split(";") if x.strip()], []
             for pr in parcalar:

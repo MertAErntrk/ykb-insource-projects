@@ -112,6 +112,10 @@ LISTE_SISTEM = (
     "- Aynı ya da çok benzer maddeleri tek maddede birleştir; çelişkide sonraki bölüm geçerlidir.\n"
     "- Sonraki bir bölümde cevaplanan ya da karara bağlanan açık soruyu listeden çıkar.\n"
     "- Öneri ya da niyet düzeyindeki ifadeyi karara çevirme.\n"
+    "- Birinin yapacağı somut iş ('... iletilecek', '... hazırlanacak', '... toplantı organize edecek') karar "
+    "değil AKSİYONDUR: kararlar listesinden çıkar, aksiyonlara (sorumlusuyla) taşı. Aynı iş hem kararda hem "
+    "aksiyonda yazılmasın.\n"
+    "- Aynı işi farklı bölümlerde farklı kişiler üstlendiyse tek satırda birleştir, sorumluları virgülle yaz.\n"
     "- Aksiyonlarda sorumlu adını katılımcı listesindeki yazımla ver, belli değilse 'belirsiz'; tarih yoksa '-'.\n"
     "- Yeni madde EKLEME; sözlük, gündem ya da genel bilgiden içerik üretme. İfadeleri kısaltabilirsin, anlamı "
     "değiştirme. [B..] etiketlerini çıktıya yazma. (?) işaretli belirsizlikleri koru.\n"
@@ -399,6 +403,14 @@ def bolum_ozetle(blok, sira, baglam, onceki_konular=None):
         o2 = normalize_ozet(_json_sor(tekrar, 3000, BOLUM_SEMASI, temperature=0.2, dusunme=False))
         if o2 and not ingilizce_mi(_ozet_dili(o2)):
             o = o2
+    if o and not o["ozet"].strip(" -.") and len(blok) > 200:
+        # listeler dolu ama ozet alani bos: tam notun ozet paragrafi bu alanlardan kurulur, bos birakilmaz
+        tekrar = [{"role": "system", "content": MAP_SISTEM + "\n'ozet' alanını ASLA boş bırakma."}, kullanici]
+        o2 = normalize_ozet(_json_sor(tekrar, 3000, BOLUM_SEMASI, temperature=0.2, dusunme=False))
+        if o2 and o2["ozet"].strip(" -.") and not ingilizce_mi(_ozet_dili(o2)):
+            o = o2
+        elif o["konular"]:
+            o["ozet"] = "Bu bölümde " + ", ".join(o["konular"]) + " konuşuldu."
     return o
 
 
@@ -498,7 +510,9 @@ def listeleri_birlestir(bolumler, baglam, ilerleme=print):
         sonuc[alan] = [re.sub(r"^\[B\d+\]\s*", "", x) for x in sonuc[alan]]
     for a in sonuc["aksiyonlar"]:
         a["madde"] = re.sub(r"^\[B\d+\]\s*", "", a["madde"])
-    kayip = any(len(sonuc[k]) < (len(yedek[k]) + 1) // 2 for k in ("kararlar", "aksiyonlar"))
+    # karar->aksiyon tasimasi olabilecegi icin kayip iki listenin TOPLAMINDAN olculur
+    kayip = (len(sonuc["kararlar"]) + len(sonuc["aksiyonlar"])
+             < (len(yedek["kararlar"]) + len(yedek["aksiyonlar"]) + 1) // 2)
     if kayip or ingilizce_mi(_liste_dili(sonuc)):
         ilerleme("  ! liste birleştirmesi madde kaybetti ya da dili bozuk, yerel birleştirme kullanıldı")
         return yedek
@@ -513,7 +527,7 @@ def _genel_sor(ozetler, liste_metni, baglam, cikti=1500):
         v = _json_tam([{"role": "system", "content": sistem}, kullanici], cikti, GENEL_SEMASI, temperature=0.3)
         ozet = normalize_bosluk(_metin((v or {}).get("ozet")))
         sonraki = normalize_bosluk(_metin((v or {}).get("sonraki_adim"))) or "-"
-        if ozet and not ingilizce_mi(f"{ozet} {sonraki}"):
+        if len(ozet.strip(" -.")) >= 40 and not ingilizce_mi(f"{ozet} {sonraki}"):   # '-' ya da tek kelime ozet degildir
             return {"ozet": ozet, "sonraki_adim": sonraki}
     return None
 
@@ -536,8 +550,9 @@ def genel_ozet(bolumler, listeler, baglam, ilerleme=print):
     """Ozet paragrafi + sonraki adim. Bolum ozetleri baglama sigmazsa once gruplar halinde ara ozet
     cikarilir (hiyerarsik). Basarisizsa bolum ozetleri sirayla birlestirilir (LLM'siz yedek)."""
     ozetler = [f"Bölüm {i} ({b.get('aralik') or '-'}): {b['ozet']}" for i, b in enumerate(bolumler, 1) if b.get("ozet")]
-    yedek = {"ozet": " ".join(b["ozet"] for b in bolumler if b.get("ozet")) or "-", "sonraki_adim": "-"}
+    yedek = {"ozet": yedek_ozet(bolumler, listeler), "sonraki_adim": "-"}
     if not ozetler:
+        ilerleme("  ! bölüm özetleri boş; özet konu ve kararlardan kuruldu")
         return yedek
     liste_metni = "\n".join([f"- Karar: {k}" for k in listeler["kararlar"]]
                             + [f"- Aksiyon: {a['madde']} ({a['sorumlu']}, {a['tarih']})" for a in listeler["aksiyonlar"]])
@@ -566,6 +581,43 @@ def genel_ozet(bolumler, listeler, baglam, ilerleme=print):
     return v
 
 
+def yedek_ozet(bolumler, listeler):
+    """LLM'siz ozet: bolum ozetleri; onlar da bossa konu basliklari ve kararlardan kurulan cumleler.
+    Not hicbir zaman '## Ozet\n-' ile cikmaz."""
+    ozet = " ".join(b["ozet"] for b in bolumler if b.get("ozet"))
+    if ozet:
+        return ozet
+    konular = []
+    for b in bolumler:
+        for k in b.get("konular") or []:
+            if not any(_benzer(k, x) for x in konular):
+                konular.append(k)
+    cumleler = []
+    if konular:
+        cumleler.append("Toplantıda ele alınan konular: " + "; ".join(konular[:10]) + ".")
+    if listeler.get("kararlar"):
+        cumleler.append("Öne çıkan kararlar: " + "; ".join(k.rstrip(".") for k in listeler["kararlar"][:3]) + ".")
+    return " ".join(cumleler) or "-"
+
+
+def yedek_sonraki_adim(listeler, adet=3):
+    """Model 'sonraki adim' yazmadiysa aksiyonlardan (sorumlusu belli olanlar once) kurulur."""
+    aks = sorted(listeler.get("aksiyonlar") or [], key=lambda a: a.get("sorumlu") in ("", "belirsiz", None))
+    if not aks:
+        return "-"
+    return "Öncelikli aksiyonlar: " + "; ".join(
+        f"{a['madde'].rstrip('.')} ({a.get('sorumlu') or 'belirsiz'})" for a in aks[:adet]) + "."
+
+
+def konu_akisi(bolumler):
+    """Bolum araliklari ve konu basliklari: toplantinin zaman cizelgesi (LLM'siz, kaynaktan)."""
+    satirlar = []
+    for b in bolumler:
+        if b.get("konular"):
+            satirlar.append(f"- {b.get('aralik') or '-'}: " + "; ".join(b["konular"]))
+    return "\n".join(satirlar)
+
+
 def _hucre(x):
     return normalize_bosluk(x).replace("|", "/") or "-"
 
@@ -574,8 +626,10 @@ def not_markdown(genel, listeler):
     """Notun Markdown'u kodda kurulur: basliklar sabit ve Turkce, tablo hic yarim kalmaz."""
     def maddeler(lst):
         return "\n".join(f"- {normalize_bosluk(x)}" for x in lst) or "-"
-    parcalar = ["## Özet", genel["ozet"] or "-", "", "## Kararlar", maddeler(listeler["kararlar"]), "",
-                "## Aksiyonlar"]
+    parcalar = ["## Özet", genel["ozet"] or "-", ""]
+    if genel.get("konu_akisi"):
+        parcalar += ["## Konu akışı", genel["konu_akisi"], ""]
+    parcalar += ["## Kararlar", maddeler(listeler["kararlar"]), "", "## Aksiyonlar"]
     if listeler["aksiyonlar"]:
         parcalar += ["| # | Madde | Sorumlu | Tarih |", "|---|---|---|---|"]
         parcalar += [f"| {i} | {_hucre(a['madde'])} | {_hucre(a['sorumlu'])} | {_hucre(a['tarih'])} |"
@@ -595,4 +649,10 @@ def birlestir(bolumler, baglam, ilerleme=print):
     listeler = listeleri_birlestir(bolumler, baglam, ilerleme)
     ilerleme("  özet paragrafı yazılıyor...")
     genel = genel_ozet(bolumler, listeler, baglam, ilerleme)
+    if len(genel["ozet"].strip(" -.")) < 40:
+        genel["ozet"] = yedek_ozet(bolumler, listeler)
+    if genel.get("sonraki_adim", "-").strip(" -.") == "":
+        genel["sonraki_adim"] = yedek_sonraki_adim(listeler)
+    if len(bolumler) > 1:
+        genel["konu_akisi"] = konu_akisi(bolumler)
     return not_markdown(genel, listeler)

@@ -140,3 +140,33 @@ Parça özetleri iyi, sorun birleştirme adımında. Koddan çıkan nedenler:
 - **Tamamlandı:** A2 (her LLM çağrısının istatistiği `llm_log.jsonl`'e yazılıyor: görev, düşünme, token, `finish_reason`, süre, İngilizce mi; içerik yazılmıyor), A3/K4 (sıralı yayım), A10 (aksiyon tarihleri kodda çözülüyor; gün adı ile tarih çelişirse gün adı esas alınıyor), K1, K2, K3. Ayrıca STT kopmalarına karşı yeniden deneme, bozuk `config.json` uyarısı, mikrofon cihaz seçimi.
 - **Sıradaki:** K8 (sorumlu doğrulama), K5 (çakışmada altyazı), A5 (ses normalizasyonu), A6 (`ikisi` modu), A11 (modüllere ayırma), A12 (CI).
 - **Bilgi bekleyenler:** A8 (kurum CA sertifikası), K6(a) ve STT güven alanları (ARGE'ye soru), A9 (örnek toplantılarla ölçüm).
+
+## 10. Diğer toplantı notu uygulamalarıyla karşılaştırma
+
+Karşılaştırılanlar: Microsoft Teams Premium / Copilot (Intelligent Recap), Zoom AI Companion, Otter.ai, Fireflies.ai, Fathom, tl;dv, Read.ai, Granola. Bilgiler bu ürünlerin genel olarak bilinen özelliklerine dayanıyor; güncel sürümleri tek tek doğrulanmadı.
+
+BriefMind'in bu ürünlerde olmayan güçlü yanı: **Veri kurum dışına çıkmıyor.** Ses kaydedilmiyor; STT ve LLM kurum içinde çalışıyor. Bir banka için hazır bulut ürünlerinin çoğu bu nedenle zaten kullanılamaz. Hedef, bu avantajı koruyarak onların not kalitesine yaklaşmak.
+
+| Özellik | Piyasadaki uygulamalar | BriefMind (şu an) | Öneri | Öncelik |
+|---|---|---|---|---|
+| Özet paragrafı | Her zaman var; kısa TL;DR + ayrıntı | Bazen `-` çıkıyordu | **Düzeltildi:** asla boş değil, yedek zinciri var | — |
+| Konu / bölüm akışı (chapters) | Zaman damgalı başlıklar | Yoktu | **Eklendi:** "Konu akışı" (bölüm aralığı + konular) | — |
+| Karar / aksiyon ayrımı | Aksiyonlar ayrı ve kişiye atanmış | Kararlarda aksiyonlar da görünüyordu | **İyileştirildi:** somut işler aksiyona taşınıyor. Kişiye göre gruplama (N1) | Yüksek |
+| Çok sayıda ince aksiyon | Benzerleri birleştirilir, kişi başına özet | 23 satırlık tablo | **N1:** "Kişi bazlı aksiyonlar" görünümü, aynı işin tekrarlarını birleştirme | Yüksek |
+| Maddeden kaynağa gitme | Maddeye tıklayınca kaydın o anı açılır | Yok | **N2:** her karar/aksiyon için kaynak satırı ve zamanı; Not sekmesinde tıklayınca transkript | Yüksek |
+| Notu düzenleme | Var | Yok (yalnızca yeniden üretme) | **A13:** Not sekmesinde düzenleme ve kaydetme | Orta |
+| Toplantı türüne göre şablon | Var (satış, 1:1, stand-up…) | Tek şablon | **N3:** haftalık durum, karar toplantısı, 1:1, çalıştay şablonları | Orta |
+| Önceki toplantıdan devam | Seri toplantıda açık aksiyonları hatırlatır | Yok (seri bilgisi var: `seri` slug) | **N4:** aynı serinin önceki notundaki açık aksiyon ve soruları yeni notta "Önceki toplantıdan" olarak göster | Yüksek |
+| Toplantıya soru sorma ("Ask") | Var | Yok | **N5:** Not sekmesinde "Bu toplantıda X hakkında ne dendi?" (transkript + kurum içi LLM) | Orta |
+| Toplantılar arası arama | Var | Yok | **N6:** Geçmiş sekmesinde tüm transkript ve notlarda arama | Orta |
+| Konuşmacı istatistikleri | Konuşma süresi ve payı | Yok | **N7:** kişi başına konuşma süresi (satır zamanlarından) | Düşük |
+| Paylaşım | E-posta, Teams, PDF, Word | Outlook taslağı | **N8:** kişiye özel aksiyon listesiyle e-posta; Word/PDF dışa aktarma | Orta |
+| Görev sistemine aktarma | Jira, Asana, Planner | Yok | **N9:** aksiyonları Jira/Planner'a aktarma (kurum izni gerekir) | Düşük |
+| Özel sözlük | Var | Var (sözlük + öneri onayı) | Mevcut; güçlü yan | — |
+| Canlı not | Toplantı sırasında ara özet | Parça özetleri arka planda | **N10:** Canlı sekmesinde son parçanın özetini göster | Düşük |
+| Bilgilendirme ve saklama | Katılımcılara bildirim, saklama süresi | Yok | **N11:** toplantı sohbetine "not alınıyor" bildirimi taslağı, `toplantilar/` için saklama süresi (ör. 90 gün sonra transkripti sil). KVKK açısından önemli. | Yüksek |
+
+### Yol haritasına etkisi
+- **Faz 3 (not kalitesi)** öne alındı: N1, N2, N4, N11.
+- **Faz 4'e eklenenler:** N5, N6, N8, A13.
+- **Faz 5'e eklenenler:** N3, N7, N9, N10.
