@@ -6,10 +6,11 @@ app.py — Toplanti Notu masaustu uygulamasi (PyQt5).
 
 Sekmeler: Canli | Inceleme | Not | Sozluk | Gecmis | Ayarlar. Tepside kucuk ikon.
 Akis: Baslat -> Teams'te altyazi gorunene kadar bekler -> yakalar, parcalari arka planda isler
-      -> Bitir (ya da altyazi kaybolunca otomatik) -> Inceleme sekmesi: supheli terimler
+      -> Bitir (ya da altyazi kaybolunca otomatik) -> otomatik_not (varsayilan): not dogrudan uretilir,
+      Not sekmesinde ilerleme seridi; kapaliysa Inceleme sekmesi: supheli terimler
       -> "Uygula ve notu uret" -> Not sekmesi (+ Outlook taslagi)
+Modul yapisi: isler.py (QThread'ler), gorunum.py (tema, md_to_html), ayar.py (config.json).
 """
-import contextlib
 import datetime as dt
 import json
 import os
@@ -19,404 +20,16 @@ import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+import ayar as ayar_mod
 import llm
 import motor as motor_mod
 import not_araclari
 import outlook
+from ayar import ayar_oku, ayar_yaz
+from gorunum import QSS, RENKLER, kart, md_to_html, svg_ikon  # noqa: F401  (md_to_html: app.md_to_html uyumu)
+from isler import ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi
 from motor import Motor
 from sozluk import Sozluk
-from yakalayici import Yakalayici, ekran_okuyucu
-
-try:
-    import uiautomation as auto
-    _UIA_THREAD = getattr(auto, "UIAutomationInitializerInThread", None)
-except Exception:                       # Windows disi ortamda import edilemez
-    _UIA_THREAD = None
-
-AYAR_DOSYA = "config.json"
-AYAR_HATASI = None                         # config.json okunamadiysa neden (acilista kullaniciya gosterilir)
-
-
-def ayar_oku():
-    v = {"route": llm.ROUTE, "model": llm.MODEL, "otobitir": 180, "duzelt": True, "outlook": True,
-         "otomatik_basla": False,
-         "kaynak": "ses",                  # altyazi | ses | ikisi
-         "stt_url": "",                        # config.json: STT servisi (OpenAI uyumlu /v1/audio/transcriptions)
-         "stt_model": "whisper-large-v3-turbo-prod",     # ARGE GPU servisi (Turkce fine-tune)
-         "stt_key": "EMPTY",                              # kendi CPU servisimiz icin: model "whisper", anahtar bos
-         "mikrofon_modu": "otomatik",      # otomatik | cift | tek
-         "ben": "",
-         "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
-         "altyazi_turkce": True}           # altyazi bulununca konusulan dili Turkce yapmayi dene
-    global AYAR_HATASI
-    if os.path.exists(AYAR_DOSYA):
-        try:
-            with open(AYAR_DOSYA, encoding="utf-8") as f:
-                v.update(json.load(f))
-            AYAR_HATASI = None
-        except Exception as e:
-            # Eskiden sessizce varsayilanlara dusuluyordu: stt_url bos kalip "STT'ye ulasilamiyor" gorunuyordu
-            AYAR_HATASI = f"{e}"
-    return v
-
-
-def ayar_yaz(v):
-    with open(AYAR_DOSYA, "w", encoding="utf-8") as f:
-        json.dump(v, f, ensure_ascii=False, indent=1)
-
-
-# ====================================================================== is parcaciklari
-
-class YakalamaIsi(QtCore.QThread):
-    """Toplanti boyunca calisir: altyazi -> motor. Bitince bekleyen onerileri yayar."""
-    olay = QtCore.pyqtSignal(str, object)
-    durum = QtCore.pyqtSignal(str)
-    inceleme_hazir = QtCore.pyqtSignal(list)
-
-    def __init__(self, baslik, ctx, sozluk, duzelt, otobitir, ayar=None):
-        super().__init__()
-        self.baslik, self.ctx, self.sozluk, self.duzelt, self.otobitir = baslik, ctx, sozluk, duzelt, otobitir
-        self.ayar = ayar or {}
-        self.motor = None
-        self.ses_servisi = None
-        self._dur = False
-
-    def durdur(self):
-        self._dur = True
-
-    def run(self):
-        tarih = dt.date.today()
-        klasor = motor_mod.yeni_klasor(self.baslik, tarih)
-        kaynak = self.ayar.get("kaynak", "altyazi")
-        self.motor = Motor(klasor, self.baslik, tarih, self.sozluk, self.ctx.get("katilimcilar"),
-                           self.ctx.get("gundem", ""), duzelt=self.duzelt,
-                           olay=lambda t, v: self.olay.emit(t, v),
-                           kaynak=kaynak, ben=self.ayar.get("ben") or None,
-                           sablon=self.ayar.get("not_sablonu", "genel"))
-        self.olay.emit("log", f"Klasör: {klasor}")
-        if kaynak in ("ses", "ikisi"):
-            try:
-                import ses as ses_mod
-                self.ses_servisi = ses_mod.SesServisi(
-                    self.ayar.get("stt_url", ""),
-                    ipucu_fn=lambda: (self.sozluk.metin(self.motor.seri) + "; " + ", ".join(self.motor.katilimcilar)),
-                    mod="otomatik",
-                    mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
-                    olay=lambda t, v: self.olay.emit(t, v),
-                    satir_fn=lambda ts, kim, metin, akis: self.motor.ses_satiri(ts, kim, metin, akis),
-                    model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
-                    proxy=self.ayar.get("stt_proxy", True))   # false: Windows proxy'sini atla (kopmalar icin)
-                if not self.ses_servisi.baslat():
-                    self.ses_servisi = None
-                    self.motor.kaynak = "altyazi"
-                    self.olay.emit("kaynak_degisti", "altyazi")
-            except Exception as e:
-                self.olay.emit("log", f"✖ ses yakalama başlatılamadı: {e!r} — altyazı moduna geçildi")
-                self.ses_servisi = None
-                self.motor.kaynak = "altyazi"
-                self.olay.emit("kaynak_degisti", "altyazi")
-        y = Yakalayici()
-        basladi = False
-        cm = _UIA_THREAD() if _UIA_THREAD else contextlib.nullcontext()
-        with cm:
-            ekran_okuyucu(True)
-            try:
-                self.durum.emit("Teams'te altyazı bekleniyor…")
-                bekleme_bas, deneme, ipucu_verildi = time.time(), 0, False
-                pencere_yok_sn, son_pencere_kontrol = 0.0, time.time()
-                while not self._dur:
-                    # --- altyazisiz mod: ses akiyorsa toplanti basladi sayilir
-                    if not basladi and self.ses_servisi and self.ses_servisi.cozulen > 0:
-                        basladi = True
-                        self.olay.emit("log", "ses akıyor, yakalama başladı (altyazı yok: konuşmacı adları '?' olur)")
-                        self.durum.emit("Yakalanıyor (ses) — altyazı yok")
-                    if (not basladi and not ipucu_verildi and time.time() - bekleme_bas > 20
-                            and not self.ayar.get("altyazi_otomatik", True)):
-                        ipucu_verildi = True
-                        self.olay.emit("log", "altyazı görünmüyor. Konuşmacı adları için Teams'te bir kez: "
-                                              "… → Ayarlar → Erişilebilirlik → 'Toplantılarımda her zaman alt yazıları göster'")
-                    # --- toplanti penceresi kapandi mi? (altyazi olmadan bitisi anlamak icin, 5 sn'de bir)
-                    if basladi and self.ses_servisi and time.time() - son_pencere_kontrol > 5:
-                        son_pencere_kontrol = time.time()
-                        try:
-                            from yakalayici import toplanti_penceresi_var
-                            if toplanti_penceresi_var():
-                                pencere_yok_sn = 0.0
-                            else:
-                                pencere_yok_sn += 5
-                                if pencere_yok_sn >= 45:
-                                    self.olay.emit("log", "Teams toplantı penceresi kapandı, toplantı bitti kabul edildi.")
-                                    self.olay.emit("sure_dondur", None)
-                                    break
-                        except Exception:
-                            pass
-                    if (not basladi and self.ayar.get("altyazi_otomatik", True) and deneme < 2
-                            and time.time() - bekleme_bas > 8 * (deneme + 1)):
-                        deneme += 1
-                        basarili = False
-                        try:
-                            from yakalayici import altyazi_ac
-                            self.olay.emit("log", f"altyazı görünmüyor, Teams'te açmayı deniyorum ({deneme}/2)…")
-                            basarili = altyazi_ac(lambda m: self.olay.emit("log", m))
-                        except Exception as e:
-                            self.olay.emit("log", f"altyazı otomatik açma hatası: {e!r}")
-                        if not basarili and deneme >= 2:
-                            self.olay.emit("altyazi_iste", None)
-                    for s in y.oku():
-                        self.motor.altyazi_satiri(s)
-                    if y.hazir and not basladi:
-                        basladi = True
-                        if self.ayar.get("altyazi_turkce", True):
-                            try:
-                                from yakalayici import altyazi_dili_turkce
-                                altyazi_dili_turkce(lambda m: self.olay.emit("log", m))
-                            except Exception as e:
-                                self.olay.emit("log", f"altyazı dili ayarlanamadı: {e!r}")
-                        self.durum.emit("Yakalanıyor")
-                        self.olay.emit("log", "altyazı bulundu, yakalama başladı.")
-                    self.motor.kontrol()
-                    if basladi and y.kayip_saniye() > 0:
-                        kalan = int(self.otobitir - y.kayip_saniye())
-                        if kalan <= 0:
-                            self.olay.emit("log", "altyazı kayboldu, toplantı bitti kabul edildi.")
-                            self.olay.emit("sure_dondur", None)
-                            break
-                        self.durum.emit(f"Altyazı görünmüyor — {kalan} sn sonra otomatik bitiş")
-                    elif basladi:
-                        self.durum.emit(f"Yakalanıyor — {self.motor.parca_no} parça, "
-                                        f"açık parça ~{self.motor.mevcut_tok} token")
-                    time.sleep(0.6)
-            finally:
-                ekran_okuyucu(False)
-            for s in y.bitir():
-                self.motor.altyazi_satiri(s)
-        if self.ses_servisi:
-            self.durum.emit("Ses kuyruğu boşaltılıyor…")
-            self.ses_servisi.durdur()
-        self.durum.emit("Parçalar tamamlanıyor…")
-        self.inceleme_hazir.emit(self.motor.bitir())
-
-
-class TamamlamaIsi(QtCore.QThread):
-    """Inceleme kararlarini uygular, notu uretir."""
-    olay = QtCore.pyqtSignal(str, object)
-    bitti = QtCore.pyqtSignal(str)
-    hata = QtCore.pyqtSignal(str)
-
-    def __init__(self, m, kararlar):
-        super().__init__()
-        self.m, self.kararlar = m, kararlar
-
-    def run(self):
-        self.m._olay = lambda t, v: self.olay.emit(t, v)
-        try:
-            n = self.m.kararlari_uygula(self.kararlar)
-            if n:
-                self.olay.emit("log", f"{n} parça güncellendi.")
-            md = self.m.notu_uret()
-            self.m.kapat()
-        except Exception as e:
-            self.olay.emit("log", f"Not üretilemedi: {e!r}")
-            self.hata.emit(str(e))
-            return
-        self.bitti.emit(md)
-
-
-class YuklemeIsi(QtCore.QThread):
-    """Diskteki yarim toplantiyi incelemeye hazirlar: once ozetsiz parcalari isler."""
-    olay = QtCore.pyqtSignal(str, object)
-    durum = QtCore.pyqtSignal(str)
-    inceleme_hazir = QtCore.pyqtSignal(list)
-
-    def __init__(self, klasor, sozluk):
-        super().__init__()
-        self.klasor, self.sozluk, self.motor = klasor, sozluk, None
-
-    def run(self):
-        self.motor = Motor.yukle(self.klasor, self.sozluk, olay=lambda t, v: self.olay.emit(t, v))
-        self.durum.emit("Eksik parçalar işleniyor…")
-        n = self.motor.eksikleri_isle()
-        if n:
-            self.olay.emit("log", f"{n} parça işlendi.")
-        self.inceleme_hazir.emit(self.motor.bitir())
-
-
-class ParcaIsi(QtCore.QThread):
-    """Tek bir parcayi yeniden ozetler."""
-    olay = QtCore.pyqtSignal(str, object)
-    bitti = QtCore.pyqtSignal(int)
-
-    def __init__(self, m, no):
-        super().__init__()
-        self.m, self.no = m, no
-
-    def run(self):
-        self.m._olay = lambda t, v: self.olay.emit(t, v)
-        self.m.parca_yeniden(self.no)
-        self.bitti.emit(self.no)
-
-
-class SoruIsi(QtCore.QThread):
-    """Toplantiya soru: LLM cagrisi arayuzu dondurmesin."""
-    bitti = QtCore.pyqtSignal(str)
-
-    def __init__(self, m, soru):
-        super().__init__()
-        self.m, self.soru = m, soru
-
-    def run(self):
-        try:
-            self.bitti.emit(self.m.soru_sor(self.soru))
-        except Exception as e:
-            self.bitti.emit(f"Cevap alınamadı: {e!r}")
-
-
-# ====================================================================== pencere
-
-
-# ====================================================================== gorunum
-
-NOT_CSS = ("body{font-family:'Plus Jakarta Sans','Segoe UI',sans-serif;font-size:13px;color:#134E4A} "
-           "h1{font-size:20px;margin-bottom:4px} h2{font-size:14px;color:#0D9488;margin-top:18px;margin-bottom:4px} "
-           "p,li{line-height:145%} th{background:#f3f4f6;text-align:left;border-bottom:1px solid #d1d5db} "
-           "td{border-bottom:1px solid #e5e7eb}")
-
-def md_to_html(md):
-    """Notun sinirli Markdown'ini (basliklar, maddeler, tablolar, paragraflar) stilli HTML'e cevirir.
-    '⏱10:12:03' kaynak isaretleri tiklanabilir baglanti olur (transkriptte o ani acar)."""
-    import html as _h
-    import re as _re
-
-    def kac(x):
-        return _re.sub(r"⏱(\d{1,2}:\d{2}:\d{2})", r'<a href="ts:\1">⏱\1</a>', _h.escape(x))
-    cikti, tablo, liste = [], [], False
-    def liste_kapat():
-        nonlocal liste
-        if liste:
-            cikti.append("</ul>")
-            liste = False
-    def tablo_kapat():
-        nonlocal tablo
-        if tablo:
-            cikti.append("<table cellspacing='0' cellpadding='6' width='100%'>" + "".join(tablo) + "</table>")
-            tablo = []
-    for ham in md.splitlines():
-        s_ = ham.strip()
-        if s_.startswith("|"):
-            liste_kapat()
-            hucreler = [c.strip() for c in s_.strip("|").split("|")]
-            if all(set(c) <= set("-: ") for c in hucreler):
-                continue
-            etiket = "th" if not tablo else "td"
-            tablo.append("<tr>" + "".join(f"<{etiket}>{kac(c)}</{etiket}>" for c in hucreler) + "</tr>")
-            continue
-        tablo_kapat()
-        if s_.startswith("# "):
-            liste_kapat(); cikti.append(f"<h1>{kac(s_[2:])}</h1>")
-        elif s_.startswith("## "):
-            liste_kapat(); cikti.append(f"<h2>{kac(s_[3:])}</h2>")
-        elif s_.startswith(("- ", "* ")):
-            if not liste:
-                cikti.append("<ul>"); liste = True
-            cikti.append(f"<li>{kac(s_[2:])}</li>")
-        elif s_:
-            liste_kapat(); cikti.append(f"<p>{kac(s_)}</p>")
-    liste_kapat(); tablo_kapat()
-    return "<html><head><style>" + NOT_CSS + "</style></head><body>" + "".join(cikti) + "</body></html>"
-
-
-RENKLER = ["#0D9488", "#EA580C", "#7C3AED", "#2563EB", "#DB2777", "#65A30D", "#0891B2", "#B45309"]
-
-QSS = """
-* { font-family: 'Plus Jakarta Sans', 'Segoe UI', 'Noto Sans', sans-serif; font-size: 13px; color: #134E4A; }
-QMainWindow, QWidget#icerik { background: #F0FDFA; }
-QFrame#kenar { background: #134E4A; }
-QLabel#marka { color: white; font-size: 17px; font-weight: 700; padding: 18px 16px 4px 16px; }
-QLabel#marka_alt { color: #99F6E4; font-size: 11px; padding: 0 16px 14px 16px; }
-QListWidget#nav { background: transparent; border: none; outline: 0; }
-QListWidget#nav::item { color: #CCFBF1; padding: 11px 16px; border-left: 3px solid transparent; min-height: 20px; }
-QListWidget#nav::item:selected { color: white; background: #0F766E; border-left: 3px solid #EA580C; }
-QListWidget#nav::item:hover { background: #115E59; }
-QLabel#durum_nokta { font-size: 18px; }
-QLabel#durum_yazi { color: #CCFBF1; font-size: 12px; }
-QFrame#baslik_bar { background: white; border-bottom: 1px solid #CCFBF1; }
-QLineEdit#toplanti_adi { font-size: 16px; font-weight: 700; border: none; border-bottom: 2px solid transparent; background: transparent; padding: 2px 0; }
-QLineEdit#toplanti_adi:focus { border-bottom: 2px solid #0D9488; }
-QLabel#alt_bilgi { color: #475569; font-size: 12px; }
-QLabel#sayac { color: #134E4A; font-size: 14px; font-weight: 700; }
-QPushButton { background: white; border: 1px solid #99F6E4; border-radius: 6px; padding: 7px 14px; min-height: 18px; }
-QPushButton:hover { background: #E8F1F4; }
-QPushButton:pressed { background: #CCFBF1; }
-QPushButton:focus { border: 2px solid #0D9488; }
-QPushButton:disabled { color: #94A3B8; background: #E8F1F4; border-color: #E8F1F4; }
-QPushButton#birincil { background: #0D9488; color: white; border: none; font-weight: 700; padding: 9px 22px; font-size: 14px; }
-QPushButton#birincil:hover { background: #0F766E; }
-QPushButton#birincil:focus { border: 2px solid #134E4A; }
-QPushButton#birincil:disabled { background: #99F6E4; color: #F0FDFA; }
-QPushButton#vurgu { background: #EA580C; color: white; border: none; font-weight: 700; padding: 9px 22px; font-size: 14px; }
-QPushButton#vurgu:hover { background: #C2410C; }
-QPushButton#vurgu:disabled { background: #FDBA74; color: white; }
-QPushButton#tehlike { background: #DC2626; color: white; border: none; font-weight: 700; padding: 9px 22px; font-size: 14px; }
-QPushButton#tehlike:hover { background: #B91C1C; }
-QFrame#kart { background: white; border: 1px solid #CCFBF1; border-radius: 8px; }
-QLabel#kart_baslik { color: #475569; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-QLabel#kart_deger { font-size: 22px; font-weight: 700; }
-QTextBrowser, QPlainTextEdit, QTableWidget, QListWidget#liste, QTextEdit { background: white; border: 1px solid #CCFBF1; border-radius: 8px; }
-QTextBrowser:focus, QPlainTextEdit:focus, QTableWidget:focus, QListWidget#liste:focus { border: 1px solid #0D9488; }
-QHeaderView::section { background: #E8F1F4; border: none; border-bottom: 1px solid #99F6E4; padding: 7px; font-weight: 700; color: #134E4A; }
-QTableWidget { gridline-color: #E8F1F4; selection-background-color: #CCFBF1; selection-color: #134E4A; alternate-background-color: #F8FDFC; }
-QLabel#bilgi { background: #E8F1F4; color: #134E4A; border: 1px solid #99F6E4; border-radius: 6px; padding: 8px 10px; }
-QLineEdit, QSpinBox, QComboBox { background: white; border: 1px solid #99F6E4; border-radius: 6px; padding: 6px 8px; min-height: 18px; }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 2px solid #0D9488; }
-QCheckBox { spacing: 8px; }
-QCheckBox::indicator { width: 16px; height: 16px; }
-QProgressBar { border: none; background: #CCFBF1; border-radius: 3px; height: 6px; }
-QProgressBar::chunk { background: #0D9488; border-radius: 3px; }
-QStatusBar { background: white; border-top: 1px solid #CCFBF1; color: #475569; }
-"""
-
-
-IKONLAR = {
-    "canli":    '<circle cx="12" cy="12" r="4" fill="{c}"/><circle cx="12" cy="12" r="9" fill="none" stroke="{c}" stroke-width="2"/>',
-    "inceleme": '<path d="M4 17.5V20h2.5L17 9.5 14.5 7 4 17.5z" fill="{c}"/><path d="M15.5 6l2.5 2.5 1.5-1.5a1 1 0 000-1.4L18.4 4.5a1 1 0 00-1.4 0L15.5 6z" fill="{c}"/>',
-    "not":      '<rect x="5" y="3" width="14" height="18" rx="2" fill="none" stroke="{c}" stroke-width="2"/><path d="M8 8h8M8 12h8M8 16h5" stroke="{c}" stroke-width="2" stroke-linecap="round"/>',
-    "sozluk":   '<path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2V5z" fill="none" stroke="{c}" stroke-width="2"/><path d="M4 19a2 2 0 012-2h13" fill="none" stroke="{c}" stroke-width="2"/>',
-    "gecmis":   '<circle cx="12" cy="12" r="9" fill="none" stroke="{c}" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round"/>',
-    "ayarlar":  '<circle cx="12" cy="12" r="3" fill="none" stroke="{c}" stroke-width="2"/>' + "".join(
-                f'<rect x="11" y="2" width="2" height="4" rx="1" fill="{{c}}" transform="rotate({a} 12 12)"/>' for a in range(0, 360, 45)),
-}
-
-
-def svg_ikon(ad, renk_normal="#CCFBF1", renk_secili="#FFFFFF"):
-    """Kucuk duz SVG ikon; secili durumda beyaz. QtSvg yoksa bos ikon doner (metin yeter)."""
-    try:
-        from PyQt5 import QtSvg
-    except Exception:
-        return QtGui.QIcon()
-    ikon = QtGui.QIcon()
-    for renk, mod in ((renk_normal, QtGui.QIcon.Normal), (renk_secili, QtGui.QIcon.Selected)):
-        svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{IKONLAR[ad].format(c=renk)}</svg>'
-        r = QtSvg.QSvgRenderer(QtCore.QByteArray(svg.encode()))
-        pm = QtGui.QPixmap(32, 32)
-        pm.fill(QtCore.Qt.transparent)
-        pt = QtGui.QPainter(pm)
-        r.render(pt)
-        pt.end()
-        ikon.addPixmap(pm, mod)
-    return ikon
-
-
-def kart(baslik, deger="—"):
-    k = QtWidgets.QFrame(objectName="kart")
-    v = QtWidgets.QVBoxLayout(k)
-    v.setContentsMargins(14, 10, 14, 10)
-    b = QtWidgets.QLabel(baslik.upper(), objectName="kart_baslik")
-    d = QtWidgets.QLabel(deger, objectName="kart_deger")
-    v.addWidget(b)
-    v.addWidget(d)
-    k.deger = d
-    return k
-
 
 class Pencere(QtWidgets.QMainWindow):
     SAYFALAR = ["Canlı", "İnceleme", "Not", "Sözlük", "Geçmiş", "Ayarlar"]
@@ -437,6 +50,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.bitis = None
         self._akis_satirlari = []
         self.renkler = {}
+        self._canli_ozetler = {}             # parca sirasi -> ozet (canli ara sayac icin)
+        self._serit_bas = None               # not uretimi ilerleme seridinin baslangic zamani
+        self.tamamla = None
+        self.yeniden = None
         self._kur()
         self._tepsi()
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, self.ana_dugme)
@@ -563,6 +180,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.akis.setOpenExternalLinks(False)
         sol.addWidget(self.akis, 1)
         sag = QtWidgets.QVBoxLayout()
+        self.canli_sayac = QtWidgets.QLabel("", objectName="canli_sayac")
+        self.canli_sayac.setToolTip("Özetlenen parçalardan, benzer maddeler birleştirilerek (LLM'siz) sayılır")
+        sag.addWidget(self.canli_sayac)
+        self._canli_sayac_guncelle()
         sag.addWidget(QtWidgets.QLabel("Oluşan not (canlı)"))
         self.canli_not = QtWidgets.QListWidget(objectName="liste")
         self.canli_not.setWordWrap(True)
@@ -607,7 +228,7 @@ class Pencere(QtWidgets.QMainWindow):
         b2.clicked.connect(lambda: self._toplu_karar("Yoksay"))
         self.b_uygula = QtWidgets.QPushButton("Uygula ve notu üret", objectName="vurgu")
         self.b_uygula.setEnabled(False)
-        self.b_uygula.clicked.connect(self.uygula)
+        self.b_uygula.clicked.connect(lambda: self.uygula())
         h.addWidget(b1)
         h.addWidget(b2)
         h.addStretch(1)
@@ -617,6 +238,21 @@ class Pencere(QtWidgets.QMainWindow):
 
     def _not(self):
         w, v = self._sayfa()
+        # durum seridi: not uretilirken uygulama donmus gibi gorunmesin (asama + gecen sure)
+        self.not_serit = QtWidgets.QFrame(objectName="serit")
+        hs_ = QtWidgets.QHBoxLayout(self.not_serit)
+        hs_.setContentsMargins(12, 8, 12, 8)
+        self.serit_bar = QtWidgets.QProgressBar()
+        self.serit_bar.setRange(0, 0)
+        self.serit_bar.setTextVisible(False)
+        self.serit_bar.setFixedWidth(160)
+        self.serit_metin = QtWidgets.QLabel("Not üretiliyor…")
+        self.serit_sure = QtWidgets.QLabel("0 sn", objectName="alt_bilgi")
+        hs_.addWidget(self.serit_bar)
+        hs_.addWidget(self.serit_metin, 1)
+        hs_.addWidget(self.serit_sure)
+        self.not_serit.hide()
+        v.addWidget(self.not_serit)
         self.not_bilgi = QtWidgets.QLabel("Not henüz üretilmedi.", objectName="alt_bilgi")
         v.addWidget(self.not_bilgi)
         self.not_goster = QtWidgets.QTextBrowser()
@@ -736,13 +372,15 @@ class Pencere(QtWidgets.QMainWindow):
         b2.clicked.connect(self.gecmis_not)
         b3 = QtWidgets.QPushButton("Seçili parçayı yeniden özetle")
         b3.clicked.connect(self.parca_yeniden)
-        b4 = QtWidgets.QPushButton("Yarım kalanı tamamla", objectName="birincil")
-        b4.clicked.connect(self.gecmis_tamamla)
+        b4 = QtWidgets.QPushButton("Yeniden özetle", objectName="birincil")
+        b4.setToolTip("Tüm parçaları yeniden özetler ve yeni not üretir (yarım kalan kayıtlar için de). "
+                      "Var olan not not.md.yedek-… olarak saklanır.")
+        b4.clicked.connect(self.gecmis_yeniden_ozetle)
         b5 = QtWidgets.QPushButton("Sil", objectName="tehlike")
         b5.clicked.connect(self.gecmis_sil)
         b6 = QtWidgets.QPushButton("Boş kayıtları temizle")
         b6.clicked.connect(self.gecmis_bos_temizle)
-        for b in (b1, b2, b3, b4):
+        for b in (b1, b2, b4, b3):
             hb.addWidget(b)
         hb.addStretch(1)
         hb.addWidget(b6)
@@ -767,6 +405,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.a_outlook.setChecked(bool(self.ayar["outlook"]))
         self.a_oto = QtWidgets.QCheckBox("Uygulama açılınca beklemede başla (altyazı görünce yakala)")
         self.a_oto.setChecked(bool(self.ayar["otomatik_basla"]))
+        self.a_otomatik_not = QtWidgets.QCheckBox("Toplantı bitince incelemeyi atla, notu doğrudan üret")
+        self.a_otomatik_not.setToolTip("Şüpheli terimler yine İnceleme sekmesine yazılır; sonradan onaylayıp "
+                                       "'Uygula ve notu üret' ile notu yeniden üretebilirsin.")
+        self.a_otomatik_not.setChecked(bool(self.ayar.get("otomatik_not", True)))
         self.a_kaynak = QtWidgets.QComboBox()
         for etiket, deger in (("Ses (Whisper) — metin sesten, konuşmacı altyazıdan", "ses"),
                               ("Ses + Altyazı (ikisini de nota al)", "ikisi"),
@@ -818,12 +460,12 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow(self.a_outlook)
         f.addRow(self.a_oto)
         f.addRow(QtWidgets.QLabel("— Not —", objectName="alt_bilgi"))
+        f.addRow(self.a_otomatik_not)
         f.addRow("Not şablonu", self.a_sablon)
         f.addRow("Transkript saklama süresi", self.a_saklama)
         b = QtWidgets.QPushButton("Kaydet", objectName="birincil")
         b.clicked.connect(self.ayar_kaydet)
         f.addRow(b)
-        f.addRow(QtWidgets.QLabel("LLM adresi/model değişikliği uygulama yeniden başlatılınca geçerli olur.", objectName="alt_bilgi"))
         v.addWidget(k)
         v.addStretch(1)
         return w
@@ -863,6 +505,9 @@ class Pencere(QtWidgets.QMainWindow):
         if self.baslangic and self.bitis is None and self.is_ and self.is_.isRunning():
             s = int((dt.datetime.now() - self.baslangic).total_seconds())
             self.sayac.setText(f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60:02d}:{s % 60:02d}")
+        if self._serit_bas is not None:
+            s = int(time.time() - self._serit_bas)
+            self.serit_sure.setText(f"{s} sn" if s < 60 else f"{s // 60} dk {s % 60:02d} sn")
         if self.motor:
             biten = sum(1 for i in self.motor.isler if i.done())
             self.k_parca.deger.setText(f"{biten} / {self.motor.parca_no}")
@@ -872,6 +517,34 @@ class Pencere(QtWidgets.QMainWindow):
         if ad not in self.renkler:
             self.renkler[ad] = RENKLER[len(self.renkler) % len(RENKLER)]
         return self.renkler[ad]
+
+    def _serit_baslat(self, metin):
+        self._serit_bas = time.time()
+        self.serit_metin.setText(metin + "…")
+        self.serit_sure.setText("0 sn")
+        self.not_serit.show()
+
+    def _serit_adim(self, metin):
+        """Motorun 'adim' olayi: seride o anki asama yazilir (serit kapaliysa acilir)."""
+        if self._serit_bas is None:
+            self._serit_baslat(metin)
+        else:
+            self.serit_metin.setText(metin + "…")
+        self.durum.setText(metin + "…")
+
+    def _serit_bitir(self):
+        self._serit_bas = None
+        self.not_serit.hide()
+
+    def _canli_sifirla(self):
+        self._canli_ozetler = {}
+        self._canli_sayac_guncelle()
+
+    def _canli_sayac_guncelle(self):
+        """N10: su ana kadar ozetlenen parcalardan karar/aksiyon/acik soru sayisi (LLM'siz tekillestirme)."""
+        t = llm.listeleri_tekille([self._canli_ozetler[k] for k in sorted(self._canli_ozetler)])
+        self.canli_sayac.setText(f"Şu ana kadar: {len(t['kararlar'])} karar, {len(t['aksiyonlar'])} aksiyon, "
+                                 f"{len(t['acik_sorular'])} açık soru")
 
     def log(self, m):
         self.gunluk.appendPlainText(f"{dt.datetime.now():%H:%M:%S}  {m}")
@@ -1017,6 +690,7 @@ class Pencere(QtWidgets.QMainWindow):
         self._akis_satirlari = []
         self._uyum_uyari = False
         self.canli_not.clear()
+        self._canli_sifirla()
         self.tablo.setRowCount(0)
         self.renkler = {}
         self.not_md = ""
@@ -1108,9 +782,13 @@ class Pencere(QtWidgets.QMainWindow):
                 self.baslangic = dt.datetime.now()
         elif tip == "parca_kapandi":
             self.log(f"▶ parça {v['sira']} kapandı ({v['neden']}, ~{v['token']} token, {v['aralik']})")
+        elif tip == "adim":
+            self._serit_adim(v.get("metin", "") if isinstance(v, dict) else str(v))
         elif tip == "parca_ozetlendi":
             o = v["ozet"]
             if o:
+                self._canli_ozetler[v["sira"]] = o
+                self._canli_sayac_guncelle()
                 self.log(f"✔ parça {v['sira']}: {len(o['kararlar'])} karar, {len(o['aksiyonlar'])} aksiyon, {v['duzeltme']} düzeltme")
                 if o.get("ozet"):
                     self.canli_not.addItem(f"Bölüm {v['sira']}: {o['ozet']}")
@@ -1156,7 +834,11 @@ class Pencere(QtWidgets.QMainWindow):
             self.nav.item(1).setText(f"{self.SAYFALAR[1]}  ({self.tablo.rowCount()})")
             self.k_oneri.deger.setText(str(self.tablo.rowCount()))
 
-    def inceleme_hazir(self, oneriler, kaynak="canli"):
+    def inceleme_hazir(self, oneriler, kaynak="canli", otomatik=None):
+        """Toplanti bitti (ya da Gecmis'ten kayit hazirlandi). otomatik_not acikken inceleme beklenmez:
+        oneriler bilgi icin tabloya yazilir, not bos kararlarla hemen uretilir."""
+        if otomatik is None:
+            otomatik = self.a_otomatik_not.isChecked()
         if kaynak == "canli":
             self.motor = self.is_.motor if self.is_ else self.motor
         mevcut = {int(self.tablo.item(r, 0).text()) for r in range(self.tablo.rowCount())}
@@ -1172,6 +854,14 @@ class Pencere(QtWidgets.QMainWindow):
         self._durum_ayarla(f"İnceleme bekliyor — {n} şüpheli terim", "#EA580C")
         self.k_oneri.deger.setText(str(n))
         baslik = "Toplantı bitti." if kaynak == "canli" else "Kayıt yüklendi, parçalar işlendi."
+        if otomatik:
+            self.inc_bilgi.setText(f"{baslik} Not inceleme beklemeden üretildi. {n} şüpheli terim bilgi için burada: "
+                                   "istersen doğrusunu yazıp onayla, 'Uygula ve notu üret' ile sözlüğe al ve notu "
+                                   "yeniden üret.")
+            if self.tepsi and kaynak == "canli":
+                self.tepsi.showMessage("BriefMind", "Toplantı bitti — not üretiliyor.")
+            self._not_uret({})
+            return
         self.inc_bilgi.setText(f"{baslik} {n} şüpheli terim: {onerili} tanesinde öneri hazır (Onayla seçili), "
                                f"{n - onerili} tanesinde doğrusunu senin yazman gerekiyor (yazınca otomatik onaylanır). "
                                "Onaylananlar sözlüğe girer ve yalnızca etkilenen parçalar yeniden özetlenir. "
@@ -1245,15 +935,22 @@ class Pencere(QtWidgets.QMainWindow):
         return k
 
     def uygula(self):
-        if not self.motor:
+        self._not_uret(self.kararlar())
+
+    def _not_uret(self, kararlar):
+        """Inceleme kararlarini (otomatik_not: bos) uygulayip notu arka planda uretir."""
+        if not self.motor or (self.tamamla and self.tamamla.isRunning()):
             return
         self.b_uygula.setEnabled(False)
         self.ilerleme.show()
         self._durum_ayarla("Not üretiliyor…", "#EA580C")
         self.not_bilgi.setText("Not üretiliyor — düzeltmeler uygulanıyor, parçalar birleştiriliyor…")
+        self._serit_baslat("Not üretiliyor")
         self.nav.setCurrentRow(2)
         self.motor.sablon = self.ayar.get("not_sablonu", "genel")
-        self.tamamla = TamamlamaIsi(self.motor, self.kararlar())
+        if not self.motor.ben:
+            self.motor.ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
+        self.tamamla = TamamlamaIsi(self.motor, kararlar)
         self.tamamla.olay.connect(self.olay)
         self.tamamla.bitti.connect(self.not_hazir)
         self.tamamla.hata.connect(self.not_hata)
@@ -1261,9 +958,11 @@ class Pencere(QtWidgets.QMainWindow):
 
     def not_hata(self, mesaj):
         self.ilerleme.hide()
-        self.b_uygula.setEnabled(True)
+        self._serit_bitir()
+        self.b_uygula.setEnabled(self.motor is not None)
         self._durum_ayarla("Not üretilemedi", "#DC2626")
-        self.not_bilgi.setText("Not üretilemedi — LLM erişimini kontrol et, İnceleme sayfasından tekrar dene. Ayrıntı: Olaylar paneli.")
+        self.not_bilgi.setText("Not üretilemedi — LLM erişimini kontrol et; İnceleme sayfasından ya da Geçmiş → "
+                               "Yeniden özetle ile tekrar dene. Ayrıntı: Olaylar paneli.")
         QtWidgets.QMessageBox.warning(self, "Not üretilemedi", mesaj[-800:])
 
     def not_hazir(self, md):
@@ -1271,6 +970,8 @@ class Pencere(QtWidgets.QMainWindow):
         self.not_goster.setHtml(md_to_html(md))
         self._not_gorunumu()
         self.ilerleme.hide()
+        self._serit_bitir()
+        self.b_uygula.setEnabled(self.tablo.rowCount() > 0)    # oneriler sonradan onaylanip not yeniden uretilebilir
         self._durum_ayarla("Not hazır", "#14B8A6")
         self.not_bilgi.setText(f"Kaydedildi: {os.path.join(self.motor.klasor, 'not.md')}")
         self.nav.setCurrentRow(2)
@@ -1388,7 +1089,7 @@ class Pencere(QtWidgets.QMainWindow):
                              f"katılımcı: {len(m.get('katilimcilar', []))}")
         for p_ in self._parcalari_oku(k):
             o = p_.get("ozet")
-            oz = f"özet: {len(o['kararlar'])} karar, {len(o['aksiyonlar'])} aksiyon" if o else "özet YOK"
+            oz = f"özet: {len(o['kararlar'])} karar, {len(o['aksiyonlar'])} aksiyon" if o else "özetsiz"
             it2 = QtWidgets.QListWidgetItem(f"Parça {p_['sira']}   {p_['baslangic']}–{p_['bitis']}   ~{p_['token']} token   "
                                             f"{len(p_.get('duzeltmeler', []))} düzeltme   {oz}")
             it2.setData(QtCore.Qt.UserRole, p_["sira"])
@@ -1401,7 +1102,7 @@ class Pencere(QtWidgets.QMainWindow):
                 self.g_detay.setHtml(md_to_html(f.read()))
         else:
             self.g_detay.setHtml(md_to_html(f"# {m['baslik']}\n\nNot henüz üretilmemiş. Parçaları tek tek inceleyebilir, "
-                                            f"'Yarım kalanı tamamla' ile özet ve incelemeyi başlatabilirsin.\n\n"
+                                            f"'Yeniden özetle' ile tüm parçaları özetleyip notu üretebilirsin.\n\n"
                                             f"Katılımcılar: {', '.join(m.get('katilimcilar', []))}"))
 
     def _parca_secildi(self, it, _onceki=None):
@@ -1458,25 +1159,65 @@ class Pencere(QtWidgets.QMainWindow):
         else:
             QtWidgets.QMessageBox.information(self, "Not yok", "Bu toplantının notu henüz üretilmemiş.")
 
-    def gecmis_tamamla(self):
+    def gecmis_yeniden_ozetle(self):
+        """Secili toplantinin TUM parcalarini yeniden ozetler ve yeni not uretir (yarim kayitlar icin de).
+        otomatik_not kapaliysa sonunda Inceleme sekmesine gidilir (eski 'Yarim kalani tamamla' davranisi)."""
         k = self._secili_klasor()
         if not k:
             return
+        if (self.is_ and self.is_.isRunning()) or (self.yeniden and self.yeniden.isRunning()) \
+                or (self.tamamla and self.tamamla.isRunning()):
+            QtWidgets.QMessageBox.information(self, "Yeniden özetle", "Başka bir iş sürüyor; bitince tekrar dene.")
+            return
+        otomatik = self.a_otomatik_not.isChecked()
         self.tablo.setRowCount(0)
+        self.nav.item(1).setText(self.SAYFALAR[1])
+        self.k_oneri.deger.setText("0")
+        self.b_uygula.setEnabled(False)
         self.canli_not.clear()
+        self._canli_sifirla()
+        self.motor = None
+        self.not_md = ""
+        self.not_goster.clear()
+        self._not_gorunumu()
         self.ilerleme.show()
-        self._durum_ayarla("Yarım kalan toplantı hazırlanıyor…", "#EA580C")
+        self._durum_ayarla("Yeniden özetleniyor…", "#EA580C")
+        self.not_bilgi.setText(f"{os.path.basename(k)}: tüm parçalar yeniden özetleniyor…")
+        self._serit_baslat("Kayıt yükleniyor")
+        self.nav.setCurrentRow(2)
         try:
             with open(os.path.join(k, "meta.json"), encoding="utf-8") as f:
                 self.baslik.setText(json.load(f).get("baslik", os.path.basename(k)))
         except Exception:
             self.baslik.setText(os.path.basename(k))
-        self.yukle = YuklemeIsi(k, self.sozluk)
-        self.yukle.olay.connect(self.olay)
-        self.yukle.durum.connect(lambda m: self._durum_ayarla(m, "#EA580C"))
-        self.yukle.inceleme_hazir.connect(lambda o: (setattr(self, "motor", self.yukle.motor),
-                                                      self.inceleme_hazir(o, kaynak="gecmis")))
-        self.yukle.start()
+        ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
+        self.yeniden = YenidenOzetlemeIsi(k, self.sozluk, otomatik, self.a_duzelt.isChecked(), ben,
+                                          self.ayar.get("not_sablonu", "genel"))
+        self.yeniden.olay.connect(self.olay)
+        self.yeniden.durum.connect(lambda m: self._durum_ayarla(m, "#EA580C"))
+        self.yeniden.bitti.connect(self._yeniden_bitti)
+        self.yeniden.inceleme_hazir.connect(self._yeniden_inceleme)
+        self.yeniden.hata.connect(self.not_hata)
+        self.yeniden.start()
+
+    def _yeniden_bitti(self, md):
+        self.motor = self.yeniden.motor
+        mevcut = {int(self.tablo.item(r, 0).text()) for r in range(self.tablo.rowCount())}
+        for o in self.motor.bekleyen_oneriler():        # bilgi icin: sonradan onaylanip not yeniden uretilebilir
+            if o["id"] not in mevcut:
+                self.oneri_satiri(o)
+        n = self.tablo.rowCount()
+        if n:
+            self.nav.item(1).setText(f"{self.SAYFALAR[1]}  ({n})")
+            self.k_oneri.deger.setText(str(n))
+            self.inc_bilgi.setText(f"Kayıt yeniden özetlendi, not üretildi. {n} şüpheli terim bilgi için burada: "
+                                   "istersen onaylayıp 'Uygula ve notu üret' ile notu yeniden üret.")
+        self.not_hazir(md)
+
+    def _yeniden_inceleme(self, oneriler):
+        self.motor = self.yeniden.motor
+        self._serit_bitir()
+        self.inceleme_hazir(oneriler, kaynak="gecmis", otomatik=False)
 
     def parca_yeniden(self):
         k = self._secili_klasor()
@@ -1543,8 +1284,10 @@ class Pencere(QtWidgets.QMainWindow):
                           "mikrofon_modu": "otomatik", "ben": self.a_ben.text().strip(),
                           "altyazi_otomatik": self.a_altyazi_oto.isChecked(),
                           "altyazi_turkce": self.a_altyazi_tr.isChecked(),
-                          "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value()})
+                          "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value(),
+                          "otomatik_not": self.a_otomatik_not.isChecked()})
         ayar_yaz(self.ayar)
+        llm.ayarla(self.ayar)                  # LLM adresi/modeli hemen gecerli: yeniden baslatma gerekmez
         self.durum.setText("Ayarlar kaydedildi")
 
     def _altyazi_iste_popup(self):
@@ -1750,11 +1493,22 @@ class Pencere(QtWidgets.QMainWindow):
         self.g_detay.setHtml("".join(satirlar))
 
     def closeEvent(self, e):
+        uretim = [i for i in (self.tamamla, self.yeniden) if i is not None and i.isRunning()]
+        if uretim and not (self.is_ and self.is_.isRunning()):
+            c = QtWidgets.QMessageBox.question(
+                self, "BriefMind",
+                "Not üretiliyor, bitmesini bekleyin.\n\n"
+                "Yine de kapatılırsa not yarım kalır; parçalar diskte durur (Geçmiş → Yeniden özetle).\n"
+                "Kapatılsın mı?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if c != QtWidgets.QMessageBox.Yes:
+                e.ignore()
+                return
         if self.is_ and self.is_.isRunning():
             c = QtWidgets.QMessageBox.question(
                 self, "BriefMind",
                 "Yakalama sürüyor. Uygulama kapatılsın mı?\n\n"
-                "Evet: yakalama durur, toplantı kaydı diskte kalır (Geçmiş → Yarım kalanı tamamla).\n"
+                "Evet: yakalama durur, toplantı kaydı diskte kalır (Geçmiş → Yeniden özetle).\n"
                 "Hayır: pencere açık kalır.",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
             if c != QtWidgets.QMessageBox.Yes:
@@ -1815,11 +1569,11 @@ def main():
             app.setWindowIcon(ikon)
         p = Pencere()
         p.show()
-        if AYAR_HATASI:
+        if ayar_mod.AYAR_HATASI:
             QtWidgets.QMessageBox.warning(
                 p, "config.json okunamadı",
                 "config.json geçerli JSON değil, varsayılan ayarlarla açıldı (STT/LLM adresleri boş olabilir).\n\n"
-                f"Hata: {AYAR_HATASI}\n\nSık neden: anahtar tırnaksız (stt_proxy: false yerine \"stt_proxy\": false) "
+                f"Hata: {ayar_mod.AYAR_HATASI}\n\nSık neden: anahtar tırnaksız (stt_proxy: false yerine \"stt_proxy\": false) "
                 "ya da önceki satırın sonunda virgül eksik. Düzeltip uygulamayı yeniden başlatın. "
                 "Ayarlar sayfasında 'Kaydet'e basmayın; bozuk dosyanın üzerine varsayılanlar yazılır.")
         sys.exit(app.exec_())

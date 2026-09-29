@@ -1,12 +1,13 @@
 """
 toplanti.py — tek komut: yakala -> (arka planda duzelt + ozetle) -> bitiste inceleme -> not -> Outlook taslagi
 
-  python toplanti.py basla [--baslik "..."] [--outlook] [--sessiz] [--duzeltme-yok] [--otobitir 180]
+  python toplanti.py basla [--baslik "..."] [--outlook] [--sessiz] [--duzeltme-yok] [--otobitir 180] [--inceleme-yok]
       Baslik verilmezse Outlook takviminden aktif toplanti alinir (katilimcilar + gundem de).
       Teams'te altyazi grubu gorunene kadar bekler, gorununce yakalamaya baslar.
       Altyazi grubu --otobitir saniye boyunca kaybolursa (toplantidan cikildi) kendiliginden bitirir;
       Ctrl+C de bitirir. Bitiste supheli terimler konsolda sorulur, sonra not uretilir.
-  python toplanti.py bitir toplantilar\\2026-09-14_modeldev-haftalik [--outlook]
+      --inceleme-yok: konsol incelemesi atlanir, not dogrudan uretilir (oneriler oneriler.json'da kalir).
+  python toplanti.py bitir toplantilar\\2026-09-14_modeldev-haftalik [--outlook] [--inceleme-yok]
       Yarim kalmis toplantiyi diskten tamamlar (inceleme dahil).
   python toplanti.py liste
 """
@@ -93,9 +94,14 @@ def konsol_inceleme(oneriler):
     return kararlar
 
 
-def tamamla(m, a_outlook, alicilar=None):
+def tamamla(m, a_outlook, alicilar=None, inceleme=True):
     oneriler = m.bitir()
-    kararlar = konsol_inceleme(oneriler)
+    if inceleme:
+        kararlar = konsol_inceleme(oneriler)
+    else:
+        kararlar = {}
+        if oneriler:
+            print(f"İnceleme atlandı: {len(oneriler)} şüpheli terim oneriler.json'da bekliyor.")
     yeniden = m.kararlari_uygula(kararlar)
     if yeniden:
         print(f"{yeniden} parça güncellendi.")
@@ -151,12 +157,12 @@ def komut_basla(a):
         ekran_okuyucu(False)
     for satir in y.bitir():
         m.satir_ekle(satir)
-    tamamla(m, a.outlook, ctx.get("katilimcilar"))
+    tamamla(m, a.outlook, ctx.get("katilimcilar"), inceleme=not a.inceleme_yok)
 
 
 def komut_bitir(a):
     m = Motor.yukle(a.klasor, Sozluk(), olay=olay)
-    tamamla(m, a.outlook, m.katilimcilar)
+    tamamla(m, a.outlook, m.katilimcilar, inceleme=not a.inceleme_yok)
 
 
 def komut_liste(a):
@@ -186,10 +192,12 @@ def main():
     b.add_argument("--sessiz", action="store_true")
     b.add_argument("--duzeltme-yok", action="store_true", help="arka plan düzeltme geçişini kapat")
     b.add_argument("--otobitir", type=int, default=180, help="altyazı bu kadar sn kaybolunca bitir")
+    b.add_argument("--inceleme-yok", action="store_true", help="bitişte şüpheli terimleri sorma, notu doğrudan üret")
     b.set_defaults(f=komut_basla)
     bt = alt.add_parser("bitir")
     bt.add_argument("klasor")
     bt.add_argument("--outlook", action="store_true")
+    bt.add_argument("--inceleme-yok", action="store_true", help="şüpheli terimleri sorma, notu doğrudan üret")
     bt.set_defaults(f=komut_bitir)
     alt.add_parser("liste").set_defaults(f=komut_liste)
     a = p.parse_args()
