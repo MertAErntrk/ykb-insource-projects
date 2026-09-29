@@ -15,3 +15,5 @@ dist/
 __pycache__/
 *.pyc
 .venv/
+teshis_cikti.txt
+test.wav
