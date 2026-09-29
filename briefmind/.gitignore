@@ -1,0 +1,17 @@
+# yerel/kisisel: repoya girmez
+config.json
+sozluk.json
+sozluk.txt
+sozluk.json.yedek-*
+toplantilar/
+hata.log
+*.wav
+logo1.jpeg
+logo.ico
+# derleme
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+.venv/

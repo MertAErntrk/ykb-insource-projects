@@ -1,0 +1,29 @@
+fullnameOverride: whisper-cpu
+
+image:
+  # Artifactory'de "stt-server" paketini ara: chart'in varsayilani bu. Varsa bunu kullan:
+  fqin: <docker-registry>/internal-docker-app/com/ykb/arge/stt-server/v.1.0:v.1.1
+  # Yoksa paket listesindeki model imaji (docker pull komutundan kopyala):
+  # fqin: <docker-registry>/internal-docker-app/com/ykb/arge/generativeaimodels/whisper-stt-large-v3-turbo-turkish-v1-model:1.0.0-2
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []          # gpu-test ve Qwen secret'siz cekti
+
+route:
+  enabled: true
+  subdomain: whisper-cpu
+  timeout: 300s
+
+resources:
+  limits:
+    cpu: '4'
+    memory: 16Gi
+    nvidia.com/gpu: '1'
+  requests:
+    cpu: '2'
+    memory: 8Gi
+    nvidia.com/gpu: '1'
+
+# Model imaja gomulu: PVC yok, config server yok, environment varsayilanlari yeterli.
+persistency:
+  enabled: false

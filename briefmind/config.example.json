@@ -1,0 +1,16 @@
+{
+ "route": "https://<llm-adresi>/v1",
+ "model": "Qwen3.8-27B-FP8",
+ "context": 16384,
+ "stt_url": "https://<stt-adresi>",
+ "stt_model": "whisper-large-v3-turbo-prod",
+ "stt_key": "EMPTY",
+ "kaynak": "ses",
+ "otobitir": 180,
+ "duzelt": true,
+ "outlook": true,
+ "otomatik_basla": false,
+ "altyazi_otomatik": true,
+ "altyazi_goster": false,
+ "ben": ""
+}

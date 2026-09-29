@@ -1,0 +1,10 @@
+uiautomation
+openai
+httpx
+pywin32
+PyQt5
+requests
+numpy
+sounddevice
+soundcard
+soundfile

@@ -1,0 +1,234 @@
+# whisper-cpu.yaml — GPU'suz Whisper STT servisi (imaj build etmeden).
+#
+# Nasil calisir: hazir bir python imaji acilir, server.py ConfigMap'ten mount edilir,
+# faster-whisper ve model PVC'ye bir kez indirilir (sonraki acilislarda hazir).
+# Doldurulacak bir sey yok; model ilk acilista Artifactory HF onbellegindeki HF checkpoint.ten CT2.ye cevrilir.
+#
+# Kurulum:  oc apply -f whisper-cpu.yaml -n <namespace>
+# Izleme:   oc logs -f deploy/whisper-cpu -n <namespace>
+# Test:     $W = oc get route whisper-cpu -n <namespace> -o jsonpath="{.status.ingress[0].host}"
+#           curl.exe -k "https://$W/health"
+#           curl.exe -k "https://$W/v1/audio/transcriptions" -F "file=@test.wav" -F "language=tr" -F "prompt=IFRS 9, Jira, commit"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: whisper-cpu
+  labels:
+    owner: whisper-cpu
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 30Gi
+  storageClassName: ocs-storagecluster-cephfs
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: whisper-cpu
+  labels:
+    owner: whisper-cpu
+data:
+  hazirla.py: |
+    # Modeli Artifactory'deki HF reposundan surumuyle indirir (upstream'e sorulmaz),
+    # CTranslate2 int8'e cevirir, tokenizer.json'i garanti eder. Bir kez calisir, PVC'de kalir.
+    import os, shutil, subprocess, sys
+    from huggingface_hub import snapshot_download
+    hedef = os.environ["MODEL_DIR"]
+    rev = os.environ.get("HF_REVISION") or None
+    kaynak = snapshot_download(os.environ["HF_MODEL"], revision=rev, local_dir="/models/hf-src", cache_dir="/models/hf")
+    print("indirildi:", kaynak, sorted(os.listdir(kaynak)), flush=True)
+    komut = [sys.executable, "-m", "ctranslate2.converters.transformers", "--model", kaynak,
+             "--output_dir", hedef, "--quantization", "int8", "--force"]
+    if os.path.exists(os.path.join(kaynak, "preprocessor_config.json")):
+        komut += ["--copy_files", "preprocessor_config.json"]
+    subprocess.run(komut, check=True)
+    if os.path.exists(os.path.join(kaynak, "tokenizer.json")):
+        shutil.copy(os.path.join(kaynak, "tokenizer.json"), hedef)
+    else:
+        from transformers import WhisperTokenizerFast
+        WhisperTokenizerFast.from_pretrained(kaynak).save_pretrained("/models/tok-tmp")
+        shutil.copy("/models/tok-tmp/tokenizer.json", hedef)
+    print("hazir:", sorted(os.listdir(hedef)), flush=True)
+  server.py: |
+    import io, os, tempfile, time
+    from fastapi import FastAPI, File, Form, UploadFile
+    from fastapi.responses import JSONResponse, PlainTextResponse
+    from faster_whisper import WhisperModel
+
+    MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+    THREADS = int(os.environ.get("CPU_THREADS", "16"))
+    app = FastAPI(title="whisper-cpu")
+    model = None
+
+    @app.on_event("startup")
+    def yukle():
+        global model
+        t = time.time()
+        model = WhisperModel(MODEL, device="cpu", compute_type="int8",
+                             cpu_threads=THREADS, download_root="/models/hf")
+        print(f"model yuklendi ({MODEL}) {time.time()-t:.0f} sn", flush=True)
+
+    @app.get("/health")
+    def health():
+        return PlainTextResponse("ok" if model else "loading", status_code=200 if model else 503)
+
+    @app.post("/v1/audio/transcriptions")
+    async def transcribe(file: UploadFile = File(...), language: str = Form("tr"),
+                         prompt: str = Form(None), response_format: str = Form("verbose_json"),
+                         model_name: str = Form("whisper", alias="model")):
+        ham = await file.read()
+        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file.filename or "a.wav")[1] or ".wav", delete=False) as f:
+            f.write(ham); yol = f.name
+        try:
+            t = time.time()
+            parcalar, bilgi = model.transcribe(yol, language=language, beam_size=5, vad_filter=True,
+                                               initial_prompt=prompt, condition_on_previous_text=False)
+            segs = [{"start": round(p.start, 2), "end": round(p.end, 2), "text": p.text.strip()} for p in parcalar]
+        finally:
+            os.unlink(yol)
+        metin = " ".join(s["text"] for s in segs)
+        if response_format == "text":
+            return PlainTextResponse(metin)
+        return JSONResponse({"text": metin, "segments": segs, "language": language,
+                             "duration": round(bilgi.duration, 2), "islem_sn": round(time.time() - t, 2)})
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisper-cpu
+  labels:
+    owner: whisper-cpu
+    app: whisper-cpu
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: whisper-cpu
+  template:
+    metadata:
+      labels:
+        app: whisper-cpu
+        owner: whisper-cpu
+    spec:
+      containers:
+        - name: whisper
+          # Qwen imajini taban olarak kullaniyoruz: Python 3.12 + pip var, banka CA'sini taniyor,
+          # node'larda zaten cekili (hizli acilis). command ile entrypoint'i eziyoruz, vLLM calismaz.
+          image: <docker-registry>/internal-docker-app/com/ykb/arge/nlpmodels/llm-qwen-be:1.2.1-2
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              export PYTHONPATH=/models/pylib
+              if [ ! -f /models/pylib/.kurulum-v2 ]; then
+                echo "paketler kuruluyor..."
+                rm -rf /models/pylib
+                pip install --no-cache-dir -q --index-url "$PIP_INDEX" --trusted-host <artifactory> \
+                  --target /models/pylib faster-whisper fastapi "uvicorn[standard]" python-multipart \
+                  "huggingface-hub<1.0" "tokenizers<=0.23.0" "numpy<2.3" "protobuf<7"
+                touch /models/pylib/.kurulum-v2
+              fi
+              if [ ! -f "$MODEL_DIR/model.bin" ]; then
+                echo "model hazirlaniyor: $HF_MODEL@$HF_REVISION -> $MODEL_DIR"
+                python /app/hazirla.py
+                echo "donusum bitti"
+              fi
+              echo "sunucu basliyor"
+              exec python -m uvicorn server:app --app-dir /app --host 0.0.0.0 --port 8446
+          env:
+            # PyPI aynasi (kullanicinin dogruladigi repo)
+            #
+            - name: PIP_INDEX
+              value: "https://<artifactory>/artifactory/api/pypi/external-python/simple"
+            # Turkce fine-tune ARGE'nin LOCAL HF reposunda (upstream'e sorulmaz, zaman asimi olmaz).
+            # Genel modele donmek icin: external-huggingface + openai/whisper-large-v3-turbo + revision bos.
+            - name: HF_ENDPOINT
+              value: "https://<artifactory>/artifactory/api/huggingfaceml/internal-huggingface-ml"
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "0"
+            - name: HF_HOME
+              value: /models/hf
+            - name: HF_MODEL
+              value: kutay-yilmaz/whisper-large-v3-turbo-prod
+            - name: HF_REVISION
+              value: "v1.5"                # Artifactory'deki surum klasoru (models/.../v1.5/...)
+            - name: MODEL_DIR
+              value: /models/turkish-ct2
+            - name: WHISPER_MODEL
+              value: /models/turkish-ct2
+            - name: HF_HUB_ETAG_TIMEOUT
+              value: "120"
+            - name: HF_HUB_DOWNLOAD_TIMEOUT
+              value: "120"
+            - name: CPU_THREADS
+              value: "16"
+            - name: OMP_NUM_THREADS
+              value: "16"
+          ports:
+            - containerPort: 8446
+              name: http
+          resources:
+            requests:
+              cpu: "8"
+              memory: 8Gi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: "16"
+              memory: 16Gi
+              ephemeral-storage: 8Gi
+          volumeMounts:
+            - name: kod
+              mountPath: /app
+            - name: modeller
+              mountPath: /models
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 15
+            failureThreshold: 80        # paket + model indirme: 20 dk'ya kadar sabir
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 20
+      volumes:
+        - name: kod
+          configMap:
+            name: whisper-cpu
+        - name: modeller
+          persistentVolumeClaim:
+            claimName: whisper-cpu
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisper-cpu
+  labels:
+    owner: whisper-cpu
+spec:
+  selector:
+    app: whisper-cpu
+  ports:
+    - name: http
+      port: 8446
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: whisper-cpu
+  labels:
+    owner: whisper-cpu
+  annotations:
+    haproxy.router.openshift.io/timeout: "120s"
+spec:
+  subdomain: whisper-cpu
+  to:
+    kind: Service
+    name: whisper-cpu
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
