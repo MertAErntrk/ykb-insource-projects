@@ -371,14 +371,23 @@ class SttIstemci:
     def _basliklar(self):
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
-    def saglik(self):
-        for yol in ("/health", "/v1/models"):
-            try:
-                r = self._oturum.get(f"{self.adres}{yol}", headers=self._basliklar(), verify=False, timeout=6)
-                if r.status_code == 200:
-                    return True
-            except Exception:
-                continue
+    def saglik(self, deneme=2):
+        """Servis ayakta mi? Basarisizsa nedeni self.saglik_hatasi'na yazar (log'da gosterilir)."""
+        self.saglik_hatasi = None
+        if not self.adres:
+            self.saglik_hatasi = "stt_url boş (config.json okunamadı ya da alan yok)"
+            return False
+        for d in range(deneme):
+            if d:
+                time.sleep(2)
+            for yol in ("/health", "/v1/models"):
+                try:
+                    r = self._oturum.get(f"{self.adres}{yol}", headers=self._basliklar(), verify=False, timeout=10)
+                    if r.status_code == 200:
+                        return True
+                    self.saglik_hatasi = f"{yol} -> HTTP {r.status_code}"
+                except Exception as e:
+                    self.saglik_hatasi = f"{yol} -> {type(e).__name__}: {str(e)[:160]}"
         return False
 
     def _istek(self, ses, bicim, onceki=""):
@@ -456,7 +465,7 @@ class SesServisi:
 
     def baslat(self):
         if not self.stt.saglik():
-            self._olay("log", "✖ STT servisine ulaşılamıyor — altyazı moduna düşülüyor")
+            self._olay("log", f"✖ STT servisine ulaşılamıyor ({self.stt.saglik_hatasi}) — altyazı moduna düşülüyor")
             return False
         self.kulaklik = True if self.mod == "cift" else (False if self.mod == "tek" else kulaklik_var_mi())
         self._olay("log", "ses yakalama: hoparlör + mikrofon"

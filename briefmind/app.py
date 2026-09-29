@@ -33,6 +33,7 @@ except Exception:                       # Windows disi ortamda import edilemez
     _UIA_THREAD = None
 
 AYAR_DOSYA = "config.json"
+AYAR_HATASI = None                         # config.json okunamadiysa neden (acilista kullaniciya gosterilir)
 
 
 def ayar_oku():
@@ -46,12 +47,15 @@ def ayar_oku():
          "ben": "",
          "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
          "altyazi_turkce": True}           # altyazi bulununca konusulan dili Turkce yapmayi dene
+    global AYAR_HATASI
     if os.path.exists(AYAR_DOSYA):
         try:
             with open(AYAR_DOSYA, encoding="utf-8") as f:
                 v.update(json.load(f))
-        except Exception:
-            pass
+            AYAR_HATASI = None
+        except Exception as e:
+            # Eskiden sessizce varsayilanlara dusuluyordu: stt_url bos kalip "STT'ye ulasilamiyor" gorunuyordu
+            AYAR_HATASI = f"{e}"
     return v
 
 
@@ -1560,6 +1564,13 @@ def main():
             app.setWindowIcon(ikon)
         p = Pencere()
         p.show()
+        if AYAR_HATASI:
+            QtWidgets.QMessageBox.warning(
+                p, "config.json okunamadı",
+                "config.json geçerli JSON değil, varsayılan ayarlarla açıldı (STT/LLM adresleri boş olabilir).\n\n"
+                f"Hata: {AYAR_HATASI}\n\nSık neden: anahtar tırnaksız (stt_proxy: false yerine \"stt_proxy\": false) "
+                "ya da önceki satırın sonunda virgül eksik. Düzeltip uygulamayı yeniden başlatın. "
+                "Ayarlar sayfasında 'Kaydet'e basmayın; bozuk dosyanın üzerine varsayılanlar yazılır.")
         sys.exit(app.exec_())
     except SystemExit:
         raise
