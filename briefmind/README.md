@@ -47,6 +47,7 @@ python app.py
 | `stt_url`, `stt_model`, `stt_key` | OpenAI uyumlu STT adresi (`/v1/audio/transcriptions`), model, Bearer anahtarı |
 | `kaynak` | `ses` (Whisper) / `ikisi` / `altyazi` |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
+| `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
 
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 

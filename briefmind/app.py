@@ -95,6 +95,7 @@ class YakalamaIsi(QtCore.QThread):
                     self.ayar.get("stt_url", ""),
                     ipucu_fn=lambda: (self.sozluk.metin(self.motor.seri) + "; " + ", ".join(self.motor.katilimcilar)),
                     mod="otomatik",
+                    mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
                     olay=lambda t, v: self.olay.emit(t, v),
                     satir_fn=lambda ts, kim, metin, akis: self.motor.ses_satiri(ts, kim, metin, akis),
                     model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""))

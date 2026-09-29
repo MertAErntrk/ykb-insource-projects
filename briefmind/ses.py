@@ -110,9 +110,20 @@ class AkisYakalayici(threading.Thread):
     def _bloklar_mikrofon(self):
         import sounddevice as sd
         q = queue.Queue()
+        # Cihaz kendi hizinda acilir, 16 kHz'e indirilir: WASAPI cihazlari 16 kHz'i reddeder, config'teki
+        # "mikrofon_cihaz" boyle bir cihazi gosterse de akis acilabilsin.
+        try:
+            hiz = int(sd.query_devices(self.cihaz, "input")["default_samplerate"]) or ORNEK
+        except Exception:
+            hiz = ORNEK
+        blok = int(BLOK * hiz / ORNEK)
+        hedef_t = np.arange(BLOK) * (hiz / ORNEK)
+        kaynak_t = np.arange(blok)
+
         def geri(indata, frames, zaman, durum):
-            q.put(indata.copy().reshape(-1))
-        with sd.InputStream(samplerate=ORNEK, channels=1, dtype="float32", blocksize=BLOK,
+            x = indata[:, 0].copy()
+            q.put(x if hiz == ORNEK else np.interp(hedef_t, kaynak_t[:len(x)], x).astype("float32"))
+        with sd.InputStream(samplerate=hiz, channels=1, dtype="float32", blocksize=blok,
                             device=self.cihaz, callback=geri):
             while not self._dur.is_set():
                 try:

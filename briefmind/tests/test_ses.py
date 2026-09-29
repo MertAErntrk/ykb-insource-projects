@@ -68,3 +68,32 @@ def test_kuyruk_kisa_gecikmede_parca_atmaz():
     a = ses.AkisYakalayici("mikrofon", q, olay=lambda t, v: olaylar.append((t, v)))
     a._gonder([np.full(ses.ORNEK * 2, 0.1, dtype="float32")], None)
     assert q.qsize() == ses.KUYRUK_UYARI + 4
+
+
+def test_mikrofon_48khz_cihaz_16khz_bloga_iner(monkeypatch):
+    """WASAPI cihazlari 16 kHz acilmaz: cihaz kendi hizinda acilip bloklar 16 kHz'e indirilmeli."""
+    import sys
+    import types
+    acilan = {}
+
+    class Akis:
+        def __init__(self, samplerate, channels, dtype, blocksize, device, callback):
+            acilan.update(hiz=samplerate, blok=blocksize)
+            self.cb = callback
+
+        def __enter__(self):
+            t = np.arange(self_blok := acilan["blok"]) / acilan["hiz"]
+            self.cb(np.sin(2 * np.pi * 200 * t).astype("float32").reshape(-1, 1), self_blok, None, None)
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    sahte = types.SimpleNamespace(InputStream=Akis,
+                                  query_devices=lambda cihaz, tur: {"default_samplerate": 48000.0})
+    monkeypatch.setitem(sys.modules, "sounddevice", sahte)
+    a = ses.AkisYakalayici("mikrofon", queue.Queue(), cihaz=3)
+    blok = next(a._bloklar_mikrofon())
+    assert acilan == {"hiz": 48000, "blok": 4800}
+    assert len(blok) == ses.BLOK and blok.dtype == np.float32
+    assert 0.6 < float(np.sqrt(np.mean(np.square(blok)))) < 0.8          # sinus enerjisi korunur
