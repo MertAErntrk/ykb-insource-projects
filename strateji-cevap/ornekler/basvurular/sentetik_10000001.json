@@ -1,0 +1,34 @@
+{
+  "_not": "SENTETİK başvuru. Müşteri numarası, tarihler, banka kodları ve H999 uydurmadır. Alan adları Boran'ın mailindeki JSON parçasından (CORPCOMMMATRIXOUTPUTS, APPROVALAUTHORITY, AUTHLEVELFORMATRIX, AUTHLEVELFORHRULES, PATHID, CALCSBUCREDITCLASSFLAG, APPROVALAUTHLEVELCIF, CDF) ve varsayımlardan (CIF, BasvuruTarihi, Indata.CRBNotice alanları, Outdata.HRules) oluşur.",
+  "BasvuruNo": "SENTETIK-0001",
+  "CIF": "10000001",
+  "BasvuruTarihi": "2025-07-10",
+  "Indata": {
+    "CRBNotice": [
+      {"CIF": "10000001", "Status": 1, "NoticeDate": "2025-04-12", "BankCode": "0099"},
+      {"CIF": "10000001", "Status": 0, "NoticeDate": "2024-03-01", "BankCode": "0067"},
+      {"CIF": "10000001", "Status": 2, "NoticeDate": "2019-05-20", "BankCode": "0099"},
+      {"CIF": "10000001", "Status": 1, "NoticeDate": "2025-09-01", "BankCode": "0099"}
+    ]
+  },
+  "Outdata": {
+    "Musteriler": [
+      {"CALCSBUCREDITCLASSFLAG": "21", "APPROVALAUTHLEVELCIF": "10000001"}
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 8,
+    "AUTHLEVELFORMATRIX": 3,
+    "AUTHLEVELFORHRULES": 8,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 590000.00,
+      "WEIGHTEDLIMWCASHCOLL": 1375000.00,
+      "NOMINALLIMIT": 4250000.00
+    },
+    "HRules": [
+      {"Code": "H221", "Hit": 1, "AuthLevel": null},
+      {"Code": "H999", "Hit": 1, "AuthLevel": 8},
+      {"Code": "H100", "Hit": 0, "AuthLevel": null}
+    ]
+  }
+}

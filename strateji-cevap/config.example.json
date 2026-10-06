@@ -1,0 +1,11 @@
+{
+  "route": "https://<llm-adresi>/v1",
+  "model": "Qwen3.8-27B-FP8",
+  "ca_bundle": "",
+  "zaman_asimi": 120,
+  "cif_yolu": "CIF",
+  "tarih_yolu": "BasvuruTarihi",
+  "h_kurallari_yolu": "Outdata.HRules",
+  "kendi_banka_kodu": "0067",
+  "basvurular": "ornekler/basvurular"
+}

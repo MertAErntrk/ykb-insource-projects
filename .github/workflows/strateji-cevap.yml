@@ -1,0 +1,40 @@
+# Strateji Cevap Motoru: testler (Linux + is bilgisayariyla ayni Windows/Python 3.9). LLM ya da ag gerekmez.
+name: strateji-cevap
+
+on:
+  push:
+    paths: ['strateji-cevap/**', '.github/workflows/strateji-cevap.yml']
+  pull_request:
+    paths: ['strateji-cevap/**', '.github/workflows/strateji-cevap.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: windows-latest
+            python: '3.9'          # is bilgisayari: Python 3.9.7
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Bagimliliklar
+        run: pip install pandas openpyxl pytest
+      - name: Derleme kontrolu
+        working-directory: strateji-cevap
+        run: python -m compileall -q .
+      - name: Testler
+        working-directory: strateji-cevap
+        run: python -m pytest tests -q

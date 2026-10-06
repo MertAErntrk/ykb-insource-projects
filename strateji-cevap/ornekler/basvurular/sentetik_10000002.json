@@ -1,0 +1,29 @@
+{
+  "_not": "SENTETİK başvuru: H221 çalışmamış, yetki seviyesini matris belirlemiş.",
+  "BasvuruNo": "SENTETIK-0002",
+  "CIF": "10000002",
+  "BasvuruTarihi": "2026-03-05",
+  "Indata": {
+    "CRBNotice": [
+      {"CIF": "10000002", "Status": 0, "NoticeDate": "2025-11-20", "BankCode": "0045"}
+    ]
+  },
+  "Outdata": {
+    "Musteriler": [
+      {"CALCSBUCREDITCLASSFLAG": "11", "APPROVALAUTHLEVELCIF": "10000002"}
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 2,
+    "AUTHLEVELFORMATRIX": 2,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 410000.00,
+      "WEIGHTEDLIMWCASHCOLL": 800000.00,
+      "NOMINALLIMIT": 2400000.00
+    },
+    "HRules": [
+      {"Code": "H221", "Hit": 0, "AuthLevel": null}
+    ]
+  }
+}

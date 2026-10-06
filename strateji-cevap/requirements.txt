@@ -1,0 +1,5 @@
+# Motor (motor.py ve altındakiler) yalnızca standart kütüphane kullanır.
+openai          # --llm: kurum içi OpenAI uyumlu LLM
+httpx
+pandas          # analiz_smile.py
+openpyxl        # analiz_smile.py (xlsx)

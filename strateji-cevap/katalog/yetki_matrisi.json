@@ -1,0 +1,15 @@
+{
+  "_not": "SENTETİK eşikler. 'Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx' gelince gerçek değerlerle değiştirilecek. Doğrulama hedefi: Boran'ın mailindeki örnek limitler → matris seviyesi 3 (tutarlar repoya yazılmadı). Hangi ağırlıklı limitin (nakit teminat dahil/hariç) kullanıldığı ve segment/yola göre ayrı tablo olup olmadığı Excel ile netleşecek.",
+  "surum": "sentetik-2026-10-06",
+  "agirlikli_alan": "WEIGHTEDLIMWCASHCOLL",
+  "seviyeler": [
+    {"seviye": 1, "nominal_ust": 1000000, "agirlikli_ust": 500000},
+    {"seviye": 2, "nominal_ust": 3000000, "agirlikli_ust": 1000000},
+    {"seviye": 3, "nominal_ust": 10000000, "agirlikli_ust": 5000000},
+    {"seviye": 4, "nominal_ust": 25000000, "agirlikli_ust": 12500000},
+    {"seviye": 5, "nominal_ust": 50000000, "agirlikli_ust": 25000000},
+    {"seviye": 6, "nominal_ust": 100000000, "agirlikli_ust": 50000000},
+    {"seviye": 7, "nominal_ust": 250000000, "agirlikli_ust": 125000000},
+    {"seviye": 8, "nominal_ust": null, "agirlikli_ust": null}
+  ]
+}
