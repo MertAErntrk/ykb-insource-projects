@@ -1,0 +1,12 @@
+# yerel/kişisel: repoya girmez
+config.json
+# gerçek veri (Smile dökümü, gerçek başvuru JSON'ları, Excel): müşteri verisi commit edilmez
+veri/*
+!veri/README.md
+*.xlsx
+*.xls
+*.csv
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

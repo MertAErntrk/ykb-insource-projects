@@ -9,6 +9,7 @@ YKB'de insource olarak geliştirilen projelerin reposudur.
 | [`briefmind/`](briefmind/) | BriefMind | Toplantı notu AI uygulaması |
 | [`mrm-ai/`](mrm-ai/) | MRM AI | MRM AI projesi |
 | [`laya/`](laya/) | Laya | Laya projesi |
+| [`strateji-cevap/`](strateji-cevap/) | Strateji Cevap Motoru | Strateji çıktıları hakkındaki Smile çağrılarına otomatik cevap taslağı üreten motor |
 
 Her proje kendi klasöründe durur. Yeni proje eklerken kök dizinde yeni bir klasör açıp bu tabloya bir satır ekle.
 

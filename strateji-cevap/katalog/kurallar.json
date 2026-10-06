@@ -1,0 +1,69 @@
+{
+  "_not": "Kural kataloğu. Sahibi strateji ekibidir; teknik ekip yalnızca biçime çevirir. 'onay' alanı 'taslak' olan şablonla üretilen cevap otomatik gitmez, inceleme gerekli olarak işaretlenir. Alan yolları (Indata.CRBNotice, Outdata.HRules ...) Boran'ın mailindeki parçaya ve varsayımlara dayanır; tam JSON gelince güncellenecek (docs/UYGULAMA_PLANI.md bölüm 12).",
+  "surum": "2026-10-06",
+  "varsayilan_kapanis": "Ek sorularınız için Satış ekipleriyle iletişime geçebilirsiniz. İyi çalışmalar.",
+  "kurallar": [
+    {
+      "kod": "H221",
+      "ad": "Bağımsız denetim raporu (ticari KKB kaydı)",
+      "sinif": "cikti",
+      "aciklama": "Indata içindeki CRBNotice (ticari KKB) kayıtlarında son 5 yıl içinde durumu 1 veya 2 olan kayıt varsa H221 çalışır ve bağımsız denetim raporu talep edilir. Cevapta en eski uygun kaydın tarihi ve raporu alan bankanın bizden farklı olduğu yazılır.",
+      "gecerlilik": {"baslangic": "2020-01-01", "bitis": null},
+      "cozum": {
+        "tur": "liste_kosul",
+        "liste": "Indata.CRBNotice",
+        "kosul": {"alan": "Status", "degerler": [1, 2]},
+        "tarih_alani": "NoticeDate",
+        "pencere_yil": 5,
+        "secim": "en_eski",
+        "banka_alani": "BankCode"
+      },
+      "sablonlar": {
+        "baska_banka": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin ticari KKB kayıtlarına göre ilk olarak {ay_yil} tarihli bağımsız denetim raporu farklı bir banka tarafından alınmıştır. Bu nedenle 5 yıl dolmadığı için bankamızda da H221 kuralına takılarak bağımsız denetim raporu talep edilmektedir.",
+          "onay": "Boran, e-posta, 2026-10"
+        },
+        "kendi_banka": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin ticari KKB kayıtlarına göre ilk olarak {ay_yil} tarihinde bankamızca bağımsız denetim raporu alınmıştır. 5 yıl dolmadığı için H221 kuralı gereği bağımsız denetim raporu talep edilmeye devam etmektedir.",
+          "onay": "taslak"
+        },
+        "kayit_yok": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin ticari KKB kayıtlarında H221 kuralını tetikleyecek son 5 yıla ait kayıt bulunamamıştır; durum strateji ekibince incelenecektir.",
+          "onay": "taslak"
+        }
+      },
+      "anahtar_kelimeler": ["bağımsız denetim", "bagimsiz denetim", "denetim raporu"]
+    },
+    {
+      "kod": "YETKI",
+      "ad": "Onay yetki seviyesi",
+      "sinif": "cikti",
+      "aciklama": "Onay yetki seviyesi iki kaynaktan gelir: limitlere göre onay yetki matrisi (nominal ya da ağırlıklı limitten hangisi daha yüksek seviyeye çıkarıyorsa o) ve H kurallarının zorladığı seviye. Nihai seviye ikisinin büyüğüdür (varsayım, örnek JSON'dan: matris 3, H 8, nihai 8).",
+      "gecerlilik": {"baslangic": "2020-01-01", "bitis": null},
+      "cozum": {
+        "tur": "yetki_matrisi",
+        "nominal": "Outdata.CORPCOMMMATRIXOUTPUTS.NOMINALLIMIT",
+        "agirlikli": "Outdata.CORPCOMMMATRIXOUTPUTS.WEIGHTEDLIMWCASHCOLL",
+        "matris_seviyesi": "Outdata.AUTHLEVELFORMATRIX",
+        "h_seviyesi": "Outdata.AUTHLEVELFORHRULES",
+        "nihai": "Outdata.APPROVALAUTHORITY",
+        "h_kurallari": "Outdata.HRules"
+      },
+      "sablonlar": {
+        "matris_belirleyici": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. Nominal limit {nominal} TL ve ağırlıklı limit {agirlikli} TL için onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; iki limitten daha yüksek seviyeye çıkaran esas alınmaktadır.",
+          "onay": "taslak"
+        },
+        "h_kurali_belirleyici": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. Nominal limit {nominal} TL ve ağırlıklı limit {agirlikli} TL için onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; ancak {h_kodlari} kuralı yetki seviyesini {h_seviyesi}. seviyeye yükselttiği için nihai seviye {nihai} olmuştur.",
+          "onay": "taslak"
+        },
+        "veri_eksik": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi hesabı için gerekli limit alanları başvuru çıktısında bulunamadığından durum strateji ekibince incelenecektir.",
+          "onay": "taslak"
+        }
+      },
+      "anahtar_kelimeler": ["yetki seviyesi", "onay yetkisi", "onay seviyesi", "approval authority", "yetki neden"]
+    }
+  ]
+}
