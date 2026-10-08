@@ -1,5 +1,5 @@
 """
-llm.py — Qwen3.8 (vLLM): altyazi duzeltme, bolum ozeti, birlestirme.
+llm.py — Qwen (vLLM, OpenAI uyumlu): altyazi duzeltme, bolum ozeti, birlestirme.
 
 Birlestirme (tam not) tek uzun Markdown cevabi istemez: once karar/aksiyon/acik soru listeleri
 (kucuk JSON), sonra ozet paragrafi + sonraki adim (kucuk JSON) alinir, Markdown kodda kurulur.
@@ -12,9 +12,11 @@ import json
 import os
 import re
 import ssl
+import threading
 import time
 
 import httpx
+import openai
 from openai import BadRequestError, OpenAI, UnprocessableEntityError
 
 import ayar as ayar_mod
@@ -30,24 +32,93 @@ if os.path.exists(CONFIG):
         _cfg = {}
 
 MARJ = 350                                             # sablon + guvenlik payi
+VARSAYILAN_PENCERE = 16384                             # sunucu sorulamazsa ve config'te 'context' yoksa
 ROUTE = MODEL = client = _http = None
+TOKENIZE_URL = None                                    # vLLM /tokenize kokte durur: ROUTE'un sonundaki /v1 atilir
 TLS_DOGRULAMA = False                                  # ca_bundle yolu ya da False (ayar.tls_dogrulama)
 TLS_HATASI = None                                      # ca_bundle var ama sertifika okunamadi (acilista gosterilir)
-BAGLAM_PENCERESI = 16384
+BAGLAM_PENCERESI = VARSAYILAN_PENCERE                  # gecerli pencere: min(config 'context', sunucu max_model_len)
+CONFIG_PENCERE = 0                                     # config.json 'context' (0/bos: sunucudan otomatik)
+CONFIG_MODEL = ""                                      # config.json 'model' (bos: sunucudaki tek model)
+ZAMAN_ASIMI = 300                                      # sohbet istegi okuma zaman asimi (sn)
+AKIS = True                                            # stream=True: route'un bosta kalma zaman asimina takilmaz
+BUTCE_AYAR = {}                                        # config.json 'parca_token' / 'paralel' gecersiz kilmalari
+SUNUCU = None                                          # sunucu_bilgisi() sonucu (modeller, pencere, hata)
+AYAR_UYARILARI = []                                    # ayarla + sunucu tanisi uyarilari (arayuz Olaylar'a yazar)
+SON_HATA = None                                        # son LLM hatasinin anlasilir metni (arayuz durum satiri)
+UYARI_FN = None                                        # motor ayarlar: calisirken cikan uyarilar Olaylar'a
+# Ag davranisi (ayarla() bunlari degistirmez; testler kapatir)
+OTOMATIK_TANI = True                                   # ilk LLM isteginden once sunucu bir kez sorulur
+SUNUCU_TOKENIZER = True                                # token sayimi sunucunun /tokenize'iyla
+
+_tani_kilit = threading.Lock()
+_TANI_YAPILDI = False
+_SEMA_DESTEGI = True                                   # json_schema reddedildiyse oturum boyunca gonderilmez
+_MESAJ_TOKENIZE = True                                 # /tokenize 'messages' bicimini destekliyor mu
+_TOKENIZE_KAPALI_SONA = 0.0                            # /tokenize basarisizsa bu ana kadar tahmin kullanilir
+_tokenize_bildirildi = False
+_token_onbellek = {}
+
+
+class LlmHatasi(RuntimeError):
+    """LLM cagrisi basarisiz: mesaj Turkce ve tani icin gereken degerleri (model, pencere, HTTP durumu,
+    sunucunun mesaji) tasir. motor/isler bunu oldugu gibi Olaylar'a ve hata penceresine yazar."""
+
+    def __init__(self, mesaj, durum=None):
+        super().__init__(mesaj)
+        self.durum = durum
+
+    def __repr__(self):
+        return f"LlmHatasi: {self}"
+
+
+def _int(x, varsayilan=0):
+    try:
+        return int(x if x not in (None, "") else varsayilan)
+    except (TypeError, ValueError):
+        return varsayilan
+
+
+def route_normalize(route):
+    """Bosluk ve sondaki '/' atilir; yol '/v1' (ya da /vN) ile bitmiyorsa eklenir. openai istemcisi
+    /chat/completions'i bunun ustune kurar; '/v1'siz adres 404, '/v1/' ise '/tokenize/' (307) uretiyordu."""
+    r = (route or "").strip().rstrip("/")
+    if r and not re.search(r"/v\d+$", r):
+        r += "/v1"
+    return r
+
+
+def _kok(route):
+    return re.sub(r"/v\d+$", "", (route or "").rstrip("/"))
 
 
 def ayarla(cfg):
     """LLM adresi/model/baglam penceresi ve istemciler calisirken yeniden kurulur (Ayarlar -> Kaydet
-    sonrasi uygulamayi yeniden baslatmak gerekmez). cfg: config.json sozlugu."""
-    global ROUTE, MODEL, BAGLAM_PENCERESI, TLS_DOGRULAMA, TLS_HATASI, client, _http
+    sonrasi uygulamayi yeniden baslatmak gerekmez). cfg: config.json sozlugu. Ag istegi YAPMAZ: sunucu
+    (model listesi, max_model_len) ilk LLM isteginden once ya da sunucuyu_tani() ile bir kez sorulur."""
+    global ROUTE, MODEL, BAGLAM_PENCERESI, TLS_DOGRULAMA, TLS_HATASI, client, _http, TOKENIZE_URL
+    global CONFIG_PENCERE, CONFIG_MODEL, ZAMAN_ASIMI, AKIS, BUTCE_AYAR, SUNUCU, AYAR_UYARILARI, SON_HATA
+    global _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE, _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi
     cfg = cfg or {}
-    ROUTE = cfg.get("route") or "http://localhost:8000/v1"          # config.json: LLM adresi (OpenAI uyumlu)
+    ham = (cfg.get("route") or "http://localhost:8000/v1").strip()   # config.json: LLM adresi (OpenAI uyumlu)
     # OpenShift icinden: "http://<servis>.<namespace>.svc.cluster.local:8000/v1"
-    MODEL = cfg.get("model") or "Qwen3.8-27B-FP8"
-    try:
-        BAGLAM_PENCERESI = int(cfg.get("context") or 16384)   # sunucunun max-model-len'i
-    except (TypeError, ValueError):
-        BAGLAM_PENCERESI = 16384
+    ROUTE = route_normalize(ham)
+    TOKENIZE_URL = _kok(ROUTE) + "/tokenize"
+    AYAR_UYARILARI = []
+    if ROUTE != ham:
+        AYAR_UYARILARI.append("LLM adresi düzeltildi: sonu '/v1' olmalı (sondaki '/' atıldı ya da '/v1' eklendi)")
+    CONFIG_MODEL = str(cfg.get("model") or "").strip()
+    MODEL = CONFIG_MODEL                                # bos ise sunucudaki tek model secilir (sunucuyu_tani)
+    CONFIG_PENCERE = max(0, _int(cfg.get("context")))  # 0/bos/bozuk: sunucunun max_model_len'i
+    BAGLAM_PENCERESI = CONFIG_PENCERE or VARSAYILAN_PENCERE
+    ZAMAN_ASIMI = max(30, _int(cfg.get("llm_zaman_asimi"), 300))
+    AKIS = bool(cfg.get("llm_akis", True))
+    BUTCE_AYAR = {ad: _int(cfg.get(k)) for ad, k in (("parca", "parca_token"), ("paralel", "paralel"))
+                  if _int(cfg.get(k)) > 0}
+    SUNUCU, SON_HATA = None, None
+    _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE = False, True, True
+    _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi = 0.0, False
+    _token_onbellek.clear()
     # A8: config.json -> ca_bundle (kurum kok sertifikasi) varsa TLS dogrulanir, yoksa kapali
     TLS_DOGRULAMA, TLS_HATASI, dogrula = ayar_mod.tls_dogrulama(cfg), None, False
     if TLS_DOGRULAMA:
@@ -55,13 +126,214 @@ def ayarla(cfg):
             dogrula = ssl.create_default_context(cafile=TLS_DOGRULAMA)
         except (ssl.SSLError, OSError, ValueError) as e:     # bozuk/yanlis bicimli .cer: uygulama acilsin
             TLS_DOGRULAMA, TLS_HATASI = False, f"{e}"
+    anahtar = str(cfg.get("llm_key") or cfg.get("api_key") or "").strip()
+    vekil = bool(cfg.get("llm_proxy", False))           # True: sistem proxy'si (HTTPS_PROXY) kullanilir
+    # max_retries: SDK varsayilani 2 idi; route zaman asiminda (504) ayni uzun istek 3 kez uretiliyordu
+    tekrar = max(0, _int(cfg.get("llm_tekrar"), 1))
     # eski istemciler kapatilmaz: o an baska bir is parcaciginda suren istek yarida kesilmesin
-    client = OpenAI(base_url=ROUTE, api_key="x",
-                    http_client=httpx.Client(verify=dogrula, trust_env=False, timeout=900))
-    _http = httpx.Client(verify=dogrula, trust_env=False, timeout=30)
+    client = OpenAI(base_url=ROUTE, api_key=anahtar or "x", max_retries=tekrar,
+                    http_client=httpx.Client(verify=dogrula, trust_env=vekil,
+                                             timeout=httpx.Timeout(ZAMAN_ASIMI, connect=15.0)))
+    _http = httpx.Client(verify=dogrula, trust_env=vekil, timeout=httpx.Timeout(10.0, connect=5.0),
+                         headers={"Authorization": f"Bearer {anahtar}"} if anahtar else None)
 
 
 ayarla(_cfg)
+
+
+def _uyar(m):
+    if UYARI_FN:
+        try:
+            UYARI_FN(m)
+        except Exception:
+            pass
+
+
+def sunucu_bilgisi(zaman_asimi=20):
+    """GET {ROUTE}/models -> {"modeller": [{"id", "max_model_len"}], "hata": None | metin}. Hic yukseltmez."""
+    try:
+        r = _http.get(ROUTE + "/models", timeout=zaman_asimi)
+    except Exception as e:
+        return {"modeller": [], "hata": _istisna_ozeti(e)}
+    if r.status_code != 200:
+        return {"modeller": [], "hata": f"GET /models HTTP {r.status_code}: {_kisalt(r.text, 200)}"}
+    try:
+        veri = r.json().get("data") or []
+    except Exception:
+        return {"modeller": [], "hata": f"GET /models JSON değil: {_kisalt(r.text, 200)}"}
+    return {"modeller": [{"id": m.get("id"), "max_model_len": m.get("max_model_len")} for m in veri
+                         if isinstance(m, dict)], "hata": None}
+
+
+def sunucuyu_tani(zorla=False):
+    """Sunucudaki modelleri ve baglam penceresini bir kez sorar, ayarlari ona gore duzeltir:
+    - config modeli listede yoksa ve sunucu tek model sunuyorsa o model kullanilir;
+    - pencere = sunucunun max_model_len'i; config 'context' daha kucukse o (yalniz ust sinir).
+    Sunucuya ulasilamazsa config degerleri kalir. Dondurur: uyari satirlari (ayarla uyarilari dahil)."""
+    global _TANI_YAPILDI, SUNUCU, MODEL, BAGLAM_PENCERESI
+    with _tani_kilit:
+        if _TANI_YAPILDI and not zorla:
+            return list(AYAR_UYARILARI)
+        _TANI_YAPILDI = True
+        bilgi = sunucu_bilgisi()
+        uyarilar = []
+        sunucu_pencere = None
+        if bilgi["hata"]:
+            uyarilar.append(f"LLM sunucusu sorgulanamadı ({bilgi['hata']}); model '{MODEL or '-'}', bağlam "
+                            f"penceresi {BAGLAM_PENCERESI} varsayıldı")
+        else:
+            idler = [m["id"] for m in bilgi["modeller"] if m.get("id")]
+            if MODEL not in idler:
+                if len(idler) == 1:
+                    eski, MODEL = MODEL, idler[0]
+                    uyarilar.append(f"config.json 'model' ({eski}) sunucuda yok; sunucudaki tek model kullanılıyor: "
+                                    f"{MODEL}" if eski else f"model sunucudan alındı: {MODEL}")
+                elif idler:
+                    uyarilar.append(f"config.json 'model' ({MODEL or 'boş'}) sunucuda yok; sunucudaki modeller: "
+                                    f"{', '.join(idler)} — Ayarlar → Model alanına birini yazın")
+                else:
+                    uyarilar.append("LLM sunucusu hiç model listelemedi (GET /models boş)")
+            sunucu_pencere = next((_int(m.get("max_model_len")) for m in bilgi["modeller"]
+                                   if m.get("id") == MODEL and _int(m.get("max_model_len")) > 0), None)
+            if sunucu_pencere:
+                if CONFIG_PENCERE > sunucu_pencere:
+                    uyarilar.append(f"config.json 'context' ({CONFIG_PENCERE}) sunucunun bağlam penceresinden "
+                                    f"({sunucu_pencere}) büyük; {sunucu_pencere} kullanılıyor")
+                BAGLAM_PENCERESI = min(CONFIG_PENCERE, sunucu_pencere) if CONFIG_PENCERE else sunucu_pencere
+        bilgi["pencere"] = sunucu_pencere
+        SUNUCU = bilgi
+        yeni = [u for u in uyarilar if u not in AYAR_UYARILARI]
+        AYAR_UYARILARI.extend(yeni)
+        _gunluge_yaz(olay="ayar", zaman=dt.datetime.now().strftime("%H:%M:%S"), model=MODEL,
+                     pencere=BAGLAM_PENCERESI, sunucu_pencere=sunucu_pencere, config_context=CONFIG_PENCERE,
+                     akis=AKIS, uyari=list(AYAR_UYARILARI))
+        if not zorla:                         # acik cagiran (arayuz, teshis) donen listeyi kendisi yazar
+            for u in yeni:
+                _uyar(u)
+        return list(AYAR_UYARILARI)
+
+
+def ayar_ozeti():
+    """Arayuz/teshis icin tek satir: gecerli model, pencere ve kaynagi."""
+    kaynak = ("sunucu" if SUNUCU and SUNUCU.get("pencere") and BAGLAM_PENCERESI == SUNUCU["pencere"]
+              else "config" if CONFIG_PENCERE else "varsayılan")
+    return (f"LLM modeli: {MODEL or '-'} · bağlam penceresi: {BAGLAM_PENCERESI} ({kaynak}) · "
+            f"akış: {'açık' if AKIS else 'kapalı'}")
+
+
+# ---------- token butceleri ----------
+# 100-200 token/sn'lik sunucuda max_tokens bir maliyet degil ust sinirdir; kesilen cevap (length) ise
+# tekrar cagrisi demektir. Butceler pencereye gore uc kademede: <12k (8k), 12k-32k (16k), >=32k.
+# Liste birlestirmede dusunme ACILMAZ: eski sunucuda dusunme aciksa json_schema uygulanmiyordu; yeni
+# sunucuda tools/llm_teshis.py 'json_schema + dusunme' satiri bunu olcer, karar o olcume baglidir.
+_BUTCELER = {
+    #               8k     16k    32k+
+    "duzeltme":     (1200, 1200, 1200),    # madde sayisi (<=25) sinirli: pencereyle buyumez
+    "bolum":        (3000, 3000, 4000),    # bolum ozeti (dusunme low + JSON)
+    "liste":        (2500, 6000, 8000),    # karar/aksiyon/acik soru birlestirmesi (dusunmesiz) ust siniri
+    "genel":        (800, 1500, 2000),     # ozet paragrafi + sonraki adim (dusunmesiz)
+    "soru":         (1500, 1500, 2500),    # toplantiya soru: cevap
+    "soru_dusunme": (0, 1500, 1500),       # toplantiya soru: dusunme payi (8k'da dusunme kapali)
+    "parca":        (2500, 3000, 4000),    # motor: canli parca boyutu (token)
+    "paralel":      (2, 2, 2),             # motor: ayni anda islenen parca (config 'paralel' ile artirilabilir)
+}
+SORU_GIRDI_UST = 48000                     # buyuk pencerede bile soru basina en fazla bu kadar transkript
+
+
+def butce(ad, pencere=None):
+    """Cagri turune gore max_tokens (ya da motor icin parca boyutu/paralellik): pencereye olcekli."""
+    if ad in BUTCE_AYAR:
+        return BUTCE_AYAR[ad]
+    p = pencere or BAGLAM_PENCERESI
+    return _BUTCELER[ad][0 if p < 12000 else (1 if p < 32768 else 2)]
+
+
+# ---------- hata metinleri ----------
+_BAGLAM_IFADE = re.compile(r"maximum context length|context length|max_model_len|maximum model length|"
+                           r"model length|too many tokens|prompt is too long|longer than the maximum", re.I)
+_SEMA_IFADE = re.compile(r"json_schema|response_format|guided|structured output|grammar|xgrammar|outlines", re.I)
+
+
+def _kisalt(s, n):
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _govde(e):
+    """openai APIStatusError'in sunucu mesaji (vLLM: {'message'} / {'error': {'message'}} / FastAPI {'detail'})."""
+    b = getattr(e, "body", None)
+    if isinstance(b, dict):
+        ic = b.get("error") if isinstance(b.get("error"), dict) else b
+        for k in ("message", "detail"):
+            if ic.get(k):
+                return str(ic[k])
+        return json.dumps(b, ensure_ascii=False)
+    if b:
+        return str(b)
+    yanit = getattr(e, "response", None)
+    try:
+        return yanit.text
+    except Exception:
+        return str(e)
+
+
+def _istisna_ozeti(e):
+    """'Tur: mesaj <- NedenTuru: mesaj': openai 'Connection error.' gercek nedeni (__cause__) gizliyordu."""
+    parcalar, x = [], e
+    while x is not None and len(parcalar) < 4:
+        p = f"{type(x).__name__}: {_kisalt(x, 240)}"
+        if p not in parcalar:                 # httpx/httpcore ayni mesaji iki kez sarar
+            parcalar.append(p)
+        x = x.__cause__ or (None if x.__suppress_context__ else x.__context__)
+    return " ← ".join(parcalar)
+
+
+def _baglam_siniri(govde):
+    """vLLM 400 metninden sunucunun penceresi: "maximum context length is 8192 tokens"."""
+    m = re.search(r"maximum (?:context|model) length (?:is|of) (\d+)", govde or "", re.I)
+    return int(m.group(1)) if m else None
+
+
+def hata_metni(e):
+    """Her LLM hatasi icin tek satir Turkce, tani degerleriyle. LlmHatasi zaten hazir metindir."""
+    if isinstance(e, LlmHatasi):
+        return str(e)
+    durum = getattr(e, "status_code", None)
+    govde = _kisalt(_govde(e), 600) if durum else ""
+    html = "<html" in govde.lower() or "<!doctype" in govde.lower()
+    if durum == 404:
+        if "does not exist" in govde or "model" in govde.lower():
+            modeller = ", ".join(m["id"] for m in (SUNUCU or {}).get("modeller", []) if m.get("id")) or "?"
+            return (f"LLM sunucusu '{MODEL or '(boş)'}' modelini tanımıyor (HTTP 404; sunucudaki modeller: {modeller}). "
+                    f"Ayarlar → Model alanını düzeltin ya da boş bırakın. Sunucu: {_kisalt(govde, 240)}")
+        return (f"LLM adresi bulunamadı (HTTP 404): Ayarlar → LLM adresi '.../v1' ile bitmeli. "
+                f"Sunucu: {_kisalt(govde, 200)}")
+    if durum in (401, 403):
+        return (f"LLM sunucusu isteği reddetti (HTTP {durum}): anahtar gerekiyorsa config.json 'llm_key'. "
+                f"Sunucu: {_kisalt(govde, 200)}")
+    if durum in (400, 422) and _BAGLAM_IFADE.search(govde):
+        return (f"İstek LLM bağlam penceresini aşıyor (HTTP {durum}; uygulamanın kullandığı pencere "
+                f"{BAGLAM_PENCERESI}). config.json 'context' değerini boş bırakın ya da sunucununkine eşitleyin. "
+                f"Sunucu: {_kisalt(govde, 400)}")
+    if durum in (502, 503, 504) or html:
+        return (f"LLM ağ geçidi HTTP {durum} döndü{' (HTML gövde: OpenShift route/proxy)' if html else ''}. Uzun "
+                f"isteklerde route zaman aşımı olabilir: config.json 'llm_akis': true (akışlı istek) ya da route'a "
+                f"haproxy.router.openshift.io/timeout=600s. Gövde: {_kisalt(govde, 160)}")
+    if durum:
+        return f"LLM HTTP {durum}: {_kisalt(govde, 400)}"
+    if isinstance(e, openai.APITimeoutError):
+        return (f"LLM {ZAMAN_ASIMI} sn içinde cevap vermedi (zaman aşımı; config.json 'llm_zaman_asimi'). "
+                f"{_istisna_ozeti(e)}")
+    if isinstance(e, openai.APIConnectionError):
+        neden = _istisna_ozeti(e.__cause__) if e.__cause__ else _istisna_ozeti(e)
+        ipucu = ""
+        if re.search(r"ssl|certificate|sertifika", neden, re.I):
+            ipucu = (" TLS: config.json 'ca_bundle' sertifikası bu sunucuyu doğrulamıyor olabilir."
+                     if TLS_DOGRULAMA else " TLS el sıkışması başarısız.")
+        elif re.search(r"proxy|getaddrinfo|name or service|nodename|resolve|timed out|refused", neden, re.I):
+            ipucu = " Tarayıcıdan erişiliyorsa config.json 'llm_proxy': true deneyin (sistem proxy'si)."
+        return f"LLM adresine ulaşılamadı: {neden}.{ipucu}"
+    return _istisna_ozeti(e)
 
 GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
@@ -176,16 +448,54 @@ def token_tahmin(s):
     return max(1, len(s) // 3)
 
 
-def token_say(metin):
-    """Sunucunun tokenizer'iyla sayar; ulasamazsa kaba tahmin."""
+def _tokenize(govde, bicim="prompt"):
+    """POST {kok}/tokenize -> token sayisi | None. Ilk basarisizlikta neden bir kez bildirilir ve 5 dk
+    boyunca sunucu sorulmaz (eskiden her cagri sessizce 30 sn bekleyip tahmine dusebiliyordu)."""
+    global _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi, _MESAJ_TOKENIZE
+    if not SUNUCU_TOKENIZER or time.time() < _TOKENIZE_KAPALI_SONA:
+        return None
     try:
-        r = _http.post(ROUTE.replace("/v1", "/tokenize"), json={"model": MODEL, "prompt": metin})
-        return int(r.json()["count"])
-    except Exception:
+        r = _http.post(TOKENIZE_URL, json=govde)
+        if r.status_code == 200:
+            return int(r.json()["count"])
+        if bicim == "mesaj" and r.status_code in (400, 422):
+            _MESAJ_TOKENIZE = False          # eski surum: 'messages' bicimi yok, 'prompt' ile devam
+            return None
+        neden = f"HTTP {r.status_code}"
+    except Exception as e:
+        neden = type(e).__name__
+    _TOKENIZE_KAPALI_SONA = time.time() + 300
+    if not _tokenize_bildirildi:
+        _tokenize_bildirildi = True
+        m = f"sunucunun /tokenize'ı kullanılamıyor ({neden}); token sayısı tahminle (karakter/3) yapılıyor"
+        AYAR_UYARILARI.append(m)
+        _gunluge_yaz(olay="tokenize_yok", zaman=dt.datetime.now().strftime("%H:%M:%S"), neden=neden)
+        _uyar(m)
+    return None
+
+
+def token_say(metin):
+    """Sunucunun tokenizer'iyla sayar; ulasamazsa kaba tahmin. Ayni metin (genel ozet gruplamasi,
+    soru-cevap bolum secimi) tekrar sayilmaz."""
+    anahtar = hash(metin)
+    if anahtar in _token_onbellek:
+        return _token_onbellek[anahtar]
+    n = _tokenize({"model": MODEL, "prompt": metin})
+    if n is None:
         return token_tahmin(metin)
+    if len(_token_onbellek) > 512:
+        _token_onbellek.clear()
+    _token_onbellek[anahtar] = n
+    return n
 
 
 def _giris_token(mesajlar):
+    """Sohbet girdisinin token sayisi. Sunucu 'messages' bicimini sayabiliyorsa sablon dahil kesin sayim;
+    yoksa duz metin sayimi + sablon payi (60)."""
+    if _MESAJ_TOKENIZE:
+        n = _tokenize({"model": MODEL, "messages": mesajlar, "add_generation_prompt": True}, "mesaj")
+        if n is not None:
+            return n
     return token_say("\n".join(m["content"] for m in mesajlar)) + 60
 
 
@@ -207,7 +517,8 @@ def json_ayikla(metin):
     return json.loads(re.sub(r",\s*([}\]])", r"\1", metin[a:b + 1]))
 
 
-_DUSUNCE = re.compile(r"<think>.*?</think>", re.S)
+_DUSUNCE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.S)
+_DUSUNCE_ETIKET = re.compile(r"</?(?:think|thinking|reasoning)>")
 
 
 def dusunce_temizle(metin):
@@ -248,7 +559,7 @@ GUNLUK_FN = None          # motor ayarlar: her LLM cagrisinin istatistigi (iceri
 def _gorev_adi(mesajlar):
     sistem = mesajlar[0]["content"] if mesajlar else ""
     for ad, sablon in (("duzeltme", DUZELT_SISTEM), ("bolum", MAP_SISTEM), ("liste", LISTE_SISTEM),
-                       ("genel", GENEL_SISTEM)):
+                       ("genel", GENEL_SISTEM), ("soru", SORU_SISTEM)):
         if sistem.startswith(sablon):
             return ad
     return "onarim" if sistem.startswith("Bozuk JSON") else "diger"
@@ -263,44 +574,123 @@ def _gunluge_yaz(**kayit):
 
 
 def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
+    """Tek LLM cagrisi -> (metin, finish_reason). Hata LlmHatasi olarak (Turkce, tani degerleriyle) yukselir."""
+    global SON_HATA
+    if OTOMATIK_TANI and not _TANI_YAPILDI:
+        sunucuyu_tani()
     t0 = time.time()
     kayit = {"zaman": dt.datetime.now().strftime("%H:%M:%S"), "gorev": _gorev_adi(mesajlar),
-             "dusunme": effort if dusunme else False, "sema": bool(sema)}
+             "dusunme": effort if dusunme else False, "sema": bool(sema), "model": MODEL, "pencere": BAGLAM_PENCERESI}
     try:
         metin, neden, ek = _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme)
     except Exception as e:
-        _gunluge_yaz(**kayit, sure_sn=round(time.time() - t0, 1), hata=f"{type(e).__name__}: {str(e)[:200]}")
-        raise
+        hm = hata_metni(e)
+        SON_HATA = hm
+        _gunluge_yaz(**kayit, sure_sn=round(time.time() - t0, 1), http=getattr(e, "status_code", None),
+                     tur=type(e).__name__, hata=hm[:600])
+        if isinstance(e, (LlmHatasi, ValueError)):
+            raise
+        raise LlmHatasi(hm, getattr(e, "status_code", None)) from e
     _gunluge_yaz(**kayit, **ek, finish=neden, sure_sn=round(time.time() - t0, 1), cevap_karakter=len(metin),
                  ingilizce=ingilizce_mi(metin))
     return metin, neden
 
 
-def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
-    giris = _giris_token(mesajlar)
-    izin = BAGLAM_PENCERESI - giris - MARJ
-    if izin < 256:
-        raise ValueError(f"girdi bağlam penceresine sığmıyor ({giris} token)")
-    max_tokens = min(max_tokens, izin)
-    kw = {"reasoning_effort": effort} if dusunme else {"enable_thinking": False}
-    ortak = dict(model=MODEL, messages=mesajlar, max_tokens=max_tokens,
-                 temperature=temperature, top_p=0.95,
-                 extra_body={"chat_template_kwargs": kw})
-    if sema:
-        try:
-            r = client.chat.completions.create(
-                response_format={"type": "json_schema", "json_schema": {"name": "cikti", "schema": sema}},
-                **ortak)
-        except (BadRequestError, UnprocessableEntityError):   # json_schema desteklenmiyor; zaman asimi tekrarlanmaz
-            r = client.chat.completions.create(**ortak)
-    else:
-        r = client.chat.completions.create(**ortak)
+def _yanit_coz(r):
+    """Akissiz cevap -> (content, reasoning, finish_reason, usage)."""
     c = r.choices[0]
-    u = getattr(r, "usage", None)
-    dusunce = getattr(c.message, "reasoning_content", None) or getattr(c.message, "reasoning", None) or ""
-    ek = {"giris_token": giris, "max_tokens": max_tokens,
-          "cikti_token": getattr(u, "completion_tokens", None), "dusunce_karakter": len(dusunce)}
-    return dusunce_temizle(c.message.content), c.finish_reason, ek
+    m = c.message
+    dusunce = getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or ""
+    return m.content or "", dusunce, c.finish_reason, getattr(r, "usage", None)
+
+
+def _cagir(ortak):
+    """Istek: AKIS acikken stream=True (parcalar geldikce route'un bosta kalma sayaci sifirlanir: OpenShift
+    route varsayilani 30 sn, dusunmeli 3000-4500 token'lik bir bolum ozeti bunu asabiliyordu)."""
+    if not AKIS:
+        return _yanit_coz(client.chat.completions.create(**ortak))
+    eb = dict(ortak.get("extra_body") or {}, stream_options={"include_usage": True})
+    akis = client.chat.completions.create(stream=True, **dict(ortak, extra_body=eb))
+    if hasattr(akis, "choices"):                       # akissiz cevap (sahte istemci, proxy)
+        return _yanit_coz(akis)
+    icerik, dusunce, neden, kullanim = [], [], None, None
+    try:
+        for p in akis:
+            if getattr(p, "usage", None):
+                kullanim = p.usage
+            for c in getattr(p, "choices", None) or []:
+                d = getattr(c, "delta", None)
+                if d is not None:
+                    if getattr(d, "content", None):
+                        icerik.append(d.content)
+                    rc = getattr(d, "reasoning_content", None) or getattr(d, "reasoning", None)
+                    if rc:
+                        dusunce.append(rc)
+                if getattr(c, "finish_reason", None):
+                    neden = c.finish_reason
+    finally:
+        kapat = getattr(akis, "close", None)
+        if kapat:
+            try:
+                kapat()
+            except Exception:
+                pass
+    return "".join(icerik), "".join(dusunce), neden, kullanim
+
+
+def _sema_istegi(ortak, sema, ek):
+    """json_schema'li istek. Yalnizca semayla ilgili (ya da nedeni belirsiz) 400/422'de semasiz tekrar;
+    baglam tasmasi ve bilinmeyen model gibi 400'ler AYNEN yukselir (eskiden her 400 semasiz tekrar
+    ediliyor, ayni hata iki kat surede geliyordu). Sema reddedildiyse oturum boyunca gonderilmez."""
+    global _SEMA_DESTEGI
+    try:
+        return _cagir(dict(ortak, response_format={"type": "json_schema",
+                                                   "json_schema": {"name": "cikti", "schema": sema}}))
+    except (BadRequestError, UnprocessableEntityError) as e:
+        g = _govde(e)
+        if _BAGLAM_IFADE.search(g) or "does not exist" in g:
+            raise
+        sonuc = _cagir(ortak)
+        ek["sema_dustu"] = True
+        if _SEMA_IFADE.search(g) and _SEMA_DESTEGI:
+            _SEMA_DESTEGI = False
+            _uyar(f"LLM sunucusu json_schema'yı reddetti; şemasız devam ediliyor ({_kisalt(g, 160)})")
+        return sonuc
+
+
+def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
+    global BAGLAM_PENCERESI
+    for deneme in range(2):
+        giris = _giris_token(mesajlar)
+        izin = BAGLAM_PENCERESI - giris - MARJ
+        if izin < 256:
+            raise ValueError(f"girdi bağlam penceresine sığmıyor: girdi {giris} + pay {MARJ} token, "
+                             f"pencere {BAGLAM_PENCERESI} (config.json 'context' / sunucu max_model_len)")
+        mt = min(max_tokens, izin)
+        kw = {"reasoning_effort": effort} if dusunme else {"enable_thinking": False}
+        ortak = dict(model=MODEL, messages=mesajlar, max_tokens=mt, temperature=temperature, top_p=0.95,
+                     extra_body={"chat_template_kwargs": kw})
+        ek = {}
+        try:
+            if sema and _SEMA_DESTEGI:
+                icerik, dusunce, neden, u = _sema_istegi(ortak, sema, ek)
+            else:
+                icerik, dusunce, neden, u = _cagir(ortak)
+            break
+        except (BadRequestError, UnprocessableEntityError) as e:
+            yeni = _baglam_siniri(_govde(e))
+            if deneme == 0 and yeni and yeni < BAGLAM_PENCERESI:
+                # sunucunun penceresi bildigimizden kucuk: ogren ve ayni istegi bir kez kirpilmis butceyle dene
+                _uyar(f"LLM bağlam penceresi {BAGLAM_PENCERESI} değil {yeni}; bütçeler buna göre küçültüldü")
+                BAGLAM_PENCERESI = yeni
+                continue
+            raise
+    ayrinti = getattr(u, "completion_tokens_details", None)
+    ek.update(giris_token=giris, max_tokens=mt, cikti_token=getattr(u, "completion_tokens", None),
+              sunucu_giris_token=getattr(u, "prompt_tokens", None),
+              dusunce_token=getattr(ayrinti, "reasoning_tokens", None) if ayrinti else None,
+              dusunce_karakter=len(dusunce or ""), dusunce_icerikte=bool(_DUSUNCE_ETIKET.search(icerik or "")))
+    return dusunce_temizle(icerik), neden, ek
 
 
 def _sema_json(metin, sema):
@@ -345,8 +735,8 @@ def _json_sor(mesajlar, max_tokens, sema, effort="medium", temperature=0.6, dusu
 def _json_tam(mesajlar, max_tokens, sema, temperature=0.2):
     """Dusunmesiz JSON; kesilmis (length) cevabi KABUL ETMEZ — yarim liste sessizce eksik not demektir.
     Bir kez daha genis butceyle dener; yine olmazsa None (cagiran LLM'siz yedege duser)."""
-    for butce in (max_tokens, int(max_tokens * 1.6)):
-        metin, neden = sor(mesajlar, butce, sema=sema, temperature=temperature, dusunme=False)
+    for b in (max_tokens, int(max_tokens * 1.6)):
+        metin, neden = sor(mesajlar, b, sema=sema, temperature=temperature, dusunme=False)
         if neden == "length":
             continue
         try:
@@ -374,7 +764,7 @@ def satirlari_duzelt(satirlar, baglam):
     degisimleri metne kendisi uygular. Dondurur (duzeltilmis_satirlar, [(orijinal, duzeltilmis)])."""
     mesajlar = [{"role": "system", "content": DUZELT_SISTEM},
                 {"role": "user", "content": f"{baglam}\n\nSatırlar:\n" + "\n".join(satirlar)}]
-    v = _json_sor(mesajlar, 1200, DUZELT_SEMASI, temperature=0.2, dusunme=False)
+    v = _json_sor(mesajlar, butce("duzeltme"), DUZELT_SEMASI, temperature=0.2, dusunme=False)
     if not v:
         return satirlar, []
     duzeltmeler = []
@@ -437,17 +827,17 @@ def bolum_ozetle(blok, sira, baglam, onceki_konular=None):
     kullanici = {"role": "user", "content": f"{baglam}{devam}\n\nToplantının {sira}. bölümü:\n\n{blok}"}
     mesajlar = [{"role": "system", "content": MAP_SISTEM}, kullanici]
     # JSON cikarimi derin dusunme istemez: "low" ile dusunme tokenleri kisa kalir, cevap kesilmez
-    o = normalize_ozet(_json_sor(mesajlar, 3000, BOLUM_SEMASI, effort="low", temperature=0.3))
+    o = normalize_ozet(_json_sor(mesajlar, butce("bolum"), BOLUM_SEMASI, effort="low", temperature=0.3))
     if o and ingilizce_mi(_ozet_dili(o)):
         # Model (cogunlukla dusunme dilinin etkisiyle) Ingilizce yazdi: dusunmesiz, dil kurali vurgulu tekrar
         tekrar = [{"role": "system", "content": MAP_SISTEM + "\n" + TURKCE_KURAL}, kullanici]
-        o2 = normalize_ozet(_json_sor(tekrar, 3000, BOLUM_SEMASI, temperature=0.2, dusunme=False))
+        o2 = normalize_ozet(_json_sor(tekrar, butce("bolum"), BOLUM_SEMASI, temperature=0.2, dusunme=False))
         if o2 and not ingilizce_mi(_ozet_dili(o2)):
             o = o2
     if o and not o["ozet"].strip(" -.") and len(blok) > 200:
         # listeler dolu ama ozet alani bos: tam notun ozet paragrafi bu alanlardan kurulur, bos birakilmaz
         tekrar = [{"role": "system", "content": MAP_SISTEM + "\n'ozet' alanını ASLA boş bırakma."}, kullanici]
-        o2 = normalize_ozet(_json_sor(tekrar, 3000, BOLUM_SEMASI, temperature=0.2, dusunme=False))
+        o2 = normalize_ozet(_json_sor(tekrar, butce("bolum"), BOLUM_SEMASI, temperature=0.2, dusunme=False))
         if o2 and o2["ozet"].strip(" -.") and not ingilizce_mi(_ozet_dili(o2)):
             o = o2
         elif o["konular"]:
@@ -534,14 +924,14 @@ def listeleri_birlestir(bolumler, baglam, ilerleme=print):
         return yedek
     mesajlar = [{"role": "system", "content": LISTE_SISTEM},
                 {"role": "user", "content": f"{baglam}\n\nBölümlerden gelen maddeler:\n\n{girdi}"}]
-    cikti = min(6000, max(1000, int(token_say(girdi) * 1.3)))
+    cikti = min(butce("liste"), max(1000, int(token_say(girdi) * 1.3)))
     if _giris_token(mesajlar) + cikti + MARJ > BAGLAM_PENCERESI:
         ilerleme("  madde listesi bağlama sığmıyor, yerel birleştirme kullanıldı")
         return yedek
     try:
         v = _json_tam(mesajlar, cikti, LISTE_SEMASI)
     except Exception as e:
-        ilerleme(f"  ! liste birleştirme hatası, yerel birleştirme kullanıldı: {e!r}")
+        ilerleme(f"  ! liste birleştirme hatası, yerel birleştirme kullanıldı: {hata_metni(e)}")
         return yedek
     if not v:
         ilerleme("  ! liste birleştirme kesildi/bozuk, yerel birleştirme kullanıldı")
@@ -567,7 +957,8 @@ def listeleri_birlestir(bolumler, baglam, ilerleme=print):
     return sonuc
 
 
-def _genel_sor(ozetler, liste_metni, baglam, cikti=1500):
+def _genel_sor(ozetler, liste_metni, baglam, cikti=None):
+    cikti = cikti or butce("genel")
     icerik = ("Bölüm özetleri (kronolojik):\n" + "\n".join(ozetler)
               + "\n\nBirleştirilmiş kararlar ve aksiyonlar:\n" + (liste_metni or "-"))
     kullanici = {"role": "user", "content": f"{baglam}\n\n{icerik}"}
@@ -604,24 +995,28 @@ def genel_ozet(bolumler, listeler, baglam, ilerleme=print):
         return yedek
     liste_metni = "\n".join([f"- Karar: {k}" for k in listeler["kararlar"]]
                             + [f"- Aksiyon: {a['madde']} ({a['sorumlu']}, {a['tarih']})" for a in listeler["aksiyonlar"]])
-    cikti = 1500
-    butce = BAGLAM_PENCERESI - MARJ - cikti - token_say(GENEL_SISTEM + TURKCE_KURAL + baglam + liste_metni) - 200
+    cikti = butce("genel")
+    sigan = BAGLAM_PENCERESI - MARJ - cikti - token_say(GENEL_SISTEM + TURKCE_KURAL + baglam + liste_metni) - 200
     for tur in range(3):
-        if len(ozetler) <= 1 or token_say("\n".join(ozetler)) <= butce:
+        if len(ozetler) <= 1 or token_say("\n".join(ozetler)) <= sigan:
             break
-        gruplar = _grupla(ozetler, butce)
+        gruplar = _grupla(ozetler, sigan)
         if len(gruplar) >= len(ozetler):
             break
         ilerleme(f"  özetler bağlama sığmıyor: {len(gruplar)} grupta ara özet çıkarılıyor...")
         yeni = []
         for n, g in enumerate(gruplar, 1):
-            v = _genel_sor(g, "-", baglam, cikti)
+            try:
+                v = _genel_sor(g, "-", baglam, cikti)
+            except Exception as e:             # ara ozet yoksa grubun ozetleri oldugu gibi kalir
+                ilerleme(f"  ! ara özet üretilemedi: {hata_metni(e)}")
+                v = None
             yeni.append(f"Ara özet {n}: {v['ozet']}" if v else " ".join(g))
         ozetler = yeni
     try:
         v = _genel_sor(ozetler, liste_metni, baglam, cikti)
     except Exception as e:
-        ilerleme(f"  ! özet paragrafı üretilemedi: {e!r}")
+        ilerleme(f"  ! özet paragrafı üretilemedi: {hata_metni(e)}")
         v = None
     if not v:
         ilerleme("  ! özet paragrafı kesildi ya da Türkçe değildi; bölüm özetleri sırayla kullanıldı")
@@ -876,21 +1271,25 @@ SORU_SISTEM = (
 )
 
 
-def toplantiya_sor(soru, bolumler, baglam, cikti=1500):
+def toplantiya_sor(soru, bolumler, baglam, cikti=None):
     """bolumler: [(aralik, '[ts] Kim: metin' satirlari)], kronolojik. Soruyla en ilgili bolumler baglama
-    sigdigi kadar secilir (kelime koku ortakligina gore), kronolojik sirayla verilir."""
+    sigdigi kadar secilir (kelime koku ortakligina gore), kronolojik sirayla verilir. Girdi butcesinden
+    ilk cagrinin GERCEK max_tokens'i (cevap + dusunme payi) dusulur."""
+    cikti = cikti or butce("soru")
+    pay = butce("soru_dusunme")
     def kokler(m):
         return {k[:5] for k in re.findall(r"[a-z0-9]+", _sade(m)) if len(k) >= 3}
     sk = kokler(soru)
     puanli = sorted(((len(sk & kokler(metin)), i) for i, (_, metin) in enumerate(bolumler)), reverse=True)
-    butce = BAGLAM_PENCERESI - MARJ - cikti - token_say(SORU_SISTEM + baglam + soru) - 200
+    sigan = (min(BAGLAM_PENCERESI, SORU_GIRDI_UST) - MARJ - cikti - pay
+             - token_say(SORU_SISTEM + baglam + soru) - 200)
     secilen, tok = [], 0
     for puan, i in puanli:
         t = token_say(bolumler[i][1])
-        if secilen and tok + t > butce:
+        if secilen and tok + t > sigan:
             continue
-        if t > butce:                                 # tek bolum bile sigmiyorsa sonundan kirp
-            secilen.append((i, bolumler[i][1][-int(butce * 3):]))
+        if t > sigan:                                 # tek bolum bile sigmiyorsa sonundan kirp
+            secilen.append((i, bolumler[i][1][-max(300, int(sigan * 3)):]))
             break
         secilen.append((i, bolumler[i][1]))
         tok += t
@@ -899,9 +1298,33 @@ def toplantiya_sor(soru, bolumler, baglam, cikti=1500):
     icerik = "\n\n".join(f"### Bölüm {i + 1} ({bolumler[i][0]})\n{metin}" for i, metin in sorted(secilen))
     mesajlar = [{"role": "system", "content": SORU_SISTEM},
                 {"role": "user", "content": f"{baglam}\n\nTranskript:\n{icerik}\n\nSoru: {soru}"}]
-    metin, neden = sor(mesajlar, cikti + 1500, effort="low", temperature=0.3)
-    if neden == "length" or not metin.strip() or ingilizce_mi(metin):
+    if pay:
+        metin, neden = sor(mesajlar, cikti + pay, effort="low", temperature=0.3)
+    else:
+        metin, neden = "", "atlandi"                  # dar pencere: dusunmeye yer yok
+    if neden in ("length", "atlandi") or not metin.strip() or ingilizce_mi(metin):
         metin, neden = sor(mesajlar, cikti, temperature=0.3, dusunme=False)
     if len(secilen) < len(bolumler):
         metin += f"\n\n(Not: {len(bolumler)} bölümden soruyla en ilgili {len(secilen)} tanesine bakıldı.)"
     return metin
+
+
+# ---------- arayuz: kisa sunucu testi ----------
+
+def kisa_test():
+    """Ayarlar -> 'LLM sunucusunu test et': dusunmesiz kisa bir sohbet (uygulamanin istemcisi, TLS ve
+    proxy ayarlariyla). Dondurur (metin, basarili)."""
+    mesajlar = [{"role": "system", "content": "Kısa ve Türkçe cevap ver."},
+                {"role": "user", "content": "Bir toplantı notunda karar ile aksiyonun farkını tek cümleyle yaz."}]
+    t0 = time.time()
+    try:
+        icerik, _, neden, u = _cagir(dict(model=MODEL, messages=mesajlar, max_tokens=200, temperature=0.3,
+                                          top_p=0.95, extra_body={"chat_template_kwargs": {"enable_thinking": False}}))
+    except Exception as e:
+        return f"Sohbet denemesi başarısız: {hata_metni(e)}", False
+    sure = time.time() - t0
+    ct = getattr(u, "completion_tokens", None)
+    hiz = f", {ct / sure:.0f} token/sn" if ct and sure > 0 else ""
+    sizinti = "; düşünce metni cevaba sızıyor (sunucuda reasoning parser yok?)" if _DUSUNCE_ETIKET.search(icerik) else ""
+    return (f"Sohbet denemesi: {sure:.1f} sn, finish={neden}, {ct if ct is not None else '?'} token{hiz}; "
+            f"cevap Türkçe: {'HAYIR' if ingilizce_mi(icerik) else 'evet'}{sizinti}", bool(icerik.strip()))

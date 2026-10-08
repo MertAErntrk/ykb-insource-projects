@@ -213,3 +213,22 @@ Bu sırada düzeltilen hata: Geçmiş'te bir notu yalnızca açmak toplantıyı 
 **Aşama 2 tamamlandı.**
 
 Bekleyen: **A9** kalite ölçümü (gerçek toplantılarla Whisper/altyazı uyumu, K5/A6'nın kaç satır eklediği, not kalitesi karşılaştırması) — kullanıcının kendi toplantı verisiyle yapılacak; repoya içerik girmez.
+
+## 12. LLM sunucusu değişikliği (2026-10-08)
+
+Kullanıcı LLM'i yeni bir vLLM sunucusuna (farklı model adı, yolu `/v1` ile biten yeni adres; 100-200 token/sn) taşıdı; özet çıkarırken hata alınıyordu (hata metni elimizde yoktu, sunucuya yalnız iş bilgisayarından erişiliyor). Koddan çıkarılan olası nedenler, olasılık sırasıyla: (1) `model` eski ad → her istek 404, parçalar sessizce özetsiz, not yine yeşil "Not hazır"; (2) OpenShift route zaman aşımı (varsayılan 30 sn) + SDK'nın 2 yeniden denemesi: kısa testler geçer, düşünmeli uzun bölüm özeti 504 alır; (3) `context` sunucunun penceresinden büyük → 400, ve her 400'ün "şema desteklenmiyor" sanılıp şemasız tekrarlanması; (4) eski `ca_bundle` yeni sertifikayı doğrulamıyor → yalnızca "Connection error.".
+
+| Değişiklik | Ayrıntı |
+|---|---|
+| Sunucu tanısı | `llm.sunucuyu_tani()`: ilk LLM isteğinden önce (ve açılışta/Kaydet'te arka planda) `GET /v1/models`. Config modeli yoksa ve sunucu tek model sunuyorsa o seçilir; pencere = `max_model_len`, config `context` yalnızca üst sınır. Uyarılar Olaylar'a ve `llm_log.jsonl`'e (`olay: ayar`). `ayarla()` ağ isteği yapmaz. |
+| Adres ve tokenizer | `route_normalize`: sondaki `/` atılır, `/v1` eklenir. `/tokenize` yolu sondaki `/v1` kesilerek kurulur (yol öneki korunur; eskiden `str.replace` her `/v1`'i değiştiriyordu); `messages` biçimiyle şablon dahil sayım; başarısızlık bir kez bildirilir, 5 dk tahmin; kısa zaman aşımı (5/10 sn), sayım önbelleği. |
+| Hata metinleri | `llm.LlmHatasi` + `hata_metni(e)`: 404 model/yol, 400 bağlam (sunucu ve uygulama penceresiyle), 401/403 anahtar, 502-504/HTML (route zaman aşımı ipucu), zaman aşımı, bağlantı (gerçek neden `__cause__`'dan; TLS/proxy ipucu). Olaylar, "Not üretilemedi" penceresi, soru-cevap ve `llm_log.jsonl` (`http`, `tur`, 600 karakter) bu metni kullanır. |
+| 400 ayrımı | Yalnız şema kaynaklı (ya da nedeni belirsiz) 400/422'de şemasız tekrar; şema reddedildiyse oturum boyunca gönderilmez (`sema_dustu`). Bağlam taşmasında tekrar yok; sunucunun penceresi metinden okunur ve istek bir kez kırpılmış bütçeyle denenir. |
+| Akışlı istek | `llm_akis` (varsayılan açık): `stream=True` + `include_usage`; route'un boşta kalma zaman aşımına takılmaz. `max_retries` 2 → 1 (`llm_tekrar`), okuma zaman aşımı 900 → 300 sn (`llm_zaman_asimi`). `llm_proxy`, `llm_key` eklendi. |
+| Bütçeler | `llm.butce(ad)`: pencereye göre üç kademe (<12k / 12k-32k / ≥32k). 16k'da eski değerler; 32k+: bölüm 4000, liste 8000, genel 2000, soru 2500 (+1500 düşünme), parça 4000. 8k'da soru düşünmesiz. Soru-cevap girdi bütçesinden ilk çağrının gerçek `max_tokens`'ı düşülür; girdi en fazla 48k token. Liste birleştirmede düşünme açılmadı (eski sunucuda düşünme açıkken `json_schema` uygulanmıyordu; yeni sunucuda teşhis ölçer). `motor.PARCA_TOKEN`/`PARALEL` 0 = otomatik; `parca_token`, `paralel` config'ten. |
+| Sağlamlık | Genel özetin ara özet çağrısındaki hata artık notu durdurmaz. Düşünce etiketleri `<think>`, `<thinking>`, `<reasoning>`; içerikte düşünce görülürse `dusunce_icerikte`. |
+| Arayüz | Ayarlar: "Bağlam penceresi" (0 = sunucudan otomatik), "LLM sunucusunu test et", model alanı boş bırakılabilir. Eksik bölümlü not turuncu "Not eksik" + son LLM hatası; hiç bölüm özetlenemediyse uyarı penceresi ve Outlook taslağı açılmaz. |
+| Teşhis | Yeni `tools/llm_teshis.py` (bkz. [Teşhis rehberi](TESHIS_REHBERI.md#yeni-llm-sunucusu)); `tools/teshis.py`'nin LLM bölümü onun kısa kipi. |
+| Testler | `tests/test_llm_sunucu.py` (31 test): adres/tokenize yolu, sunucu tanısı, hata sınıflandırması, 400 ayrımı, akış, bütçeler, teşhis aracının ağsız kısımları. |
+
+Bekleyen (teşhis çıktısına bağlı): `reasoning_effort` / `enable_thinking` yeni şablonda etkisizse bölüm özetinin ilk çağrısı düşünmesiz yapılacak; `json_schema` düşünmeyle uygulanıyorsa liste birleştirmede düşünme denenebilir; 2 paralelde akış başına hız ≥ 100 token/sn ise `paralel: 3`.

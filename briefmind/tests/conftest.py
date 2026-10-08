@@ -14,3 +14,9 @@ if "uiautomation" not in sys.modules:
         sys.modules["uiautomation"] = types.ModuleType("uiautomation")
 if not hasattr(ctypes, "windll"):
     ctypes.windll = types.SimpleNamespace(user32=types.SimpleNamespace(SystemParametersInfoW=lambda *a: 0))
+
+# Testler ag kullanmaz: llm ilk istekten once sunucuyu (GET /models) sormasin, token sayimi /tokenize'a gitmesin
+import llm  # noqa: E402
+
+llm.OTOMATIK_TANI = False
+llm.SUNUCU_TOKENIZER = False

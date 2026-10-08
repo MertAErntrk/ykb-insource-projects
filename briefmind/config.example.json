@@ -1,7 +1,9 @@
 {
  "route": "https://<llm-adresi>/v1",
- "model": "Qwen3.8-27B-FP8",
- "context": 16384,
+ "model": "",
+ "context": 0,
+ "llm_akis": true,
+ "llm_proxy": false,
  "stt_url": "https://<stt-adresi>",
  "stt_model": "whisper-large-v3-turbo-prod",
  "stt_key": "EMPTY",

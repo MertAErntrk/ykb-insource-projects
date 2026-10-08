@@ -10,7 +10,8 @@ AYAR_HATASI = None                         # config.json okunamadiysa neden (aci
 
 def ayar_oku():
     import llm                             # gec: llm de bu modulu (tls_dogrulama) ice aktarir
-    v = {"route": llm.ROUTE, "model": llm.MODEL, "otobitir": 180, "duzelt": True, "outlook": True,
+    # model: config'teki deger (bos: sunucudaki tek model); context: 0 = sunucunun max_model_len'i
+    v = {"route": llm.ROUTE, "model": llm.CONFIG_MODEL, "context": 0, "otobitir": 180, "duzelt": True, "outlook": True,
          "otomatik_basla": False,
          "kaynak": "ses",                  # altyazi | ses | ikisi
          "stt_url": "",                        # config.json: STT servisi (OpenAI uyumlu /v1/audio/transcriptions)

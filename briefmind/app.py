@@ -27,7 +27,7 @@ import not_araclari
 import outlook
 from ayar import ayar_oku, ayar_yaz
 from gorunum import QSS, RENKLER, kart, md_to_html, svg_ikon  # noqa: F401  (md_to_html: app.md_to_html uyumu)
-from isler import ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi
+from isler import LlmTaniIsi, ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi
 from motor import Motor
 from sozluk import Sozluk
 
@@ -57,6 +57,8 @@ class Pencere(QtWidgets.QMainWindow):
         self.yeniden = None
         self._kur()
         self._tls_bildir()
+        self._llm_tani_isi = None
+        self.llm_tani()                      # model adi / baglam penceresi sunucudan (arka planda)
         self._tepsi()
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, self.ana_dugme)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+1"), self, lambda: self.nav.setCurrentRow(0))
@@ -401,6 +403,15 @@ class Pencere(QtWidgets.QMainWindow):
         f.setContentsMargins(18, 14, 18, 14)
         self.a_route = QtWidgets.QLineEdit(self.ayar["route"])
         self.a_model = QtWidgets.QLineEdit(self.ayar["model"])
+        self.a_model.setPlaceholderText("boş: sunucudaki tek model kullanılır")
+        self.a_context = QtWidgets.QSpinBox()
+        self.a_context.setRange(0, 1048576)
+        self.a_context.setSingleStep(1024)
+        self.a_context.setSuffix(" token")
+        self.a_context.setSpecialValueText("sunucudan otomatik")
+        self.a_context.setValue(max(0, llm._int(self.ayar.get("context"))))
+        self.a_context.setToolTip("0: sunucunun max_model_len değeri kullanılır. Bir değer yazılırsa yalnızca üst "
+                                  "sınırdır (sunucununkinden büyükse sunucunun değeri geçerli olur).")
         self.a_otobitir = QtWidgets.QSpinBox()
         self.a_otobitir.setRange(30, 1800)
         self.a_otobitir.setValue(int(self.ayar["otobitir"]))
@@ -460,6 +471,10 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow(QtWidgets.QLabel("— LLM —", objectName="alt_bilgi"))
         f.addRow("LLM adresi", self.a_route)
         f.addRow("Model", self.a_model)
+        f.addRow("Bağlam penceresi", self.a_context)
+        b_llm_test = QtWidgets.QPushButton("LLM sunucusunu test et")
+        b_llm_test.clicked.connect(lambda: self.llm_tani(test=True))
+        f.addRow(b_llm_test)
         f.addRow("Altyazı kaybolunca otomatik bitiş (sn)", self.a_otobitir)
         f.addRow(self.a_duzelt)
         f.addRow(self.a_outlook)
@@ -988,12 +1003,25 @@ class Pencere(QtWidgets.QMainWindow):
         self.ilerleme.hide()
         self._serit_bitir()
         self.b_uygula.setEnabled(self.tablo.rowCount() > 0)    # oneriler sonradan onaylanip not yeniden uretilebilir
-        self._durum_ayarla("Not hazır", "#14B8A6")
-        self.not_bilgi.setText(f"Kaydedildi: {os.path.join(self.motor.klasor, 'not.md')}")
+        yol = os.path.join(self.motor.klasor, 'not.md')
+        hic_bolum = "_(özetlenebilen bölüm yok)_" in md
+        if hic_bolum or "## Eksik bölümler" in md:
+            # LLM hatalari parca bazinda yutulur; eskiden not bos olsa bile durum yesil 'Not hazir' kaliyordu
+            neden = f" Son LLM hatası: {llm.SON_HATA}" if llm.SON_HATA else ""
+            self._durum_ayarla("Not eksik — bazı bölümler özetlenemedi", "#EA580C")
+            self.not_bilgi.setText(f"Kaydedildi: {yol} — eksik bölümler var.{neden[:300]}")
+            if hic_bolum:
+                self._durum_ayarla("Not üretilemedi — hiçbir bölüm özetlenemedi", "#DC2626")
+                QtWidgets.QMessageBox.warning(self, "Not üretilemedi",
+                                              ("Hiçbir bölüm özetlenemedi." + neden)[-800:]
+                                              + "\n\nAyarlar → 'LLM sunucusunu test et' ile bağlantıyı deneyin.")
+        else:
+            self._durum_ayarla("Not hazır", "#14B8A6")
+            self.not_bilgi.setText(f"Kaydedildi: {yol}")
         self.nav.setCurrentRow(2)
         self.sozluk_yenile()
         self.gecmis_yenile()
-        if self.a_outlook.isChecked():
+        if self.a_outlook.isChecked() and not hic_bolum:      # bos notla Outlook taslagi acilmaz
             self.outlook_ac()
 
     def outlook_ac(self):
@@ -1294,7 +1322,9 @@ class Pencere(QtWidgets.QMainWindow):
 
     # ================================================================== ayarlar
     def ayar_kaydet(self):
+        self.a_route.setText(llm.route_normalize(self.a_route.text()))      # sonu '/v1', sondaki '/' yok
         self.ayar.update({"route": self.a_route.text().strip(), "model": self.a_model.text().strip(),
+                          "context": self.a_context.value(),
                           "otobitir": self.a_otobitir.value(), "duzelt": self.a_duzelt.isChecked(),
                           "outlook": self.a_outlook.isChecked(), "otomatik_basla": self.a_oto.isChecked(),
                           "kaynak": self.a_kaynak.currentData(), "stt_url": self.a_stt.text().strip(),
@@ -1307,6 +1337,26 @@ class Pencere(QtWidgets.QMainWindow):
         ayar_yaz(self.ayar)
         llm.ayarla(self.ayar)                  # LLM adresi/modeli hemen gecerli: yeniden baslatma gerekmez
         self.durum.setText("Ayarlar kaydedildi")
+        self.llm_tani()
+
+    def llm_tani(self, test=False):
+        """LLM sunucusundan model listesi ve baglam penceresi (arka planda); uyarilar Olaylar'a yazilir.
+        test=True: kisa bir sohbet denemesi de yapilir ve sonuc pencerede gosterilir."""
+        if self._llm_tani_isi and self._llm_tani_isi.isRunning():
+            return
+        if test:
+            self.durum.setText("LLM sunucusu test ediliyor…")
+        self._llm_tani_isi = LlmTaniIsi(test=test)
+        self._llm_tani_isi.bitti.connect(lambda satirlar, tamam: self._llm_tani_bitti(satirlar, tamam, test))
+        self._llm_tani_isi.start()
+
+    def _llm_tani_bitti(self, satirlar, tamam, test):
+        for m in satirlar:
+            self.log(("LLM: " if tamam else "! LLM: ") + m)
+        if test:
+            self.durum.setText("LLM testi tamam" if tamam else "LLM testi başarısız — ayrıntı: Olaylar")
+            kutu = QtWidgets.QMessageBox.information if tamam else QtWidgets.QMessageBox.warning
+            kutu(self, "LLM testi", "\n\n".join(satirlar)[-1500:] + "\n\nAyrıntılı ölçüm: python tools\\llm_teshis.py")
 
     def _altyazi_iste_popup(self):
         """Otomatik acma basarisiz: kullanicidan altyaziyi acmasini iste (modal degil, isi kesmez)."""

@@ -16,4 +16,5 @@ __pycache__/
 *.pyc
 .venv/
 teshis_cikti.txt
+llm_teshis_cikti.txt
 test.wav

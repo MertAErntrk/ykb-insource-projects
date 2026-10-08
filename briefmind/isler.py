@@ -9,6 +9,7 @@ import time
 from PyQt5 import QtCore
 
 import ayar as ayar_mod
+import llm
 import motor as motor_mod
 from motor import Motor
 from yakalayici import Yakalayici, ekran_okuyucu
@@ -170,8 +171,8 @@ class TamamlamaIsi(QtCore.QThread):
             md = self.m.notu_uret()
             self.m.kapat()
         except Exception as e:
-            self.olay.emit("log", f"Not üretilemedi: {e!r}")
-            self.hata.emit(str(e))
+            self.olay.emit("log", f"Not üretilemedi: {llm.hata_metni(e)}")
+            self.hata.emit(llm.hata_metni(e))
             return
         self.bitti.emit(md)
 
@@ -203,7 +204,7 @@ class SoruIsi(QtCore.QThread):
         try:
             self.bitti.emit(self.m.soru_sor(self.soru))
         except Exception as e:
-            self.bitti.emit(f"Cevap alınamadı: {e!r}")
+            self.bitti.emit(f"Cevap alınamadı: {llm.hata_metni(e)}")
 
 
 class YenidenOzetlemeIsi(QtCore.QThread):
@@ -240,8 +241,30 @@ class YenidenOzetlemeIsi(QtCore.QThread):
             md = self.motor.notu_uret()
             self.motor.kapat()
         except Exception as e:
-            self.olay.emit("log", f"Yeniden özetleme başarısız: {e!r}")
-            self.hata.emit(str(e))
+            self.olay.emit("log", f"Yeniden özetleme başarısız: {llm.hata_metni(e)}")
+            self.hata.emit(llm.hata_metni(e))
             return
         self.bitti.emit(md)
 
+
+class LlmTaniIsi(QtCore.QThread):
+    """Acilista ve Ayarlar -> Kaydet sonrasi: LLM sunucusu (model listesi, baglam penceresi) arka planda
+    sorulur; test=True ise kisa bir sohbet denemesi de yapilir. bitti(satirlar, basarili)."""
+    bitti = QtCore.pyqtSignal(list, bool)
+
+    def __init__(self, test=False):
+        super().__init__()
+        self.test = test
+
+    def run(self):
+        try:
+            satirlar = llm.sunucuyu_tani(zorla=True)
+            satirlar.append(llm.ayar_ozeti())
+            basarili = not (llm.SUNUCU or {}).get("hata")
+            if self.test:
+                sonuc, tamam = llm.kisa_test()
+                satirlar.append(sonuc)
+                basarili = basarili and tamam
+        except Exception as e:                # tani uygulamayi hicbir zaman dusurmez
+            satirlar, basarili = [f"LLM sunucusu denetlenemedi: {llm.hata_metni(e)}"], False
+        self.bitti.emit(satirlar, basarili)

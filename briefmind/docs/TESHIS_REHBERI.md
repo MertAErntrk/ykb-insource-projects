@@ -5,7 +5,7 @@ Bu rehber, [`GELISTIRME_PLANI.md`](GELISTIRME_PLANI.md)'deki geliştirmeler içi
 ## Önce kısa cevap
 
 - **Claude'un erişemedikleri:** İş bilgisayarı, kurum ağı, Qwen (LLM) ve Whisper (STT) sunucuları, önceki sohbetler. Önceki sohbetlerde Qwen hakkında konuşulanlar, repoya yazılmadıysa görülemez.
-- **Repodan bilinenler:** Model adı (`Qwen3.8-27B-FP8`), bağlam penceresinin varsayılan değeri (16384) ve kendi CPU Whisper servisimizin manifesti (`deploy/whisper-cpu.yaml`).
+- **Repodan bilinenler:** Bağlam penceresinin varsayılan değeri (16384; sunucu sorulamazsa) ve kendi CPU Whisper servisimizin manifesti (`deploy/whisper-cpu.yaml`). Model adı ve bağlam penceresi artık çalışırken sunucudan (`GET /v1/models`) okunur; gerçek adres ve model adı repoya yazılmaz.
 - **Geliştirmelerin çoğu bu bilgilere bağlı değil.** Aşağıdaki tabloda hangi işin bilgi beklediği yazıyor.
 
 | Plan maddesi | İş bilgisayarından bilgi gerekiyor mu? |
@@ -22,6 +22,63 @@ Bu rehber, [`GELISTIRME_PLANI.md`](GELISTIRME_PLANI.md)'deki geliştirmeler içi
 - Kişi adları ve toplantı başlıkları
 
 Teşhis aracı adresleri `<LLM_ADRES>` / `<STT_ADRES>` olarak maskeler ve toplantı içeriği toplamaz. Yine de paylaşmadan önce çıktıya bir kez göz gezdirin.
+
+---
+
+## Yeni LLM sunucusu
+
+LLM sunucusu (vLLM) değiştiğinde ya da "özet çıkarırken hata" görüldüğünde önce bu bölüm.
+
+**1) `config.json` (yalnızca sizde; repoya girmez):**
+
+```json
+"route": "https://<yeni-llm-adresi>/v1",
+"model": "",
+"context": 0
+```
+
+- `route` `/v1` ile bitmeli (sonda `/` olmadan; uygulama Kaydet'te kendisi düzeltir).
+- `model`: boş bırakın (sunucu tek model sunuyorsa o seçilir) ya da `https://<adres>/v1/models` sayfasındaki `id` değerini aynen yazın. Eski model adı kalırsa sunucu her isteğe 404 verir; uygulama artık bunu açılışta görüp tek modele geçer ve Olaylar'a yazar.
+- `context`: `0` (sunucunun `max_model_len` değeri kullanılır). Eski `16384` kalırsa yalnızca üst sınır olur.
+- Uygulamadan: Ayarlar → **LLM sunucusunu test et**. Olaylar'da `LLM: LLM modeli: … · bağlam penceresi: …` satırı görünür.
+
+**2) Teşhis aracı (uygulama kapalıyken, `briefmind` klasöründe):**
+
+```powershell
+python tools\llm_teshis.py --tam        # 3-5 dk; --hizli ile uzun ve paralel ölçümler atlanır (~1 dk)
+```
+
+Araç yalnızca dosyanın içindeki **sentetik** metinlerle (uydurma kişiler ve konular) çalışır; toplantı verisi göndermez. LLM adresi `<LLM_ADRES>`, kurum alan adı `<ALAN>` olarak maskelenir, anahtar yazılmaz. Ölçtükleri:
+
+| Bölüm | Ne gösterir |
+|---|---|
+| 2 Bağlantı | TLS (ca_bundle / kapalı / sistem) × sistem proxy'si: hangi biçimle ulaşılıyor, uygulamanınki çalışıyor mu |
+| 3 Model ve pencere | Sunucudaki model kimlikleri ve `max_model_len`; config `model` EŞLEŞİYOR / UYUŞMUYOR; `context` farkı |
+| 4 Tokenizer | `/tokenize` erişimi ve süresi, karakter/token, sunucunun gerçek sayımıyla (`usage.prompt_tokens`) fark |
+| 5 Düşünme | varsayılan / `reasoning_effort` / `enable_thinking=False`: düşünce uzunluğu, ayrı alana mı düşüyor, içerikte `<think>` ya da başka etiket var mı |
+| 6 Şema | `json_schema` düşünmeli ve düşünmesiz gerçekten uygulanıyor mu |
+| 7 Hız | token/sn (akışlı, akışsız), ilk token süresi, ön işleme hızı; ~7000 token'lık **uzun istek akışsız ve akışlı** (route zaman aşımı testi) |
+| 8 Eşzamanlılık | 1/2/4 paralel istekte akış başına hız |
+| 9 Bağlam probu | Pencereye yakın girdi kabul ediliyor mu; kasıtlı taşmada sunucunun tam hata metni ve uygulamanın bunu tanıyıp tanımadığı |
+| 10 Uygulama yolu | Uygulamanın kendi istemcisiyle (openai, TLS, proxy, akış) sunucu tanısı, bütçeler ve kısa sohbet |
+| 11 Tam boru hattı (`--tam`) | Gerçek düzeltme → bölüm özeti → birleştirme → soru-cevap; her LLM çağrısı (görev, düşünme, finish, token, süre, dil, hata) ve üretilen sentetik not |
+| 12 llm_log özeti | Son toplantıların `llm_log.jsonl`'inden görev başına çağrı, finish dağılımı, süre ve **hata metinleri** (içerik yok) |
+
+En sonda **Teşhis özeti** (öncelik sırasıyla olası kök nedenler) ve önerilen `config.json` değerleri yazılır.
+
+**Paylaşılacak:** `llm_teshis_cikti.txt` dosyası ve (varsa) Olaylar panelindeki `✖ parça N özetlenirken hata: …` satırı. Paylaşmadan önce bir kez göz gezdirin.
+
+**Sık görülen sonuçlar:**
+
+| Çıktıda | Anlamı | Ne yapılır |
+|---|---|---|
+| `modelini tanımıyor (HTTP 404)` / `UYUŞMUYOR` | `model` eski ad | `model` boş ya da `/v1/models`'teki `id` |
+| `bağlam penceresini aşıyor (HTTP 400)` | `context` sunucudan büyük | `context: 0` |
+| `HTTP 504 (HTML: route/proxy)`, uzun akışsız istek başarısız | OpenShift route zaman aşımı | `llm_akis: true` (varsayılan); kalıcı: route'a `haproxy.router.openshift.io/timeout=600s` |
+| `ulaşılamadı … CERTIFICATE_VERIFY_FAILED` | `ca_bundle` yeni sunucuyu doğrulamıyor | Yeni adresin kök sertifikasını dışa aktarın (README, TLS) |
+| Bağlantı yalnız `proxy=açık` ile çalışıyor | Sunucuya sistem proxy'si üzerinden ulaşılıyor | `llm_proxy: true` |
+| `HTTP 401/403` | Sunucu anahtar istiyor | `llm_key` |
+| `enable_thinking=False düşünmeyi KAPATMIYOR` | Yeni sohbet şablonu parametreyi tanımıyor | Çıktıyı paylaşın (kodda şablon parametresi değişir) |
 
 ---
 
@@ -55,7 +112,7 @@ python tools\teshis.py --wav test.wav
 Araç `teshis_cikti.txt` dosyasını üretir. İçinde şunlar olur:
 1. Python ve paket sürümleri
 2. `config.json` alanları (adresler maskeli, anahtarlar gizli)
-3. LLM: `max_model_len`, tokenizer oranı ve 6 kısa sohbet testi. Bu testler şunu gösterir: düşünme metni ayrı alana mı ayrılıyor, `reasoning_effort` bir işe yarıyor mu, `enable_thinking=False` çalışıyor mu, `json_schema` destekleniyor mu. Her testte kısa, genel bir soru sorulur; toplantı verisi gönderilmez.
+3. LLM (`tools\llm_teshis.py`'nin kısa kipi; ayrıntı için [Yeni LLM sunucusu](#yeni-llm-sunucusu)): bağlantı biçimleri, model adı eşleşmesi, `max_model_len`, tokenizer oranı ve kısa sohbet testleri. Bu testler şunu gösterir: düşünme metni ayrı alana mı ayrılıyor, `reasoning_effort` bir işe yarıyor mu, `enable_thinking=False` çalışıyor mu, `json_schema` destekleniyor mu. Her testte kısa, genel bir soru sorulur; toplantı verisi gönderilmez.
 4. STT: sağlık kontrolü, sessizliğe metin uydurup uydurmadığı, segment alanları (`no_speech_prob`, `avg_logprob` var mı)
 5. Son 10 toplantı kaydı, yalnızca sayılarla: parça sayısı, özetsiz parça sayısı, satır sayısı, zamanı geriye giden satırlar (A3), notun İngilizce olup olmadığı ve eksik başlıklar
 6. `hata.log` dosyasının son 15 satırı. Bu kısmı paylaşmadan önce özellikle kontrol edin.

@@ -27,16 +27,24 @@ from metin import ad_geciyor, metin_benzerligi, tr_kucuk
 from sozluk import Sozluk, normalize
 
 KOK = "toplantilar"
-PARCA_TOKEN = 3000
+PARCA_TOKEN = 0                 # 0: LLM baglam penceresine gore (llm.butce("parca"): 8k 2500, 16k 3000, 32k+ 4000)
 PARCA_SURE_SN = 12 * 60
 SESSIZLIK_SN = 180
 SESSIZLIK_MIN_TOKEN = 500
 DUZELT_MIN_TOKEN = 800          # bundan kucuk (genelde son) parcada duzeltme gecisi atlanir
-PARALEL = 2
+PARALEL = 0                     # 0: llm.butce("paralel") (varsayilan 2; config.json 'paralel' ile artirilabilir)
 CAKISMA_SN = 4                  # K5: Whisper satiriyla ayni anda (±) konusan baska kisinin altyazisi aranir
 CAKISMA_KAPSAMA = 0.30          # K5: altyazi koklerinin en fazla bu kadari Whisper'da geciyorsa soz kaybolmus
 IKISI_BEKLE_SN = 8              # A6: 'ikisi' modunda altyazi satiri Whisper karsiligini bu kadar bekler
 AYNI_SOZ = 0.45                 # Whisper cumlesi ile altyazi satiri ayni sozu tasiyor (metin_benzerligi)
+
+
+def parca_token():
+    return PARCA_TOKEN or llm.butce("parca")
+
+
+def paralel():
+    return PARALEL or llm.butce("paralel")
 
 
 def slug(s):
@@ -186,11 +194,13 @@ class Motor:
         if os.path.exists(self._oneri_yolu):
             with open(self._oneri_yolu, encoding="utf-8") as f:
                 self.oneriler = json.load(f)
-        self.havuz = cf.ThreadPoolExecutor(max_workers=PARALEL)
+        self.havuz = cf.ThreadPoolExecutor(max_workers=paralel())
         self.isler = []
         self.kilit = threading.Lock()
         self._gunluk_kilit = threading.Lock()
         llm.GUNLUK_FN = self._llm_gunluk
+        llm.UYARI_FN = lambda m: self.log(f"  ! LLM: {m}")
+        llm.SON_HATA = None                  # arayuz 'Not eksik' satirinda bu toplantinin son LLM hatasini gosterir
         # Var olan kaydi yuklerken durumunu koru: eskiden Gecmis'te bir notu yalnizca ACMAK bile toplantiyi
         # 'devam' (yarim) olarak isaretliyordu (ve saklama suresi 'tamam' kayitlari bulamiyordu).
         onceki = None
@@ -513,7 +523,7 @@ class Motor:
         self.mevcut_tok += llm.token_tahmin(f"{satir['speaker']}: {satir['text']}")
         self.mevcut_bas = self.mevcut_bas or simdi
         self.son_satir = simdi
-        if self.mevcut_tok >= PARCA_TOKEN:
+        if self.mevcut_tok >= parca_token():
             self.parca_kapat("token")
         elif simdi - self.mevcut_bas >= PARCA_SURE_SN:
             self.parca_kapat("süre")
@@ -557,7 +567,7 @@ class Motor:
                 for o, d in duzeltmeler:
                     self.oneri_ekle(veri["sira"], o, d, self._baglam_satiri(veri, o), "duzeltme")
             except Exception as e:
-                self.log(f"  ! parça {veri['sira']} düzeltme atlandı: {e!r}")
+                self.log(f"  ! parça {veri['sira']} düzeltme atlandı: {llm.hata_metni(e)}")
         # 2) ozet
         self.log(f"  parça {veri['sira']}: özetleniyor...")
         try:
@@ -571,7 +581,7 @@ class Motor:
                 for t in ozet.get("belirsiz_terimler", []):
                     self.oneri_ekle(veri["sira"], t, "", self._baglam_satiri(veri, t), "belirsiz")
         except Exception as e:
-            self.log(f"✖ parça {veri['sira']} özetlenirken hata: {e!r}")
+            self.log(f"✖ parça {veri['sira']} özetlenirken hata: {llm.hata_metni(e)}")
             veri["ozet"] = None
         self.parca_yaz(veri)
         self._olay("parca_ozetlendi", {"sira": veri["sira"], "ozet": veri["ozet"],
@@ -614,8 +624,8 @@ class Motor:
         eksik = [v for v in (self.parca_oku(n) for n in range(1, self.parca_no + 1)) if v.get("ozet") is None]
         if not eksik:
             return 0
-        self.log(f"{len(eksik)} parça işlenmemiş, işleniyor ({PARALEL} paralel)...")
-        with cf.ThreadPoolExecutor(max_workers=PARALEL) as ex:
+        self.log(f"{len(eksik)} parça işlenmemiş, işleniyor ({paralel()} paralel)...")
+        with cf.ThreadPoolExecutor(max_workers=paralel()) as ex:
             list(ex.map(lambda v: self._isle(v, self.duzelt), eksik))
         return len(eksik)
 
@@ -662,7 +672,7 @@ class Motor:
                 i, v = iv
                 self.adim(f"Parça {v['sira']} düzeltmelerle yeniden özetleniyor ({i}/{len(kirli)})", i, len(kirli))
                 self._isle(v, False)
-            with cf.ThreadPoolExecutor(max_workers=PARALEL) as ex:
+            with cf.ThreadPoolExecutor(max_workers=paralel()) as ex:
                 list(ex.map(isle, enumerate(kirli, 1)))
         return len(kirli)
 
@@ -711,7 +721,7 @@ class Motor:
         toplam = self.parca_no
         if not toplam:
             return 0
-        self.log(f"{toplam} parça yeniden özetleniyor ({PARALEL} paralel)...")
+        self.log(f"{toplam} parça yeniden özetleniyor ({paralel()} paralel)...")
 
         def isle(no):
             self.adim(f"Parça {no}/{toplam} yeniden özetleniyor", no, toplam)
@@ -723,7 +733,7 @@ class Motor:
             veri["ozet"], veri["duzeltmeler"] = None, []
             self._isle(veri, self.duzelt)
 
-        with cf.ThreadPoolExecutor(max_workers=PARALEL) as ex:
+        with cf.ThreadPoolExecutor(max_workers=paralel()) as ex:
             list(ex.map(isle, range(1, toplam + 1)))
         return toplam
 

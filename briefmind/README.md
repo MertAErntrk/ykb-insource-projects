@@ -47,7 +47,13 @@ python app.py
 
 | Alan | Açıklama |
 |---|---|
-| `route`, `model`, `context` | OpenAI uyumlu LLM adresi (`/v1`), model adı, bağlam penceresi |
+| `route` | OpenAI uyumlu LLM adresi, `/v1` ile biter (`https://<llm-adresi>/v1`; sondaki `/` ya da eksik `/v1` Kaydet'te düzeltilir) |
+| `model` | Sunucudaki model kimliği (`GET /v1/models` → `id`). **Boş bırakılabilir:** sunucu tek model sunuyorsa o seçilir; yazılan ad sunucuda yoksa ve tek model varsa o kullanılır, Olaylar'a yazılır |
+| `context` | Bağlam penceresi (token). `0`/boş: sunucunun `max_model_len` değeri (önerilen). Bir değer yazılırsa yalnızca **üst sınırdır**; sunucununkinden büyükse sunucunun değeri geçerli olur. Token bütçeleri (parça boyutu, özet/liste çıktısı, soru-cevap girdisi) bu pencereye göre ölçeklenir. Ayarlar → Bağlam penceresi |
+| `llm_akis` | (varsayılan `true`) LLM istekleri akışlı (`stream`) gönderilir: OpenShift route'unun boşta kalma zaman aşımına (varsayılan 30 sn) uzun özetlerde takılmaz. `false`: eski akışsız istek |
+| `llm_proxy` | (varsayılan `false`) `true`: LLM'e Windows/sistem proxy'si (`HTTPS_PROXY`) üzerinden bağlanılır. Adres tarayıcıda açılıyor ama uygulama "ulaşılamadı" diyorsa denenir |
+| `llm_key`, `llm_tekrar`, `llm_zaman_asimi` | (isteğe bağlı) LLM Bearer anahtarı (sunucu `--api-key` ile açıldıysa); hata sonrası yeniden deneme sayısı (varsayılan 1); istek zaman aşımı (sn, varsayılan 300) |
+| `parca_token`, `paralel` | (isteğe bağlı) Canlı parça boyutu (token) ve aynı anda işlenen parça sayısı; boşsa pencereye göre (16k: 3000/2, 32k+: 4000/2) |
 | `stt_url`, `stt_model`, `stt_key` | OpenAI uyumlu STT adresi (`/v1/audio/transcriptions`), model, Bearer anahtarı |
 | `kaynak` | `ses` (Whisper metni, konuşmacı altyazıdan) / `ikisi` / `altyazi` (yalnız Teams altyazısı). `ikisi`: metin Whisper'dan gelir; bir altyazı satırının 8 sn içinde benzer Whisper karşılığı gelmezse (Whisper kaçırmış) altyazı satırı eklenir, gelirse eklenmez (çift satır olmaz) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
@@ -87,7 +93,11 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
    sekmesinde bilgi için durur: onaylayıp **Uygula ve notu üret** ile sözlüğe alınır ve not yeniden üretilir.
    `otomatik_not` kapalıysa eski akış: İnceleme → **Uygula ve notu üret** → Not.
 
-Ayarlar → **Kaydet** hemen geçerlidir; LLM adresi/modeli için uygulamayı yeniden başlatmak gerekmez.
+Ayarlar → **Kaydet** hemen geçerlidir; LLM adresi/modeli için uygulamayı yeniden başlatmak gerekmez. Açılışta ve
+Kaydet'ten sonra LLM sunucusu arka planda sorulur (model adı, bağlam penceresi); uyarılar Olaylar'a düşer.
+Ayarlar → **LLM sunucusunu test et** kısa bir sohbet denemesi yapar (süre, token/sn, cevap Türkçe mi). Ayrıntılı
+ölçüm: `python tools\llm_teshis.py --tam` ([Teşhis rehberi](docs/TESHIS_REHBERI.md#yeni-llm-sunucusu)). Bir
+parça özetlenemezse durum satırı "Not eksik" (turuncu) olur ve son LLM hatası gösterilir.
 Komut satırı: `python toplanti.py basla --inceleme-yok` (ya da `bitir <klasör> --inceleme-yok`) incelemeyi atlar.
 
 Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplantılarımda her zaman alt yazıları göster*.

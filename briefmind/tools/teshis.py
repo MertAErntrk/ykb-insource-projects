@@ -82,7 +82,7 @@ def ayarlar():
     _gizle(_kes(cfg.get("route"), "/v1"), "<LLM_ADRES>")
     _gizle(_kes(cfg.get("stt_url"), "/v1/audio/transcriptions"), "<STT_ADRES>")
     for k, v in cfg.items():
-        if k in ("stt_key", "api_key", "ben"):
+        if k in ("stt_key", "api_key", "llm_key", "ben"):
             v = "(ayarli)" if v and v != "EMPTY" else v
         yaz(f"  {k}: {v}")
     return cfg
@@ -94,83 +94,13 @@ def _dogrulama(cfg):
     return ayar.tls_dogrulama(cfg)
 
 
-def _http(cfg=None):
-    import ssl
-    import httpx
-    yol = _dogrulama(cfg or {})
-    return httpx.Client(verify=ssl.create_default_context(cafile=yol) if yol else False, trust_env=False,
-                        timeout=120)
-
-
 def llm_testleri(cfg):
-    baslik("3) LLM sunucusu")
-    route = (cfg.get("route") or "").rstrip("/")
-    model = cfg.get("model")
-    if not route:
-        yaz("route ayarli degil")
-        return
-    yaz(f"  TLS doğrulaması: {'açık (ca_bundle)' if _dogrulama(cfg) else 'kapalı (ca_bundle ayarlı değil)'}")
-    h = _http(cfg)
-    # 3a model listesi ve max_model_len
-    try:
-        r = h.get(f"{route}/models")
-        yaz(f"GET /v1/models -> {r.status_code}")
-        for m in r.json().get("data", []):
-            yaz(f"  model: {m.get('id')}  max_model_len: {m.get('max_model_len')}  root: {m.get('root')}")
-        yaz(f"  config 'context': {cfg.get('context')}  (max_model_len ile ayni olmali)")
-    except Exception as e:
-        yaz(f"  /v1/models HATA: {e!r}")
-    # 3b tokenize
-    ornek = "Toplantıda IFRS 9 raporunun perşembeye yetiştirilmesi ve Jira kaydı açılması kararlaştırıldı."
-    try:
-        r = h.post(_kes(route, "/v1") + "/tokenize", json={"model": model, "prompt": ornek})
-        n = r.json().get("count")
-        yaz(f"POST /tokenize -> {r.status_code}  token: {n}  karakter/token: {len(ornek) / n:.2f}" if n
-            else f"POST /tokenize -> {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        yaz(f"  /tokenize HATA: {e!r}")
-
-    def sohbet(etiket, kw, max_tokens=600, response_format=None):
-        govde = {"model": model, "max_tokens": max_tokens, "temperature": 0.3,
-                 "messages": [{"role": "system", "content": "Kısa ve Türkçe cevap ver."},
-                              {"role": "user", "content": "Bir toplantı notunda 'karar' ile 'aksiyon' farkını "
-                                                          "iki cümleyle açıkla."}]}
-        if kw is not None:
-            govde["chat_template_kwargs"] = kw
-        if response_format:
-            govde["response_format"] = response_format
-        t0 = time.time()
-        try:
-            r = h.post(f"{route}/chat/completions", json=govde)
-        except Exception as e:
-            yaz(f"  [{etiket}] HATA: {e!r}")
-            return
-        sure = time.time() - t0
-        if r.status_code != 200:
-            yaz(f"  [{etiket}] HTTP {r.status_code}: {r.text[:300]}")
-            return
-        v = r.json()
-        c = v["choices"][0]
-        msj = c.get("message") or {}
-        icerik = msj.get("content") or ""
-        dusunce = msj.get("reasoning_content") or msj.get("reasoning") or ""
-        u = v.get("usage") or {}
-        yaz(f"  [{etiket}] finish={c.get('finish_reason')}  sure={sure:.1f}s  "
-            f"completion_tokens={u.get('completion_tokens')}  reasoning_alani={'VAR' if dusunce else 'yok'} "
-            f"(len {len(dusunce)})  content_think_etiketi={'VAR' if '<think>' in icerik or '</think>' in icerik else 'yok'}  "
-            f"content_len={len(icerik)}")
-        yaz(f"      content ilk 160: {icerik[:160]!r}")
-
-    yaz("Sohbet testleri (reasoning parser, dusunme kontrolu, reasoning_effort etkisi):")
-    sohbet("varsayilan", None)
-    sohbet("reasoning_effort=low", {"reasoning_effort": "low"})
-    sohbet("enable_thinking=False", {"enable_thinking": False})
-    sohbet("dusunme + max_tokens=120 (kesilme)", None, max_tokens=120)
-    sema = {"type": "json_schema", "json_schema": {"name": "t", "schema": {
-        "type": "object", "properties": {"karar": {"type": "string"}, "aksiyon": {"type": "string"}},
-        "required": ["karar", "aksiyon"]}}}
-    sohbet("json_schema + dusunmesiz", {"enable_thinking": False}, response_format=sema)
-    sohbet("json_schema + dusunme", None, response_format=sema)
+    """LLM bolumu tools/llm_teshis.py'nin kisa kipidir (kod tekrari yok): baglanti, model/pencere eslesmesi,
+    tokenizer, dusunme ve sema. Hiz, baglam probu ve gercek boru hatti icin: python tools\\llm_teshis.py --tam"""
+    baslik("3) LLM sunucusu (kısa; ayrıntı: python tools\\llm_teshis.py --tam)")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import llm_teshis
+    llm_teshis.kisa(cfg, yaz)
 
 
 def _sessiz_wav(sn=2.0):
