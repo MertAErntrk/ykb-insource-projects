@@ -802,10 +802,12 @@ class Pencere(QtWidgets.QMainWindow):
             self._akis_satirlari.append(dict(v))
             self._akis_satirlari = self._akis_satirlari[-400:]
             self._akis_ekle(v)
-        elif tip == "satir_guncelle":
+        elif tip == "satir_guncelle":                 # konusmaci atandi ya da altyazi satiri buyudu/duzeltildi
             for x in self._akis_satirlari:
                 if x.get("id") == v["id"]:
-                    x["speaker"] = v["speaker"]
+                    for alan in ("speaker", "text"):
+                        if alan in v:
+                            x[alan] = v[alan]
             self._akis_ciz()
         elif tip == "log":
             self.log(v)
@@ -1119,6 +1121,27 @@ class Pencere(QtWidgets.QMainWindow):
                     parcalar.append(json.load(f))
         return parcalar
 
+    def _tasma_bilgisi(self, k):
+        """Secili kayitta altyazi tasmasi varsa uyari satiri (olcum dosya degismedikce yeniden yapilmaz)."""
+        yol = os.path.join(k, "altyazi.jsonl")
+        try:
+            st = os.stat(yol)
+        except OSError:
+            return ""
+        anahtar = (yol, st.st_mtime, st.st_size)
+        onbellek = getattr(self, "_tasma_onbellek", {})
+        if anahtar not in onbellek:
+            try:
+                onbellek[anahtar] = motor_mod.tasma_olcumu(k)
+            except Exception:
+                onbellek[anahtar] = None
+            self._tasma_onbellek = onbellek
+        t = onbellek[anahtar]
+        if not t or not t["tasma"]:
+            return ""
+        return (f"⚠ Altyazı taşması: {t['satir']} satır (dakikada en çok {t['dk_en_cok']}, birebir tekrar "
+                f"%{100 * t['tekrar_orani']:.0f}). 'Yeniden özetle' önce transkripti temizler (eski hali yedeklenir).")
+
     def _gecmis_secildi(self, it, _onceki=None):
         k = it.data(QtCore.Qt.UserRole) if it else None
         self.g_parcalar.clear()
@@ -1132,7 +1155,8 @@ class Pencere(QtWidgets.QMainWindow):
         bilgi = (f"{m['baslik']} — {m['tarih']} · durum: {m['durum']} · {m['parca']} parça · "
                  f"katılımcı: {len(m.get('katilimcilar', []))}")
         pay = not_araclari.konusma_payi_metni(m.get("konusma_paylari") or [])
-        self.g_bilgi.setText(bilgi + ("\n" + pay if pay else ""))
+        tasma = self._tasma_bilgisi(k)
+        self.g_bilgi.setText(bilgi + ("\n" + pay if pay else "") + ("\n" + tasma if tasma else ""))
         for p_ in self._parcalari_oku(k):
             o = p_.get("ozet")
             oz = f"özet: {len(o['kararlar'])} karar, {len(o['aksiyonlar'])} aksiyon" if o else "özetsiz"
@@ -1343,6 +1367,9 @@ class Pencere(QtWidgets.QMainWindow):
         """LLM sunucusundan model listesi ve baglam penceresi (arka planda); uyarilar Olaylar'a yazilir.
         test=True: kisa bir sohbet denemesi de yapilir ve sonuc pencerede gosterilir."""
         if self._llm_tani_isi and self._llm_tani_isi.isRunning():
+            if test:                         # tani surerken basilan 'LLM'i test et' sessizce kaybolmasin
+                self._llm_test_bekliyor = True
+                self.durum.setText("LLM tanısı sürüyor, bekleyin — bitince test başlayacak")
             return
         if test:
             self.durum.setText("LLM sunucusu test ediliyor…")
@@ -1353,6 +1380,10 @@ class Pencere(QtWidgets.QMainWindow):
     def _llm_tani_bitti(self, satirlar, tamam, test):
         for m in satirlar:
             self.log(("LLM: " if tamam else "! LLM: ") + m)
+        if getattr(self, "_llm_test_bekliyor", False):
+            self._llm_test_bekliyor = False
+            if not test:                     # biten arka plan tanisiydi: bekleyen test simdi
+                QtCore.QTimer.singleShot(0, lambda: self.llm_tani(test=True))
         if test:
             self.durum.setText("LLM testi tamam" if tamam else "LLM testi başarısız — ayrıntı: Olaylar")
             kutu = QtWidgets.QMessageBox.information if tamam else QtWidgets.QMessageBox.warning

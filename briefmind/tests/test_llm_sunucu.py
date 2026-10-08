@@ -3,6 +3,7 @@ hata siniflandirmasi, sema/baglam 400 ayrimi, akisli cevap, pencereye olcekli bu
 tools/llm_teshis.py'nin agsiz kisimlari. Ag kullanilmaz (sahte istemciler)."""
 import json
 import os
+import re
 import ssl
 import sys
 import types
@@ -428,3 +429,186 @@ def test_teshis_llm_log_ozeti(tmp_path):
     g = ozet["2026-10-08_deneme"]
     assert g["gorevler"]["bolum"]["n"] == 2 and g["gorevler"]["bolum"]["finish"] == {"stop": 1, "length": 1}
     assert g["gorevler"]["duzeltme"]["hata"] == 1 and "modelini tanımıyor" in g["hatalar"][0]
+
+
+# ---------------------------------------------------------------- 2026-10 inceleme bulgulari
+
+def test_tani_surerken_istek_tanin_bitmesini_bekler(monkeypatch):
+    """Yaris: eskiden bayrak GET /models BITMEDEN kalkiyordu; tani surerken giden istek bos model adiyla gidiyordu."""
+    import threading
+    llm.ayarla({"route": "https://llm.ornek/v1"})
+    girdi, birak = threading.Event(), threading.Event()
+
+    class YavasHttp(SahteHttp):
+        def get(self, url, timeout=None):
+            girdi.set()
+            birak.wait(5)
+            return super().get(url, timeout)
+    h = YavasHttp([{"id": "tek", "max_model_len": 16384}])
+    monkeypatch.setattr(llm, "_http", h)
+    monkeypatch.setattr(llm, "OTOMATIK_TANI", True)
+    gorulen = []
+    monkeypatch.setattr(llm.client.chat.completions, "create",
+                        lambda **kw: (gorulen.append(kw["model"]), _cevap("ok"))[1])
+    tani = threading.Thread(target=llm.sunucuyu_tani)
+    tani.start()
+    assert girdi.wait(5)
+    istek = threading.Thread(target=lambda: llm.sor([{"role": "user", "content": "x"}], 100, dusunme=False))
+    istek.start()
+    istek.join(0.3)
+    assert istek.is_alive() and gorulen == []                  # tani bitmeden istek gitmedi
+    birak.set()
+    tani.join(5)
+    istek.join(5)
+    assert gorulen == ["tek"] and sum(1 for i in h.istekler if i[0] == "GET") == 1
+
+
+@pytest.mark.parametrize("girdi, route, kirpilan", [
+    ("https://llm.ornek/v1/chat/completions", "https://llm.ornek/v1", "/chat/completions"),
+    ("https://llm.ornek/v1/chat/completions/", "https://llm.ornek/v1", "/chat/completions"),
+    ("https://llm.ornek/chat/completions", "https://llm.ornek/v1", "/chat/completions"),
+    ("https://llm.ornek/v1/completions", "https://llm.ornek/v1", "/completions"),
+    ("https://llm.ornek/v1/models", "https://llm.ornek/v1", "/models"),
+    ("https://llm.ornek/tokenize", "https://llm.ornek/v1", "/tokenize"),
+    ("https://llm.ornek/llm/v1", "https://llm.ornek/llm/v1", ""),
+])
+def test_route_tam_uc_nokta_kirpilir(girdi, route, kirpilan):
+    assert llm.route_normalize(girdi, ayrinti=True) == (route, kirpilan)
+    llm.ayarla({"route": girdi})
+    assert llm.ROUTE == route and str(llm.client.base_url).rstrip("/") == route
+    assert llm.TOKENIZE_URL == route[:-3] + "/tokenize"
+    if kirpilan:
+        u = llm.AYAR_UYARILARI[0]
+        assert "adres düzeltildi" in u and kirpilan in u and "<sunucu>/v1" in u and "llm.ornek" not in u
+    assert llm_teshis.route_duzelt(girdi) == (route, kirpilan)
+
+
+def test_token_say_onbellek_tek_okuma(monkeypatch):
+    class Yaris(dict):                       # 'in' True der ama okumadan once baska is parcacigi clear() etti
+        def __contains__(self, k):
+            return True
+
+        def __getitem__(self, k):
+            raise KeyError(k)
+    monkeypatch.setattr(llm, "token_say", GERCEK_TOKEN_SAY)
+    monkeypatch.setattr(llm, "_token_onbellek", Yaris())
+    monkeypatch.setattr(llm, "SUNUCU_TOKENIZER", False)
+    assert llm.token_say("abcdef") == 2
+
+
+def _akis_hata(mesaj, kod=400):
+    return openai.APIError(mesaj, request=_istek(), body={"object": "error", "message": mesaj, "code": kod})
+
+
+def test_akis_ici_hata_siniflandirilir_ve_pencere_ogrenilir(monkeypatch):
+    llm.ayarla({"route": "https://llm.ornek/v1", "model": "m", "context": 16384})
+    mesaj = "This model's maximum context length is 4096 tokens. However, you requested 5000 tokens"
+    m = llm.hata_metni(_akis_hata(mesaj))
+    assert "bağlam penceresini aşıyor" in m and "akış içi" in m and "4096" in m
+    assert "akış sırasında" in llm.hata_metni(openai.APIError("An error occurred during streaming", request=_istek(),
+                                                              body={"message": "Internal error"}))
+    istekler = []
+
+    def create(**kw):
+        istekler.append(kw["max_tokens"])
+
+        def akis():
+            yield _parca(icerik="ya")
+            if len(istekler) == 1:
+                raise _akis_hata(mesaj)
+            yield _parca(icerik="rım", neden="stop")
+        return akis()
+    monkeypatch.setattr(llm.client.chat.completions, "create", create)
+    mesajlar = [{"role": "user", "content": "k" * 3000}]
+    assert llm.sor(mesajlar, 3000, dusunme=False) == ("yarım", "stop")
+    assert llm.BAGLAM_PENCERESI == 4096 and len(istekler) == 2
+
+
+def test_teshis_maskele_buyuk_kucuk_harf_ve_eski_adresler(tmp_path):
+    R = llm_teshis.Rapor(yaz_fn=lambda s: None)
+    R.gizle("https://qwen.apps.kume.kurum.com.tr")
+    assert R.maskele("host QWEN.Apps.Kume.Kurum.com.TR yanit vermedi") == "host <LLM_ADRES> yanit vermedi"
+    assert "kurum" not in R.maskele("sertifika *.KUME.kurum.com.tr icin")
+    assert R.maskele('eski: "https://eski-llm.baska.alan:8443/v1/models" 404') == 'eski: "<ADRES>" 404'
+    # llm_log ozetindeki hata metinleri (eski sunucu adresiyle) de maskelenir
+    k = tmp_path / "toplantilar" / "2026-10-08_a"
+    k.mkdir(parents=True)
+    (k / "llm_log.jsonl").write_text(json.dumps({"gorev": "bolum", "hata": "LLM adresine ulaşılamadı: "
+                                                 "https://eski.sunucu.ornek/v1/chat/completions"}) + "\n",
+                                     encoding="utf-8")
+    satirlar = []
+    llm_teshis.llm_log_ozeti(llm_teshis.Rapor(yaz_fn=satirlar.append), str(tmp_path / "toplantilar"))
+    assert any("<ADRES>" in s for s in satirlar) and not any("eski.sunucu" in s for s in satirlar)
+
+
+def test_teshis_kisa_kip_alan_adini_maskeler(monkeypatch):
+    satirlar = []
+    monkeypatch.setattr(llm_teshis, "baglanti", lambda R, ctx, cfg: (R.yaz(
+        "TLS hatasi: sertifika *.kume.kurum.com.tr icin, host llm.apps.kume.kurum.com.tr"), False)[1])
+    llm_teshis.kisa({"route": "https://llm.apps.kume.kurum.com.tr/v1/chat/completions"}, satirlar.append)
+    assert satirlar and not any("kurum" in s for s in satirlar), satirlar
+
+
+class SahteIstemci:
+    """llm_teshis Istemci yerine: yanitlar (yontem, url sonu) -> dict."""
+
+    def __init__(self, yanitlar, akis=None):
+        self.yanitlar, self.akis_yaniti, self.istekler = yanitlar, akis, []
+
+    def iste(self, yontem, url, govde=None, timeout=None):
+        self.istekler.append((yontem, url, govde))
+        for (y, son), r in self.yanitlar.items():
+            if y == yontem and url.endswith(son):
+                return dict({"sure": 0.5, "json": None, "metin": "", "tur": "", "hata": None}, **r)
+        return {"durum": 404, "sure": 0.1, "json": None, "metin": "Not Found", "tur": "", "hata": None}
+
+    def akis(self, url, govde, timeout=None):
+        return dict({"sure": 1.0}, **(self.akis_yaniti or {"durum": 404, "hata": "Not Found"}))
+
+
+def test_teshis_hiz_akis_onerisi_yalniz_akissiz_calisirken(monkeypatch):
+    R = llm_teshis.Rapor(yaz_fn=lambda s: None)
+    ctx = {"route": "https://x/v1", "model": "m", "h": SahteIstemci({})}       # her sey 404: model/yol sorunu
+    llm_teshis.hiz(R, ctx, hizli=True)
+    assert "llm_akis" not in R.oneriler and not any("akışlı" in b[1] for b in R.bulgular)
+    R = llm_teshis.Rapor(yaz_fn=lambda s: None)
+    ok = {"durum": 200, "json": {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                                 "usage": {"completion_tokens": 600}}}
+    ctx = {"route": "https://x/v1", "model": "m",
+           "h": SahteIstemci({("POST", "/chat/completions"): ok}, akis={"durum": 502, "hata": "Bad Gateway"})}
+    llm_teshis.hiz(R, ctx, hizli=True)
+    assert R.oneriler.get("llm_akis", (None,))[0] is False
+
+
+def test_teshis_modeller_birden_cok_ve_uyusmayan(monkeypatch):
+    veri = {"durum": 200, "json": {"data": [{"id": "qwen-a", "max_model_len": 32768}, {"id": "qwen-b"}]}}
+    for cm, beklenen in (("yok-model", "qwen-a"), ("qwen-b", "qwen-b"), ("", "qwen-a")):
+        R = llm_teshis.Rapor(yaz_fn=lambda s: None)
+        ctx = {"route": "https://x/v1", "h": SahteIstemci({("GET", "/models"): veri})}
+        llm_teshis.modeller(R, ctx, {"model": cm})
+        assert ctx["model"] == beklenen
+        yuksek = [b[1] for b in R.bulgular if b[0] == "YUKSEK"]
+        assert bool(yuksek) == (beklenen != cm), (cm, R.bulgular)
+        if yuksek:
+            assert "birden çok model" in yuksek[0] and "qwen-a" in yuksek[0]
+
+
+def test_teshis_ca_bundle_yok_ve_config_yok(tmp_path, monkeypatch):
+    R = llm_teshis.Rapor(yaz_fn=lambda s: None)
+    llm_teshis.ortam(R, {"route": "https://x/v1/chat/completions", "ca_bundle": str(tmp_path / "yok.cer")})
+    yuksek = [b[1] for b in R.bulgular if b[0] == "YUKSEK"]
+    assert any("ca_bundle" in b and "bulunamadı" in b for b in yuksek)
+    assert any("tam uç nokta" in b for b in yuksek)
+    # config.json hic yok: acikca soylenir; --hizli'de bolum numaralari ardisik
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(llm_teshis, "KOK", str(tmp_path))
+    monkeypatch.setattr(llm_teshis, "CIKTI_DOSYA", str(tmp_path / "cikti.txt"))
+    for ad in ("baglanti", "modeller", "tokenizer", "dusunme", "sema", "hiz", "paralel", "baglam_probu",
+               "uygulama_yolu", "llm_log_ozeti"):
+        monkeypatch.setattr(llm_teshis, ad, lambda R, *a, _ad=ad: (R.bolum(_ad), True)[1])
+    monkeypatch.setattr(llm_teshis, "config_oku", lambda: {"route": "https://x/v1"})
+    R = llm_teshis.main(["--hizli"])
+    assert any("config.json bulunamadı" in b[1] for b in R.bulgular if b[0] == "YUKSEK")
+    basliklar = [s for s in R.satirlar if re.match(r"^\d+\) ", s)]
+    assert [int(s.split(")")[0]) for s in basliklar] == list(range(1, len(basliklar) + 1))
+    assert not any("paralel" in s for s in basliklar)

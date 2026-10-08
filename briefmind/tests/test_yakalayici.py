@@ -24,7 +24,11 @@ def test_duzeltilen_satir_tekrar_yayilmaz():
     assert metinler.count(b[1]) == 1
     assert sum(1 for m in metinler if "PD kolonu" in m) == 1
     assert c[1] in metinler
-    # sonraki okumada hizalama toparlanir, yeni satir bir kez gelir
+    # sonraki okumada yeni satir bir kez gelir; duzeltilmis ilk satir YENI satir degil guncellemedir
     e = ("Ahmet Yılmaz", "Süper, teşekkürler herkese, görüşmek üzere")
     yayilan2 = _oku(y, [a2, b, c, d, e])
-    assert [s["text"] for s in yayilan2] == [d[1]]
+    assert [s["text"] for s in yayilan2 if not s.get("guncelle")] == [d[1]]
+    g = [s for s in yayilan2 if s.get("guncelle")]
+    assert len(g) == 1 and g[0]["text"] == a2[1] and g[0]["onceki_text"] == a[1]
+    # ayni panel bir daha okununca hicbir sey gelmez
+    assert _oku(y, [a2, b, c, d, e]) == []

@@ -102,6 +102,26 @@ def uzun_metin(token, kr_token=3.0):
 
 # ---------------------------------------------------------------- rapor
 
+_ADRES = re.compile(r"https?://[^\s\"'<>]+", re.I)
+_UC_NOKTA = re.compile(r"/(?:chat/completions|completions|models|tokenize|detokenize|embeddings)$", re.I)
+
+
+def route_duzelt(route):
+    """llm.route_normalize ile ayni kural (arac llm'i ice aktarmadan da calissin): sondaki '/' ve sona
+    yapistirilmis uc nokta atilir, '/v1' garantilenir. -> (adres, kirpilan_uc_nokta)."""
+    r = (route or "").strip().rstrip("/")
+    kirpilan = ""
+    while r:
+        m = _UC_NOKTA.search(r)
+        if not m:
+            break
+        kirpilan = m.group(0) + kirpilan
+        r = r[:m.start()].rstrip("/")
+    if r and not re.search(r"/v\d+$", r):
+        r += "/v1"
+    return r, kirpilan
+
+
 class Rapor:
     """Satirlari ekrana ve listeye yazar; adresleri maskeler; bulgulari (oncelikli) toplar.
     yaz_fn verilirse (tools/teshis.py) yazma ve maskeleme ona birakilir."""
@@ -111,6 +131,7 @@ class Rapor:
     def __init__(self, yaz_fn=None):
         self.satirlar, self.gizli, self.bulgular, self.oneriler = [], [], [], {}
         self._yaz_fn = yaz_fn
+        self._bolum = 0
 
     def gizle(self, adres, etiket="<LLM_ADRES>"):
         from urllib.parse import urlparse
@@ -127,23 +148,30 @@ class Rapor:
                     self.gizli.append((".".join(parcalar[-k:]), "<ALAN>"))
 
     def maskele(self, s):
+        """Bilinen adres/sunucu/alan adlari (buyuk/kucuk harf duyarsiz: hata metinleri sunucu adini farkli
+        yazabilir), sonra kalan her http(s) adresi (eski sunucu adresleri, llm_log ve ham govdeler) gizlenir."""
         s = str(s)
         for gercek, yerine in self.gizli:
             if gercek:
-                s = s.replace(gercek, yerine)
-        return s
+                s = re.sub(re.escape(gercek), lambda _m, y=yerine: y, s, flags=re.I)
+        return _ADRES.sub("<ADRES>", s)
 
     def yaz(self, *satirlar):
         for s in satirlar:
-            if self._yaz_fn:
+            s = self.maskele(s)
+            if self._yaz_fn:                  # tools/teshis.py: kendi maskesini de uygular
                 self._yaz_fn(s)
                 continue
-            s = self.maskele(s)
             self.satirlar.append(s)
             print(s, flush=True)
 
     def baslik(self, s):
         self.yaz("", "=" * 72, s, "=" * 72)
+
+    def bolum(self, s):
+        """Numarali bolum basligi: --hizli/kisa kipte atlanan bolumler numarayi bozmasin."""
+        self._bolum += 1
+        self.baslik(f"{self._bolum}) {s}")
 
     def bulgu(self, seviye, metin, oneri=None):
         self.bulgular.append((seviye, metin, oneri))
@@ -342,7 +370,7 @@ def _istek_hatasi(R, ctx, r, etiket):
 # ---------------------------------------------------------------- adimlar
 
 def ortam(R, cfg):
-    R.baslik("1) Ortam ve config.json (LLM alanları)")
+    R.bolum("Ortam ve config.json (LLM alanları)")
     R.yaz(f"Python {sys.version.split()[0]} · {platform.platform()}")
     for p in ("openai", "httpx"):
         try:
@@ -350,24 +378,33 @@ def ortam(R, cfg):
             R.yaz(f"  {p:8} {getattr(m, '__version__', '?')}")
         except Exception as e:
             R.yaz(f"  {p:8} YOK ({type(e).__name__})")
-    route = cfg.get("route") or ""
+    route = (cfg.get("route") or "").strip()
     R.yaz(f"  route: {route or '(yok)'}")
-    if route.rstrip("/") != route:
+    duz, kirpilan = route_duzelt(route)
+    if kirpilan:
+        R.bulgu("YUKSEK", f"route'a tam uç nokta yapıştırılmış (sonunda '{kirpilan}')",
+                "LLM adresi yalnızca https://<sunucu>/v1 olmalı; uç noktayı uygulama ekler (uygulama artık "
+                "kendisi kırpar ve Olaylar'a 'adres düzeltildi' yazar)")
+    elif route.rstrip("/") != route:
         R.bulgu("ORTA", "route sonunda '/' var", "sondaki '/' silinmeli (uygulama artık kendisi düzeltir)")
-    if route and not re.search(r"/v\d+/?$", route):
+    elif route and not re.search(r"/v\d+$", route):
         R.bulgu("YUKSEK", "route '/v1' ile bitmiyor", "LLM adresi https://<sunucu>/v1 biçiminde olmalı")
     for k in ("model", "context", "llm_akis", "llm_proxy", "llm_tekrar", "llm_zaman_asimi", "parca_token", "paralel"):
         R.yaz(f"  {k}: {cfg.get(k)!r}")
     R.yaz(f"  llm_key: {'(ayarlı)' if cfg.get('llm_key') or cfg.get('api_key') else '(yok)'}")
     ca = cfg.get("ca_bundle") or ""
     R.yaz(f"  ca_bundle: {'(yok — TLS doğrulaması kapalı)' if not ca else ('dosya var' if _ca_bundle(cfg) else 'AYARLI AMA DOSYA YOK')}")
+    if ca and not _ca_bundle(cfg):
+        R.bulgu("YUKSEK", "config.json 'ca_bundle' ayarlı ama dosya bulunamadı: uygulama TLS doğrulamasını KAPALI "
+                          "çalıştırır (kurum sertifikası beklenen bağlantılar başarısız olabilir)",
+                "yolu düzeltin (tam yol, ters bölü çift: C:\\\\...\\\\kok.cer) ya da alanı boşaltın")
     for v in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"):
         if os.environ.get(v):
             R.yaz(f"  ortam değişkeni {v}: (ayarlı)")
 
 
 def baglanti(R, ctx, cfg):
-    R.baslik("2) Bağlantı: TLS doğrulaması × sistem proxy'si (GET /v1/models)")
+    R.bolum("Bağlantı: TLS doğrulaması × sistem proxy'si (GET /v1/models)")
     secenekler = []
     if _ca_bundle(cfg):
         secenekler.append(("ca_bundle", ssl.create_default_context(cafile=_ca_bundle(cfg))))
@@ -405,7 +442,7 @@ def baglanti(R, ctx, cfg):
 
 
 def modeller(R, ctx, cfg):
-    R.baslik("3) Model ve bağlam penceresi (GET /v1/models, /version)")
+    R.bolum("Model ve bağlam penceresi (GET /v1/models, /version)")
     r = ctx["h"].iste("GET", ctx["route"] + "/models")
     veri = ((r.get("json") or {}).get("data") or []) if r["durum"] == 200 else []
     if r["durum"] != 200:
@@ -421,13 +458,19 @@ def modeller(R, ctx, cfg):
         R.yaz(f"  config 'model' {cm!r}: EŞLEŞİYOR")
         ctx["model"] = cm
     elif idler:
-        ctx["model"] = idler[0] if len(idler) == 1 else (cm or idler[0])
-        R.bulgu("YUKSEK" if cm else "BILGI",
-                f"config 'model' {cm or '(boş)'!r} sunucuda {'YOK — UYUŞMUYOR' if cm else 'belirtilmemiş'}; "
-                f"sunucudaki: {idler}",
-                f"config.json \"model\": \"{idler[0]}\" (ya da boş bırakın: uygulama tek modeli kendisi seçer)"
-                if len(idler) == 1 else "config.json 'model' alanına listedeki adlardan birini yazın")
-        if cm:
+        # config modeli listede yok: testler sunucudaki (ilk) modelle yapilir; olmayan adla her istek 404 olurdu
+        ctx["model"] = idler[0]
+        if len(idler) == 1:
+            R.bulgu("YUKSEK" if cm else "BILGI",
+                    f"config 'model' {cm or '(boş)'!r} sunucuda {'YOK — UYUŞMUYOR' if cm else 'belirtilmemiş'}; "
+                    f"sunucudaki: {idler}",
+                    f"config.json \"model\": \"{idler[0]}\" (ya da boş bırakın: uygulama tek modeli kendisi seçer)")
+        else:
+            R.bulgu("YUKSEK", f"config 'model' {cm or '(boş)'!r} sunucuda {'yok' if cm else 'belirtilmemiş'} ve "
+                              f"sunucuda birden çok model var ({idler}): uygulama hangisini kullanacağını bilemez, istekler "
+                              f"başarısız olur; testlerde ilki ({idler[0]!r}) kullanıldı",
+                    "config.json 'model' alanına listedeki adlardan birini yazın")
+        if cm or len(idler) > 1:
             R.config_oner("model", idler[0] if len(idler) == 1 else "<listeden biri>", "sunucudaki model adı")
         R.yaz(f"  testlerde kullanılan model: {ctx['model']!r}")
     else:
@@ -456,7 +499,7 @@ def modeller(R, ctx, cfg):
 
 
 def tokenizer(R, ctx):
-    R.baslik("4) Tokenizer (/tokenize) ve sunucunun gerçek sayımı (usage.prompt_tokens)")
+    R.bolum("Tokenizer (/tokenize) ve sunucunun gerçek sayımı (usage.prompt_tokens)")
     url = _kok(ctx["route"]) + "/tokenize"
     metin = uzun_metin(400)
     mesajlar = [{"role": "system", "content": "Kısa ve Türkçe cevap ver."}, {"role": "user", "content": metin}]
@@ -488,7 +531,7 @@ def tokenizer(R, ctx):
 
 
 def dusunme(R, ctx):
-    R.baslik("5) Düşünme kontrolü (varsayılan / reasoning_effort / enable_thinking) ve içerik etiketleri")
+    R.bolum("Düşünme kontrolü (varsayılan / reasoning_effort / enable_thinking) ve içerik etiketleri")
     mesajlar = [{"role": "system", "content": "Kısa ve Türkçe cevap ver."}, {"role": "user", "content": SORU}]
     olcum = {}
     for etiket, kw, mt in (("varsayılan", None, 3000), ("effort=low", {"reasoning_effort": "low"}, 3000),
@@ -532,7 +575,7 @@ def dusunme(R, ctx):
 
 
 def sema(R, ctx):
-    R.baslik("6) json_schema (yapılandırılmış çıktı) düşünmeli / düşünmesiz")
+    R.bolum("json_schema (yapılandırılmış çıktı) düşünmeli / düşünmesiz")
     gerekli = ["ozet", "kararlar", "aksiyonlar"]
     sema_ = {"type": "object", "properties": {"ozet": {"type": "string"},
                                               "kararlar": {"type": "array", "items": {"type": "string"}},
@@ -566,7 +609,7 @@ def sema(R, ctx):
 
 
 def hiz(R, ctx, hizli=False):
-    R.baslik("7) Hız: üretim (tok/sn), ilk token süresi, ön işleme (prefill), route zaman aşımı")
+    R.bolum("Hız: üretim (tok/sn), ilk token süresi, ön işleme (prefill), route zaman aşımı")
     url = ctx["route"] + "/chat/completions"
     yaz_istek = [{"role": "user", "content": "Bir sprint toplantısının ayrıntılı tutanağını uzun uzun, Türkçe yaz; "
                                              "ad olarak yalnızca 'A', 'B', 'C' kullan."}]
@@ -582,6 +625,7 @@ def hiz(R, ctx, hizli=False):
     if r["durum"] == 400 and "min_tokens" in (r.get("metin") or ""):
         ctx["min_tokens"] = False
         r = ctx["h"].iste("POST", url, govde(700, 0))
+    akissiz_tamam = r["durum"] == 200
     if r["durum"] == 200:
         c = _cevap_coz(r)
         ct = c["usage"].get("completion_tokens") or 0
@@ -597,8 +641,14 @@ def hiz(R, ctx, hizli=False):
               f"{ct / max(uretim, 0.01):.0f} tok/sn (finish={a.get('finish')})")
     else:
         R.yaz(f"  akışlı 2000: HTTP {a.get('durum')} {a['sure']:.1f}s {a.get('hata')}")
-        R.bulgu("ORTA", "akışlı (stream) istek başarısız", "config.json 'llm_akis': false deneyin")
-        R.config_oner("llm_akis", False, "akışlı istek bu sunucuda çalışmadı")
+        if akissiz_tamam and a.get("durum") not in (401, 403, 404):
+            # yalniz akissiz istek calisirken akisli basarisizsa akisla ilgilidir (404/401 adres/model/anahtar)
+            R.bulgu("ORTA", "akışlı (stream) istek başarısız, akışsız çalışıyor",
+                    "config.json 'llm_akis': false deneyin")
+            R.config_oner("llm_akis", False, "akışlı istek bu sunucuda çalışmadı")
+        else:
+            R.yaz("    (akışsız istek de başarısız ya da hata akışla ilgisiz: 'llm_akis' önerilmez; yukarıdaki "
+                  "adres/model/anahtar bulgularına bakın)")
     d = ctx["h"].akis(url, govde(3000, 0, {"reasoning_effort": "low"}, [{"role": "user", "content": SORU}]))
     if not d.get("hata"):
         ct = (d.get("usage") or {}).get("completion_tokens") or 0
@@ -635,7 +685,7 @@ def hiz(R, ctx, hizli=False):
 
 
 def paralel(R, ctx):
-    R.baslik("8) Eşzamanlılık: 1 / 2 / 4 paralel akış (her biri ~500 token)")
+    R.bolum("Eşzamanlılık: 1 / 2 / 4 paralel akış (her biri ~500 token)")
     url = ctx["route"] + "/chat/completions"
     g = {"model": ctx["model"], "max_tokens": 600, "temperature": 0.7,
          "messages": [{"role": "user", "content": "Bir proje toplantısını Türkçe ve uzunca anlat."}],
@@ -666,7 +716,7 @@ def paralel(R, ctx):
 
 
 def baglam_probu(R, ctx):
-    R.baslik("9) Bağlam probu: pencereye yakın girdi ve kasıtlı taşma (vLLM hata metni)")
+    R.bolum("Bağlam probu: pencereye yakın girdi ve kasıtlı taşma (vLLM hata metni)")
     url = ctx["route"] + "/chat/completions"
     pencere = ctx.get("pencere", 16384)
     hedef = min(int(pencere * 0.85), 30000)
@@ -700,7 +750,7 @@ def baglam_probu(R, ctx):
 
 def uygulama_yolu(R, cfg, olay):
     """Uygulamanin kendi istemcisi (openai SDK, TLS/proxy, akis, sunucu tanisi) ile kisa deneme."""
-    R.baslik("10) Uygulamanın kendi yolu (llm modülü: openai istemcisi, sunucu tanısı, akış)")
+    R.bolum("Uygulamanın kendi yolu (llm modülü: openai istemcisi, sunucu tanısı, akış)")
     sys.path.insert(0, KOK)
     import llm
     llm.ayarla(cfg)
@@ -721,7 +771,7 @@ def uygulama_yolu(R, cfg, olay):
 def boru_hatti(R, llm_mod=None, olay=None):
     """--tam: uygulamanin GERCEK not boru hatti sentetik transkript uzerinde (ag gerekmeden de, llm.sor
     sahteyle test edilebilir). Dondurur: uretilen not (Markdown)."""
-    R.baslik("11) Tam boru hattı (sentetik 3 bölümlük toplantı; gerçek içerik yok)")
+    R.bolum("Tam boru hattı (sentetik 3 bölümlük toplantı; gerçek içerik yok)")
     if llm_mod is None:
         sys.path.insert(0, KOK)
         import llm as llm_mod
@@ -812,7 +862,7 @@ def cagri_tablosu(R, kayitlar):
 def llm_log_ozeti(R, kok="toplantilar", son=5):
     """Son toplantilarin llm_log.jsonl'i: gorev bazinda sayi, finish dagilimi, ort. sure, hata metinleri.
     Kayitlar icerik tasimaz (yalniz istatistik)."""
-    R.baslik(f"12) Son {son} toplantının llm_log.jsonl özeti (içerik yok)")
+    R.bolum(f"Son {son} toplantının llm_log.jsonl özeti (içerik yok)")
     dosyalar = sorted(glob.glob(os.path.join(kok, "*", "llm_log.jsonl")), key=os.path.getmtime)[-son:]
     if not dosyalar:
         R.yaz(f"  {kok}/*/llm_log.jsonl yok (uygulamayı başka klasörden çalıştırıyorsan --kayit ile yol ver)")
@@ -870,12 +920,11 @@ def config_oku():
 def kisa(cfg, yaz_fn):
     """tools/teshis.py icin: baglanti, model/pencere, tokenizer, dusunme ve sema (hiz/probe yok)."""
     R = Rapor(yaz_fn)
-    route = (cfg.get("route") or "").strip().rstrip("/")
+    route, _ = route_duzelt(cfg.get("route"))
     if not route:
         R.yaz("route ayarlı değil")
         return R
-    if not re.search(r"/v\d+$", route):
-        route += "/v1"
+    R.gizle(_kok(route))                       # sunucu ve kurum alan adi (sertifika hatalarinda '*.<alan>')
     ctx = {"route": route, "model": cfg.get("model") or ""}
     if _adim(R, "bağlantı", baglanti, R, ctx, cfg):
         _adim(R, "model", modeller, R, ctx, cfg)
@@ -904,16 +953,19 @@ def main(argv=None):
     R = Rapor()
     R.yaz(f"BriefMind LLM teşhisi — {dt.datetime.now():%Y-%m-%d %H:%M}  (mod: {'tam' if a.tam else 'temel'}"
           f"{', hızlı' if a.hizli else ''})")
+    cfg_yol = os.path.join(KOK, "config.json")
+    if not os.path.exists(cfg_yol):
+        R.bulgu("YUKSEK", f"config.json bulunamadı ({cfg_yol}): uygulama varsayılan yerel adrese "
+                          "(localhost:8000/v1) gider, LLM'e hiç ulaşamaz",
+                "config.example.json'ı config.json adıyla kopyalayıp doldurun ya da uygulamada Ayarlar → Kaydet")
     try:
         cfg = config_oku()
     except Exception as e:
-        R.yaz(f"config.json okunamadı: {_istisna(e)}")
+        R.bulgu("YUKSEK", f"config.json okunamadı (JSON bozuk?): {_istisna(e)}")
         cfg = {}
-    route = (cfg.get("route") or "").strip().rstrip("/")
+    route, _ = route_duzelt(cfg.get("route"))
     R.gizle(_kok(route))
     _adim(R, "ortam", ortam, R, cfg)
-    if route and not re.search(r"/v\d+$", route):
-        route += "/v1"
     ctx = {"route": route, "model": cfg.get("model") or ""}
     olay = []
     if not route:

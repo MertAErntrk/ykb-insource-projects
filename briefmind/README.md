@@ -31,7 +31,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 | `outlook.py` | Takvimden toplantı eşleştirme, taslak e-posta, oturum kullanıcısı |
 | `sozluk.py` | Sözlük: alias uygulama, toplantı serisine göre terim kapsamı |
 | `toplanti.py` | Komut satırı arayüzü (başla / bitir / liste) |
-| `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, sözlük temizliği) |
+| `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, sözlük temizliği, LLM teşhisi, taşmış transkript temizliği) |
 | `deploy/` | GPU'suz Whisper servisi için OpenShift manifestleri (CPU, faster-whisper) |
 
 ## Kurulum
@@ -110,6 +110,11 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
 - **Yeniden özetle:** Geçmiş sekmesinde bir toplantı seçilip basılır; **tüm** parçalar güncel sözlükle yeniden
   düzeltilip özetlenir ve yeni not üretilir (yarım kalmış kayıtlar için de). Eski not `not.md.yedek-YYYYMMDD-HHMM`
   olarak saklanır. Tek parça için: "Seçili parçayı yeniden özetle".
+  Kayıtta **altyazı taşması** varsa (aynı satırlar yüzlerce kez; Geçmiş bilgi satırında "⚠ Altyazı taşması") önce
+  transkript temizlenir: birebir tekrarlar ve yarım halleri elenir, parçalar temiz satırlardan yeniden kurulur;
+  eski hali `parcalar.yedek-…`, `altyazi.jsonl.yedek-…`, `oneriler.json.yedek-…` olarak klasörde kalır. Olaylar'da
+  `taşma temizlendi: 26247 → N satır, 223 → M parça`. Uygulamasız: `python tools\transkript_temizle.py
+  toplantilar\<klasör> --kuru` (yalnız sayılar), `--kuru` olmadan temizler. Ayrıntı: [geliştirme planı, bölüm 13](docs/GELISTIRME_PLANI.md#13-altyazı-taşması-2026-09-30).
 - **Düzenle / Word / PDF / Kişiye özel e-postalar:** Not sekmesindeki düğmeler.
 - **Jira/Planner CSV:** Not sekmesi → "Jira/Planner CSV" aksiyon tablosunu `aksiyonlar.csv` olarak kaydeder
   (sütunlar `Summary, Assignee, Due Date, Description, Issue Type`; UTF-8). Jira: *Issues → Import issues from CSV*.

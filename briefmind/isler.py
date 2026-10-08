@@ -208,8 +208,9 @@ class SoruIsi(QtCore.QThread):
 
 
 class YenidenOzetlemeIsi(QtCore.QThread):
-    """Gecmis -> 'Yeniden ozetle': var olan not.md yedeklenir, sozluk tum parcalara uygulanir, TUM parcalar
-    yeniden duzeltilip ozetlenir; otomatik_not ise yeni not dogrudan uretilir, degilse inceleme hazirlanir."""
+    """Gecmis -> 'Yeniden ozetle': kayitta altyazi tasmasi varsa once transkript temizlenir (motor.
+    transkript_temizle); var olan not.md yedeklenir, sozluk tum parcalara uygulanir, TUM parcalar yeniden
+    duzeltilip ozetlenir; otomatik_not ise yeni not dogrudan uretilir, degilse inceleme hazirlanir."""
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
     bitti = QtCore.pyqtSignal(str)
@@ -224,6 +225,14 @@ class YenidenOzetlemeIsi(QtCore.QThread):
 
     def run(self):
         try:
+            if motor_mod.tasma_var_mi(self.klasor):
+                # altyazi tasmasiyla bozulmus kayit (ayni satirlar yuzlerce kez): once transkript temizlenir,
+                # parcalar temiz satirlardan yeniden kurulur (eski hali .yedek-* olarak klasorde kalir)
+                self.durum.emit("Taşmış transkript temizleniyor…")
+                t = motor_mod.transkript_temizle(self.klasor)
+                if t:
+                    self.olay.emit("log", f"taşma temizlendi: {t['once']} → {t['sonra']} satır, "
+                                          f"{t['parca_once']} → {t['parca_sonra']} parça (yedekler kayıt klasöründe)")
             self.motor = Motor.yukle(self.klasor, self.sozluk, olay=lambda t, v: self.olay.emit(t, v),
                                      duzelt=self.duzelt, ben=self.ben, sablon=self.sablon)
             yedek = self.motor.not_yedekle()

@@ -53,6 +53,7 @@ SUNUCU_TOKENIZER = True                                # token sayimi sunucunun 
 
 _tani_kilit = threading.Lock()
 _TANI_YAPILDI = False
+_AYAR_NESIL = 0                                        # her ayarla() cagrisinda artar
 _SEMA_DESTEGI = True                                   # json_schema reddedildiyse oturum boyunca gonderilmez
 _MESAJ_TOKENIZE = True                                 # /tokenize 'messages' bicimini destekliyor mu
 _TOKENIZE_KAPALI_SONA = 0.0                            # /tokenize basarisizsa bu ana kadar tahmin kullanilir
@@ -79,13 +80,30 @@ def _int(x, varsayilan=0):
         return varsayilan
 
 
-def route_normalize(route):
-    """Bosluk ve sondaki '/' atilir; yol '/v1' (ya da /vN) ile bitmiyorsa eklenir. openai istemcisi
-    /chat/completions'i bunun ustune kurar; '/v1'siz adres 404, '/v1/' ise '/tokenize/' (307) uretiyordu."""
+_UC_NOKTA = re.compile(r"/(?:chat/completions|completions|models|tokenize|detokenize|embeddings)$", re.I)
+
+
+def route_normalize(route, ayrinti=False):
+    """Bosluk ve sondaki '/' atilir; sona yapistirilmis uc nokta (/chat/completions, /completions, /models,
+    /tokenize) kirpilir; yol '/v1' (ya da /vN) ile bitmiyorsa eklenir. openai istemcisi /chat/completions'i
+    bunun ustune kurar: '/v1'siz adres 404, '/v1/' '/tokenize/' (307), tam uc nokta ise
+    '.../v1/chat/completions/v1/chat/completions' (404) uretiyordu. ayrinti=True: (adres, kirpilan_uc_nokta)."""
     r = (route or "").strip().rstrip("/")
+    kirpilan = ""
+    while r:
+        m = _UC_NOKTA.search(r)
+        if not m:
+            break
+        kirpilan = m.group(0) + kirpilan
+        r = r[:m.start()].rstrip("/")
     if r and not re.search(r"/v\d+$", r):
         r += "/v1"
-    return r
+    return (r, kirpilan) if ayrinti else r
+
+
+def maskeli_adres(adres):
+    """Olaylar/gunluk icin: sunucu adi gizlenir ('https://<sunucu>/v1')."""
+    return re.sub(r"^(\w+://)[^/]+", r"\1<sunucu>", adres or "")
 
 
 def _kok(route):
@@ -98,14 +116,19 @@ def ayarla(cfg):
     (model listesi, max_model_len) ilk LLM isteginden once ya da sunucuyu_tani() ile bir kez sorulur."""
     global ROUTE, MODEL, BAGLAM_PENCERESI, TLS_DOGRULAMA, TLS_HATASI, client, _http, TOKENIZE_URL
     global CONFIG_PENCERE, CONFIG_MODEL, ZAMAN_ASIMI, AKIS, BUTCE_AYAR, SUNUCU, AYAR_UYARILARI, SON_HATA
-    global _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE, _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi
+    global _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE, _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi, _AYAR_NESIL
     cfg = cfg or {}
+    _AYAR_NESIL += 1
     ham = (cfg.get("route") or "http://localhost:8000/v1").strip()   # config.json: LLM adresi (OpenAI uyumlu)
     # OpenShift icinden: "http://<servis>.<namespace>.svc.cluster.local:8000/v1"
-    ROUTE = route_normalize(ham)
+    ROUTE, kirpilan = route_normalize(ham, ayrinti=True)
     TOKENIZE_URL = _kok(ROUTE) + "/tokenize"
     AYAR_UYARILARI = []
-    if ROUTE != ham:
+    if kirpilan:
+        AYAR_UYARILARI.append(f"adres düzeltildi: LLM adresinin sonundaki '{kirpilan}' uç noktası atıldı, "
+                              f"kullanılan adres {maskeli_adres(ROUTE)} (Ayarlar → LLM adresi '.../v1' ile bitmeli; uç noktayı "
+                              f"uygulama kendisi ekler)")
+    elif ROUTE != ham:
         AYAR_UYARILARI.append("LLM adresi düzeltildi: sonu '/v1' olmalı (sondaki '/' atıldı ya da '/v1' eklendi)")
     CONFIG_MODEL = str(cfg.get("model") or "").strip()
     MODEL = CONFIG_MODEL                                # bos ise sunucudaki tek model secilir (sunucuyu_tani)
@@ -170,47 +193,60 @@ def sunucuyu_tani(zorla=False):
     - config modeli listede yoksa ve sunucu tek model sunuyorsa o model kullanilir;
     - pencere = sunucunun max_model_len'i; config 'context' daha kucukse o (yalniz ust sinir).
     Sunucuya ulasilamazsa config degerleri kalir. Dondurur: uyari satirlari (ayarla uyarilari dahil)."""
-    global _TANI_YAPILDI, SUNUCU, MODEL, BAGLAM_PENCERESI
+    global _TANI_YAPILDI
     with _tani_kilit:
         if _TANI_YAPILDI and not zorla:
             return list(AYAR_UYARILARI)
-        _TANI_YAPILDI = True
-        bilgi = sunucu_bilgisi()
-        uyarilar = []
-        sunucu_pencere = None
-        if bilgi["hata"]:
-            uyarilar.append(f"LLM sunucusu sorgulanamadı ({bilgi['hata']}); model '{MODEL or '-'}', bağlam "
-                            f"penceresi {BAGLAM_PENCERESI} varsayıldı")
-        else:
-            idler = [m["id"] for m in bilgi["modeller"] if m.get("id")]
-            if MODEL not in idler:
-                if len(idler) == 1:
-                    eski, MODEL = MODEL, idler[0]
-                    uyarilar.append(f"config.json 'model' ({eski}) sunucuda yok; sunucudaki tek model kullanılıyor: "
-                                    f"{MODEL}" if eski else f"model sunucudan alındı: {MODEL}")
-                elif idler:
-                    uyarilar.append(f"config.json 'model' ({MODEL or 'boş'}) sunucuda yok; sunucudaki modeller: "
-                                    f"{', '.join(idler)} — Ayarlar → Model alanına birini yazın")
-                else:
-                    uyarilar.append("LLM sunucusu hiç model listelemedi (GET /models boş)")
-            sunucu_pencere = next((_int(m.get("max_model_len")) for m in bilgi["modeller"]
-                                   if m.get("id") == MODEL and _int(m.get("max_model_len")) > 0), None)
-            if sunucu_pencere:
-                if CONFIG_PENCERE > sunucu_pencere:
-                    uyarilar.append(f"config.json 'context' ({CONFIG_PENCERE}) sunucunun bağlam penceresinden "
-                                    f"({sunucu_pencere}) büyük; {sunucu_pencere} kullanılıyor")
-                BAGLAM_PENCERESI = min(CONFIG_PENCERE, sunucu_pencere) if CONFIG_PENCERE else sunucu_pencere
-        bilgi["pencere"] = sunucu_pencere
-        SUNUCU = bilgi
-        yeni = [u for u in uyarilar if u not in AYAR_UYARILARI]
-        AYAR_UYARILARI.extend(yeni)
-        _gunluge_yaz(olay="ayar", zaman=dt.datetime.now().strftime("%H:%M:%S"), model=MODEL,
-                     pencere=BAGLAM_PENCERESI, sunucu_pencere=sunucu_pencere, config_context=CONFIG_PENCERE,
-                     akis=AKIS, uyari=list(AYAR_UYARILARI))
-        if not zorla:                         # acik cagiran (arayuz, teshis) donen listeyi kendisi yazar
-            for u in yeni:
-                _uyar(u)
-        return list(AYAR_UYARILARI)
+        nesil = _AYAR_NESIL
+        try:
+            return _tani(zorla)
+        finally:
+            # bayrak sorgu BITINCE kalkar: eskiden GET /models surerken True oluyor, kilitsiz okuyan sor()
+            # taniyi atlayip bos/eski model adiyla 404 aliyordu. Bu arada ayarla() cagrildiysa (yeni adres)
+            # tani yeni ayarla yeniden yapilsin.
+            if nesil == _AYAR_NESIL:
+                _TANI_YAPILDI = True
+
+
+def _tani(zorla):
+    """sunucuyu_tani'nin govdesi (_tani_kilit altinda cagrilir)."""
+    global SUNUCU, MODEL, BAGLAM_PENCERESI
+    bilgi = sunucu_bilgisi()
+    uyarilar = []
+    sunucu_pencere = None
+    if bilgi["hata"]:
+        uyarilar.append(f"LLM sunucusu sorgulanamadı ({bilgi['hata']}); model '{MODEL or '-'}', bağlam "
+                        f"penceresi {BAGLAM_PENCERESI} varsayıldı")
+    else:
+        idler = [m["id"] for m in bilgi["modeller"] if m.get("id")]
+        if MODEL not in idler:
+            if len(idler) == 1:
+                eski, MODEL = MODEL, idler[0]
+                uyarilar.append(f"config.json 'model' ({eski}) sunucuda yok; sunucudaki tek model kullanılıyor: "
+                                f"{MODEL}" if eski else f"model sunucudan alındı: {MODEL}")
+            elif idler:
+                uyarilar.append(f"config.json 'model' ({MODEL or 'boş'}) sunucuda yok; sunucudaki modeller: "
+                                f"{', '.join(idler)} — Ayarlar → Model alanına birini yazın")
+            else:
+                uyarilar.append("LLM sunucusu hiç model listelemedi (GET /models boş)")
+        sunucu_pencere = next((_int(m.get("max_model_len")) for m in bilgi["modeller"]
+                               if m.get("id") == MODEL and _int(m.get("max_model_len")) > 0), None)
+        if sunucu_pencere:
+            if CONFIG_PENCERE > sunucu_pencere:
+                uyarilar.append(f"config.json 'context' ({CONFIG_PENCERE}) sunucunun bağlam penceresinden "
+                                f"({sunucu_pencere}) büyük; {sunucu_pencere} kullanılıyor")
+            BAGLAM_PENCERESI = min(CONFIG_PENCERE, sunucu_pencere) if CONFIG_PENCERE else sunucu_pencere
+    bilgi["pencere"] = sunucu_pencere
+    SUNUCU = bilgi
+    yeni = [u for u in uyarilar if u not in AYAR_UYARILARI]
+    AYAR_UYARILARI.extend(yeni)
+    _gunluge_yaz(olay="ayar", zaman=dt.datetime.now().strftime("%H:%M:%S"), model=MODEL,
+                 pencere=BAGLAM_PENCERESI, sunucu_pencere=sunucu_pencere, config_context=CONFIG_PENCERE,
+                 akis=AKIS, uyari=list(AYAR_UYARILARI))
+    if not zorla:                         # acik cagiran (arayuz, teshis) donen listeyi kendisi yazar
+        for u in yeni:
+            _uyar(u)
+    return list(AYAR_UYARILARI)
 
 
 def ayar_ozeti():
@@ -294,12 +330,34 @@ def _baglam_siniri(govde):
     return int(m.group(1)) if m else None
 
 
+def _akis_hatasi(e):
+    """Akisli cevabin ICINDE gelen hata olayi (vLLM 'data: {"error": ...}'): openai bunu HTTP durumu olmayan
+    duz APIError olarak yukseltir; baglanti/zaman asimi hatalari degildir."""
+    return (isinstance(e, openai.APIError) and getattr(e, "status_code", None) is None
+            and not isinstance(e, openai.APIConnectionError))
+
+
+def _hata_durumu(e):
+    """HTTP durumu; akis ici hatada govdedeki 'code' (vLLM 400/422 tasir) ya da baglam metni varsa 400."""
+    durum = getattr(e, "status_code", None)
+    if durum or not _akis_hatasi(e):
+        return durum
+    b = getattr(e, "body", None)
+    kod = _int(b.get("code")) if isinstance(b, dict) else 0
+    if 100 <= kod < 600:
+        return kod
+    return 400 if _BAGLAM_IFADE.search(_govde(e) or "") else None
+
+
 def hata_metni(e):
     """Her LLM hatasi icin tek satir Turkce, tani degerleriyle. LlmHatasi zaten hazir metindir."""
     if isinstance(e, LlmHatasi):
         return str(e)
-    durum = getattr(e, "status_code", None)
-    govde = _kisalt(_govde(e), 600) if durum else ""
+    akis_ici = _akis_hatasi(e)
+    durum = _hata_durumu(e)
+    govde = _kisalt(_govde(e) if not akis_ici else (_govde(e) or str(e)), 600) if (durum or akis_ici) else ""
+    if akis_ici:
+        govde = "akış içi hata: " + govde
     html = "<html" in govde.lower() or "<!doctype" in govde.lower()
     if durum == 404:
         if "does not exist" in govde or "model" in govde.lower():
@@ -321,6 +379,8 @@ def hata_metni(e):
                 f"haproxy.router.openshift.io/timeout=600s. Gövde: {_kisalt(govde, 160)}")
     if durum:
         return f"LLM HTTP {durum}: {_kisalt(govde, 400)}"
+    if akis_ici:
+        return f"LLM cevabı akış sırasında hata ile kesildi: {_kisalt(govde, 400)}"
     if isinstance(e, openai.APITimeoutError):
         return (f"LLM {ZAMAN_ASIMI} sn içinde cevap vermedi (zaman aşımı; config.json 'llm_zaman_asimi'). "
                 f"{_istisna_ozeti(e)}")
@@ -478,8 +538,9 @@ def token_say(metin):
     """Sunucunun tokenizer'iyla sayar; ulasamazsa kaba tahmin. Ayni metin (genel ozet gruplamasi,
     soru-cevap bolum secimi) tekrar sayilmaz."""
     anahtar = hash(metin)
-    if anahtar in _token_onbellek:
-        return _token_onbellek[anahtar]
+    n = _token_onbellek.get(anahtar)        # tek okuma: 'in' + ayri okuma arasinda clear() KeyError veriyordu
+    if n is not None:
+        return n
     n = _tokenize({"model": MODEL, "prompt": metin})
     if n is None:
         return token_tahmin(metin)
@@ -576,8 +637,8 @@ def _gunluge_yaz(**kayit):
 def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
     """Tek LLM cagrisi -> (metin, finish_reason). Hata LlmHatasi olarak (Turkce, tani degerleriyle) yukselir."""
     global SON_HATA
-    if OTOMATIK_TANI and not _TANI_YAPILDI:
-        sunucuyu_tani()
+    if OTOMATIK_TANI:
+        sunucuyu_tani()               # kilit altinda: tani suruyorsa bitmesi beklenir, yapildiysa hemen doner
     t0 = time.time()
     kayit = {"zaman": dt.datetime.now().strftime("%H:%M:%S"), "gorev": _gorev_adi(mesajlar),
              "dusunme": effort if dusunme else False, "sema": bool(sema), "model": MODEL, "pencere": BAGLAM_PENCERESI}
@@ -586,11 +647,11 @@ def sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusun
     except Exception as e:
         hm = hata_metni(e)
         SON_HATA = hm
-        _gunluge_yaz(**kayit, sure_sn=round(time.time() - t0, 1), http=getattr(e, "status_code", None),
+        _gunluge_yaz(**kayit, sure_sn=round(time.time() - t0, 1), http=_hata_durumu(e),
                      tur=type(e).__name__, hata=hm[:600])
         if isinstance(e, (LlmHatasi, ValueError)):
             raise
-        raise LlmHatasi(hm, getattr(e, "status_code", None)) from e
+        raise LlmHatasi(hm, _hata_durumu(e)) from e
     _gunluge_yaz(**kayit, **ek, finish=neden, sure_sn=round(time.time() - t0, 1), cevap_karakter=len(metin),
                  ingilizce=ingilizce_mi(metin))
     return metin, neden
@@ -677,7 +738,10 @@ def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
             else:
                 icerik, dusunce, neden, u = _cagir(ortak)
             break
-        except (BadRequestError, UnprocessableEntityError) as e:
+        except openai.APIError as e:
+            # 400/422 ya da akis ici hata olayi (vLLM uzun istegi akis basladiktan sonra da reddedebilir)
+            if not (isinstance(e, (BadRequestError, UnprocessableEntityError)) or _akis_hatasi(e)):
+                raise
             yeni = _baglam_siniri(_govde(e))
             if deneme == 0 and yeni and yeni < BAGLAM_PENCERESI:
                 # sunucunun penceresi bildigimizden kucuk: ogren ve ayni istegi bir kez kirpilmis butceyle dene

@@ -36,14 +36,15 @@ def _kes(s, son):
 
 
 def _gizle(adres, etiket):
-    """Adresi hem tam hem yalniz sunucu adi olarak maskeler (hata mesajlarinda host='...' gecer)."""
-    from urllib.parse import urlparse
+    """Adresi tam, yalniz sunucu adi ve kurum alan adi ('*.<alan>' sertifika hatalarinda gecer) olarak
+    maskeler: llm_teshis.Rapor.gizle ile ayni kural (kod tekrari yok)."""
     if not adres:
         return
-    GIZLI.append((adres, etiket))
-    host = urlparse(adres).hostname
-    if host:
-        GIZLI.append((host, etiket))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import llm_teshis
+    r = llm_teshis.Rapor(yaz_fn=lambda s: None)
+    r.gizle(adres, etiket)
+    GIZLI.extend(r.gizli)
 
 
 def yaz(*satirlar):
@@ -51,7 +52,7 @@ def yaz(*satirlar):
         s = str(s)
         for gercek, yerine in GIZLI:
             if gercek:
-                s = s.replace(gercek, yerine)
+                s = re.sub(re.escape(gercek), lambda _m, y=yerine: y, s, flags=re.I)
         CIKTI.append(s)
         print(s, flush=True)
 
@@ -211,6 +212,8 @@ def kayit_istatistikleri(son=10, kok="toplantilar"):
                     s = json.loads(ham)
                 except Exception:
                     continue
+                if s.get("guncelle"):          # buyuyen altyazi satirinin guncellemesi: ayri satir degil
+                    continue
                 satir += 1
                 kaynak[s.get("kaynak")] = kaynak.get(s.get("kaynak"), 0) + 1
                 kelime += len((s.get("text") or "").split())
@@ -235,6 +238,15 @@ def kayit_istatistikleri(son=10, kok="toplantilar"):
             f"kapanış={nedenler}")
         yaz(f"    satır={satir} kaynak={kaynak} ort_kelime/satır={kelime / max(1, satir):.1f} "
             f"konuşmacısız(?)={soru} zamanı_geri_giden_satır={geri}")
+        try:
+            import motor
+            t = motor.tasma_olcumu(k)
+            yaz(f"    altyazı taşması={'EVET' if t['tasma'] else 'hayır'} (dakikada en çok {t['dk_en_cok']} satır, "
+                f"birebir tekrar %{100 * t['tekrar_orani']:.0f})"
+                + (" → Geçmiş → 'Yeniden özetle' önce temizler; ya da python tools\\transkript_temizle.py <klasör>"
+                   if t["tasma"] else ""))
+        except Exception as e:
+            yaz(f"    altyazı taşması ölçülemedi: {type(e).__name__}")
         yaz(f"    {not_bilgi}")
 
 

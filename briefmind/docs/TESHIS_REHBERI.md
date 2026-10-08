@@ -38,6 +38,7 @@ LLM sunucusu (vLLM) değiştiğinde ya da "özet çıkarırken hata" görüldü�
 ```
 
 - `route` `/v1` ile bitmeli (sonda `/` olmadan; uygulama Kaydet'te kendisi düzeltir).
+- **Route'a tam uç nokta yapıştırmayın.** Tarayıcıdan/Postman'den kopyalanan `https://<adres>/v1/chat/completions` (ya da `/v1/completions`, `/v1/models`) yanlış: uygulama `/chat/completions`'ı kendisi ekler, eski sürüm `…/v1/chat/completions/v1/chat/completions` adresine gidip her isteğe 404 alıyordu. Yeni sürüm sondaki uç noktayı kırpar ve Olaylar'a `LLM: adres düzeltildi: LLM adresinin sonundaki '/chat/completions' uç noktası atıldı …` yazar; `config.json`'u yine de `https://<adres>/v1` olarak düzeltin. `llm_teshis.py` bunu `[YUKSEK] route'a tam uç nokta yapıştırılmış` olarak raporlar.
 - `model`: boş bırakın (sunucu tek model sunuyorsa o seçilir) ya da `https://<adres>/v1/models` sayfasındaki `id` değerini aynen yazın. Eski model adı kalırsa sunucu her isteğe 404 verir; uygulama artık bunu açılışta görüp tek modele geçer ve Olaylar'a yazar.
 - `context`: `0` (sunucunun `max_model_len` değeri kullanılır). Eski `16384` kalırsa yalnızca üst sınır olur.
 - Uygulamadan: Ayarlar → **LLM sunucusunu test et**. Olaylar'da `LLM: LLM modeli: … · bağlam penceresi: …` satırı görünür.
@@ -78,6 +79,9 @@ En sonda **Teşhis özeti** (öncelik sırasıyla olası kök nedenler) ve öner
 | `ulaşılamadı … CERTIFICATE_VERIFY_FAILED` | `ca_bundle` yeni sunucuyu doğrulamıyor | Yeni adresin kök sertifikasını dışa aktarın (README, TLS) |
 | Bağlantı yalnız `proxy=açık` ile çalışıyor | Sunucuya sistem proxy'si üzerinden ulaşılıyor | `llm_proxy: true` |
 | `HTTP 401/403` | Sunucu anahtar istiyor | `llm_key` |
+| `route'a tam uç nokta yapıştırılmış` | `route` `…/v1/chat/completions` gibi | `route`: yalnızca `https://<adres>/v1` |
+| `ca_bundle' ayarlı ama dosya bulunamadı` | Yol yanlış: TLS doğrulaması kapalı çalışır | Tam yol (JSON'da `\\`), ya da alanı boşaltın |
+| `config.json bulunamadı` | Araç/uygulama başka klasörden çalışıyor ya da dosya hiç yok | `config.example.json` → `config.json`; uygulamada Ayarlar → Kaydet |
 | `enable_thinking=False düşünmeyi KAPATMIYOR` | Yeni sohbet şablonu parametreyi tanımıyor | Çıktıyı paylaşın (kodda şablon parametresi değişir) |
 
 ---

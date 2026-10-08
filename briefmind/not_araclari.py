@@ -49,13 +49,8 @@ def transkript_satirlari(klasor):
                     satirlar += json.load(f).get("satirlar") or []
             except Exception:
                 continue
-    if not satirlar and os.path.exists(os.path.join(klasor, "altyazi.jsonl")):
-        with open(os.path.join(klasor, "altyazi.jsonl"), encoding="utf-8") as f:
-            for ham in f:
-                try:
-                    satirlar.append(json.loads(ham))
-                except Exception:
-                    continue
+    if not satirlar:
+        satirlar = motor_mod.altyazi_kayitlari(klasor)  # guncelleme kayitlari (buyuyen satir) birlestirilir
     return satirlar
 
 
