@@ -1,7 +1,8 @@
-"""Faz 0 acil duzeltmeler (MIMARI_v3 §7): bos altyazi penceresi tek konusmaci sayilmaz, K5 varsayilan kapali
-ve K5_UST=0 gercekten kapatir, mikrofon->baskasi yalniz kulaklik yokken, worker istisnasi (threading.excepthook +
-Qt sinyal koprusu), YakalamaIsi/ParcaIsi her yolda motor.bitir + bitis sinyali, not uretilirken Baslat kilidi.
-Ses cihazi, ag, Outlook gerekmez; adlar uydurma."""
+"""Faz 0 acil duzeltmeler (MIMARI_v3 §7), Faz 1 davranisina guncellendi: metin benzerligiyle atama, K5 ve
+_tek_konusmaci kaldirildi (altyazisiz aralikta klip 'Bilinmeyen', altyazi metni transkripte hic girmez), mikrofon
+klibi uzak kisi konusurken yalniz kulaklik VARSA kullanicinin (yoksa yanki: atilir); worker istisnasi
+(threading.excepthook + Qt sinyal koprusu), YakalamaIsi/ParcaIsi her yolda motor.bitir + bitis sinyali, not
+uretilirken Baslat kilidi. Ses cihazi, ag, Outlook gerekmez; adlar uydurma."""
 import datetime as dt
 import os
 import sys
@@ -12,84 +13,72 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")     # PyQt5 import edilmed
 import pytest
 
 import motor as motor_mod
+from metin import gorunen_ad
+from test_motor_faz1 import BEN, T0, akit, saat_kur
 
 
-def _motor(tmp_path, kaynak="ses", ben="Zeynep Örnek"):
-    return motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 30), duzelt=False, kaynak=kaynak, ben=ben)
+@pytest.fixture
+def saat(monkeypatch):
+    return saat_kur(monkeypatch)
 
 
-def _transkript(m):
-    return [(s["speaker"], s["kaynak"], s["text"]) for s in m.mevcut]
+A_, B_ = "Ayşe Demir", "Kisi B"
 
 
-# ---------------------------------------------------------------- 1) bos pencere tek konusmaci degil
+def _motor(tmp_path, ben=BEN):
+    m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date.fromtimestamp(T0), duzelt=False, ben=ben,
+                        katilimcilar=[A_, B_, ben])
+    m._isle = lambda veri, duzelt: None
+    return m
 
-def test_tek_konusmaci_bos_pencere_false(tmp_path):
+
+# ---------------------------------------------------------------- 1) altyazisiz aralik: tahmin yok
+
+def test_tek_konusmaci_ve_metin_benzerligi_kaldirildi():
+    for ad in ("_tek_konusmaci", "_konusmaci_bul", "_cakisanlar", "_bekleyen_altyazilar", "bekleyen_ses"):
+        assert not hasattr(motor_mod.Motor, ad), ad
+    assert not hasattr(motor_mod, "K5_UST") and not hasattr(motor_mod, "IKISI_BEKLE_SN")
+
+
+def test_altyazisiz_aralikta_klip_son_konusmaciya_yazilmaz(tmp_path, saat):
     m = _motor(tmp_path)
-    assert m._tek_konusmaci("10:00:05", "Kisi A") is False        # iz hic yok
-    m.altyazi_satiri({"ts": "10:00:00", "speaker": "Kisi A", "text": "Bütçe tablosunu güncelledim"})
-    assert m._tek_konusmaci("10:00:05", "Kisi A") is True         # pencerede yalniz Kisi A
-    assert m._tek_konusmaci("10:00:05", "Kisi B") is False
-    assert m._tek_konusmaci("10:00:25", "Kisi A") is False        # 25 sn sonra: pencere (±10) bos
+    # Kisi A 1-4 sn konusur; 20. sn'den sonra altyazi kapali; 25. sn'deki klip 'Bilinmeyen' (eskiden Kisi A)
+    akit(m, saat, [(A_, 1, 4)], [(1, "loopback", 1, 4, "Bütçe tablosunu güncelledim."),
+                                (2, "loopback", 25, 28, "Kampanya görsellerini de ekledim.")], 30,
+         kapali=((20, 60),))
+    assert [s["speaker"] for s in m.mevcut] == [A_, "?"] and gorunen_ad(m.mevcut[1]) == "Bilinmeyen"
     m.kapat()
 
 
-def test_altyazisiz_pencerede_whisper_satiri_son_konusmaciya_yazilmaz(tmp_path):
+# ---------------------------------------------------------------- 2) altyazi metni transkripte girmez
+
+def test_altyazi_metni_transkripte_hic_girmez(tmp_path, saat):
     m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:00", "speaker": "Kisi A", "text": "Bütçe tablosunu güncelledim"})
-    # 25 sn sonra altyazi yok (kapali/kayip): _konusmaci_bul (±30) Kisi A'yi bulur ama ±10 pencere bos
-    s = m.ses_satiri("10:00:25", None, "Kampanya görsellerini de ekledim", "loopback")
-    assert s["speaker"] == "?"
+    for i, kim in enumerate((A_, B_, "Kisi C")):
+        m.altyazi_satiri({"ts": "10:00:0%d" % i, "speaker": kim, "text": "Test ortamı perşembe hazır olacak"})
+    s = m.ses_olayi({"tur": "klip", "klip_no": 1, "akis": "loopback", "bas": T0, "bit": T0 + 2, "sure": 2.0,
+                     "text": "Test ortamı perşembe hazır olacak.", "ts": "10:00:02", "rms": 0.1, "zarf": [],
+                     "ust_klip": None, "supheli": False})
+    assert [x["kaynak"] for x in m.mevcut] == ["ses"] and m.mevcut[0] is s
     m.kapat()
 
 
-# ---------------------------------------------------------------- 2) K5 varsayilan kapali, K5_UST=0 kapatir
+# ---------------------------------------------------------------- 3) mikrofon klibi: ben / yanki
 
-def _k5_senaryosu(m):
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın onaylarım"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi B", "text": "Test ortamı perşembe hazır olacak"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi C", "text": "Yük testini pazartesi koşarız"})
-    return m.ses_satiri("10:00:02", None, "Test ortamı perşembe hazır olacak.", "loopback")
-
-
-def test_k5_varsayilan_kapali_altyazi_metni_girmez(tmp_path):
-    assert motor_mod.K5_UST == 0
+@pytest.mark.parametrize("kulaklik,beklenen", [(None, None), (True, BEN), (False, None)])
+def test_mikrofon_klibi_uzak_konusurken_yalniz_kulaklikla_ben(tmp_path, saat, kulaklik, beklenen):
+    """Ayse konusurken mikrofona ayni ses geldi, kullanicinin altyazisi yok: kulaklik varsa kullanicinin sozu
+    (dusuk guven), yoksa/bilinmiyorsa yanki -> satir atilir (loopback kopyasi zaten var). Kimseye yazilmaz."""
     m = _motor(tmp_path)
-    s = _k5_senaryosu(m)
-    assert s["speaker"] == "Kisi B"
-    assert [k for _, k, _ in _transkript(m)] == ["ses"]
-    assert not any(k.startswith("altyazi") for _, k, _ in _transkript(m))
-    m.kapat()
-
-
-def test_k5_ust_0_gercekten_kapatir_ust_n_tam_n_ekler(tmp_path, monkeypatch):
-    monkeypatch.setattr(motor_mod, "K5_UST", 0)
-    m = _motor(tmp_path)
-    _k5_senaryosu(m)
-    assert not any(k == "altyazi-cakisma" for _, k, _ in _transkript(m))
-    m.kapat()
-    # sinir EKLEMEDEN once denetlenir: UST=1 iken iki aday olsa da yalniz bir satir girer
-    monkeypatch.setattr(motor_mod, "K5_UST", 1)
-    m2 = motor_mod.Motor(str(tmp_path / "t2"), "Test", dt.date(2026, 9, 30), duzelt=False, kaynak="ses")
-    _k5_senaryosu(m2)
-    assert sum(1 for _, k, _ in _transkript(m2) if k == "altyazi-cakisma") == 1
-    m2.kapat()
-
-
-# ---------------------------------------------------------------- 3) mikrofon->baskasi yalniz kulaklik yokken
-
-def _yanki(m):
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Test ortamı perşembe hazır olacak"})
-    return m.ses_satiri("10:00:02", "ben", "Test ortamı perşembe hazır olacak.", "mikrofon")
-
-
-@pytest.mark.parametrize("kulaklik,beklenen", [(None, "Zeynep Örnek"), (True, "Zeynep Örnek"),
-                                               (False, "Ayşe Demir")])
-def test_mikrofon_satiri_yalniz_kulaklik_yokken_baskasina_gider(tmp_path, kulaklik, beklenen):
-    m = _motor(tmp_path)
-    assert m.kulaklik is None                                      # varsayilan: bilinmiyor
-    m.kulaklik = kulaklik
-    assert _yanki(m)["speaker"] == beklenen
+    m.ses_olayi({"tur": "kulaklik", "durum": kulaklik, "guven": 0.9})
+    akit(m, saat, [(A_, 1, 5)], [(1, "loopback", 1, 5, "Test ortamı perşembe hazır olacak."),
+                                (2, "mikrofon", 1.2, 4.8, "Test ortamı perşembe hazır olacak.")], 8)
+    mik = [s for s in m.mevcut if s["akis"] == "mikrofon"]
+    if beklenen is None:
+        assert mik == []
+    else:
+        assert [s["speaker"] for s in mik] == [beklenen] and gorunen_ad(mik[0]) == beklenen + "?"
+    assert [s["speaker"] for s in m.mevcut if s["akis"] == "loopback"] == [A_]
     m.kapat()
 
 
@@ -184,8 +173,9 @@ class SahteYakalayici:
     hata_at = None                                                  # sinif ozelligi: oku() bunu firlatir
     isi = None
 
-    def __init__(self):
+    def __init__(self, katilimcilar=(), okuma_fn=None):
         self.hazir = False
+        self.okuma_fn = okuma_fn
 
     def oku(self):
         if SahteYakalayici.hata_at:
@@ -211,9 +201,19 @@ class SahteMotor:
         self.klasor, self.kaynak, self.parca_no, self.mevcut_tok = klasor, kw.get("kaynak"), 0, 0
         self.seri, self.katilimcilar, self.bitir_sayisi, self.kulaklik = "x", [], 0, None
         self.ben, self.sablon = "Deneme Kisi", "genel"
+        self.ses_olay_sayisi, self.yeniden_kes_fn, self.stt = 0, None, []
 
     def altyazi_satiri(self, s):
         pass
+
+    def ses_olayi(self, olay):
+        pass
+
+    def okuma_ekle(self, okuma):
+        pass
+
+    def stt_durumu_ayarla(self, durum):
+        self.stt.append(durum)
 
     def kontrol(self):
         pass
@@ -238,6 +238,11 @@ def yakalama(ortam, monkeypatch):
     monkeypatch.setattr(isler, "Motor", SahteMotor)
     monkeypatch.setattr(isler, "ekran_okuyucu", lambda acik: None)
     monkeypatch.setattr(isler.motor_mod, "yeni_klasor", lambda baslik, tarih: str(ortam / "kayit"))
+    import ses
+
+    def ses_yok(*a, **k):
+        raise OSError("uydurma: ses cihazi yok")
+    monkeypatch.setattr(ses, "SesServisi", ses_yok)                 # ses kurulamaz: STT yok durumu, altyazi moduna dusmez
 
     def yap():
         isi = isler.YakalamaIsi("Deneme", {}, _Sozluk(), False, 30, {"kaynak": "altyazi"})
@@ -309,16 +314,14 @@ def test_parca_isi_istisnasi_hata_sinyali_verir(ortam, qapp):
     assert bitti == [] and len(hata) == 1 and "uydurma ozetleme hatasi" in hata[0]
 
 
-def test_yakalama_kulaklik_durumu_motora_gecer(yakalama, qapp):
-    isi, _ = yakalama()
-    isi.motor = SahteMotor("k", "b", None, None, None, "")
-    isi.motor.ses_satiri = lambda *a: None
-    isi.ses_servisi = type("S", (), {"kulaklik": False})()
-    isi._ses_satiri("10:00:00", "ben", "x", "mikrofon")
-    assert isi.motor.kulaklik is False
-    isi.ses_servisi = None
-    isi._ses_satiri("10:00:00", "ben", "x", "mikrofon")
-    assert isi.motor.kulaklik is None
+def test_yakalama_ses_kurulamazsa_altyazi_moduna_dusmez_stt_yok_bildirir(yakalama, qapp):
+    isi, olaylar = yakalama()
+    _calistir(qapp, isi, olaylar)
+    assert isi.motor.kaynak == "ses" and isi.ses_servisi is None
+    assert isi.motor.stt and isi.motor.stt[0]["durum"] == "kesinti"
+    tipler = [t for t, _ in olaylar["log"]]
+    assert "stt_durum" in tipler and "kaynak_degisti" not in tipler
+    assert any("artık yok" in str(v) for t, v in olaylar["log"] if t == "log")   # eski 'altyazi' ayari bildirilir
 
 
 # ---------------------------------------------------------------- 6) not uretilirken Baslat kilidi
@@ -444,3 +447,37 @@ def test_yakalama_motorsuz_biterse_arayuz_sifirlanir(pencere, qapp):
     p.b_ana.setEnabled(False)
     p.inceleme_hazir([])
     assert p.b_ana.isEnabled() and p.tamamla is None
+
+
+# ---------------------------------------------------------------- 7) canli gorunum: Faz 1 olaylari
+
+def test_canli_gorunum_beklemede_karar_sil_degistir_seritler(pencere, qapp):
+    p = pencere
+    p.ayar["altyazi_goster"] = True
+    s1 = {"id": 1, "klip_no": 1, "ts": "10:00:01", "speaker": "?", "spk_guven": 0.0, "text": "Birinci satır",
+          "kaynak": "ses", "durum": "beklemede"}
+    s2 = dict(s1, id=2, klip_no=2, ts="10:00:05", text="İkinci satır")
+    p.olay("satir", s1)
+    p.olay("satir", s2)
+    p.olay("altyazi_izi", {"ts": "10:00:02", "speaker": A_, "text": "bozuk altyazı", "guncelle": False})
+    assert "beklemede…" in p.akis.toPlainText() and "[altyazı]" in p.akis.toPlainText()
+    p.olay("satir_guncelle", dict(s1, speaker=A_, spk_guven=0.6, durum="karar"))
+    assert f"{A_}?: Birinci satır" in p.akis.toPlainText()
+    p.olay("satir_degistir", {"eski_id": 2, "yeni": [dict(s2, id=3, text="Parça bir", durum="karar", speaker=B_,
+                                                          spk_guven=0.9),
+                                                     dict(s2, id=4, text="Parça iki")]})
+    metin = p.akis.toPlainText()
+    assert "İkinci satır" not in metin and f"{B_}: Parça bir" in metin and metin.index("Parça bir") < \
+        metin.index("Parça iki")
+    p.olay("satir_sil", {"id": 1, "neden": "yanki"})
+    assert "Birinci satır" not in p.akis.toPlainText() and "bozuk altyazı" in p.akis.toPlainText()
+    p.olay("stt_durum", {"durum": "kesinti", "bas": T0, "eksik": [], "kayit": False})
+    assert p.stt_serit.isVisibleTo(p) and p.stt_serit.text().startswith("STT yok — transkript eksik (")
+    p.olay("stt_durum", {"durum": "ok", "bas": None, "eksik": [], "kayit": False})
+    assert not p.stt_serit.isVisibleTo(p)
+    p.olay("kapsama", {"var": False, "bas": T0})
+    assert p.kapsama_serit.isVisibleTo(p) and "Konuşmacı bilgisi yok" in p.kapsama_serit.text()
+    p.olay("kapsama", {"var": True, "bas": None})
+    assert not p.kapsama_serit.isVisibleTo(p)
+    assert p.a_kaynak.count() == 1 and p.a_kaynak.currentData() == "ses"
+    assert not p.a_altyazi_yedek.isChecked()

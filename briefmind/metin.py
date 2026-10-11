@@ -45,3 +45,47 @@ def ad_geciyor(ad, metin):
     if len(ad) < 3:
         return False
     return re.search(r"(?<!\w)" + re.escape(tr_kucuk(ad)) + r"(?!\w)", tr_kucuk(metin)) is not None
+
+
+KESIN_GUVEN = 0.7               # spk_guven bunun altindaysa ad "Ad?" gosterilir (gosterim kurali, MIMARI_v3 §3)
+
+
+def gorunen_ad(satir, esik=KESIN_GUVEN):
+    """Satirin konusmacisinin TEK gosterim kurali (canli ekran, not.md transkripti, LLM girdisi, Gecmis):
+    karar bekleniyor -> "beklemede…"; "?" -> "Bilinmeyen"; "A / B" cakisma -> "A / B (aynı anda)"; "A → B" oldugu
+    gibi; oda etiketi -> "Ad (oda)"; spk_guven < esik olan kisi adi -> "Ad?". spk_guven alani olmayan (v2 oncesi,
+    gocsuz) satirda ad degismez. jsonl'deki speaker alani degismez; bu yalniz gorunum katmanidir."""
+    if not isinstance(satir, dict):
+        return "Bilinmeyen"
+    if satir.get("durum") == "beklemede":
+        return "beklemede…"
+    ad = str(satir.get("speaker") or "").strip()
+    if not ad or ad == "?":
+        return "Bilinmeyen"
+    if " / " in ad:
+        return f"{ad} (aynı anda)" if satir.get("cakisma") else ad
+    if " → " in ad:
+        return ad
+    if satir.get("kimlik_turu") == "oda":
+        return f"{ad} (oda)"
+    guven = satir.get("spk_guven")
+    if isinstance(guven, (int, float)) and guven < esik and not ad.endswith("?"):
+        return ad + "?"
+    return ad
+
+
+def kesin_ad_mi(satir, esik=KESIN_GUVEN):
+    """Satirin konusmacisi kesin bir kisi adi mi? (katilimci listesi, sorumlu/sahip uretimi). "?", "Ad?",
+    birlesik adlar ("A → B", "A / B"), oda/genel etiketleri, karar bekleyen, eski (goc) ve altyazi yedegi
+    satirlari kesin degildir. spk_guven alani olmayan satir (v2 oncesi, gocsuz test verisi) eski davranisla kesin."""
+    if not isinstance(satir, dict):
+        return False
+    ad = str(satir.get("speaker") or "").strip()
+    if not ad or "?" in ad or " → " in ad or " / " in ad:
+        return False
+    if satir.get("durum") in ("beklemede", "eski") or satir.get("kaynak") == "altyazi-yedek":
+        return False
+    if satir.get("kimlik_turu") in ("oda", "genel", "hayalet"):
+        return False
+    guven = satir.get("spk_guven")
+    return not (isinstance(guven, (int, float)) and guven < esik)

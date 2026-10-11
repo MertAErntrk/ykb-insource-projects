@@ -1,16 +1,26 @@
 """Altyazi tasmasi (2026-09-30): Teams toplanti penceresinin paneli kalabalik toplantida 30'dan fazla satir
 gosterince eski hizalama her okumada 0 cikiyor, panel her 0,6 sn'de yeniden yayiliyordu. Yakalayicinin panel
-boyutundan bagimsiz yayimi, motorun guvenlik agi (hiz siniri, K5 sinirlari), bozuk kaydin temizlenmesi
-(transkript_temizle, tasma_var_mi) ve 'Yeniden ozetle'nin temizligi cagirmasi. Ag/Teams gerekmez; adlar uydurma."""
+boyutundan bagimsiz yayimi, Faz 1'de altyazi metninin transkripte hic girmemesi (tasma transkripti bozamaz),
+bozuk kaydin temizlenmesi (transkript_temizle, tasma_var_mi) ve 'Yeniden ozetle'nin temizligi cagirmasi.
+Ag/Teams gerekmez; adlar uydurma."""
 import datetime as dt
 import glob
 import json
 import os
 import random
 
+import pytest
+
 import llm
 import motor as motor_mod
 import yakalayici
+from test_motor_faz1 import T0, SahteKonusmaci, karar, klip, saat_kur
+
+
+@pytest.fixture
+def saat(monkeypatch):
+    return saat_kur(monkeypatch)
+
 
 KISILER = [f"Kisi{h} Soyad{h}" for h in "ABCDEFGHIJKLMN"]          # 14 uydurma katilimci
 KONULAR = ["rapor ekranı", "test ortamı", "kampanya modülü", "veritabanı indeksi", "yük testi", "oryantasyon",
@@ -137,104 +147,53 @@ def test_canli_buyuyen_son_satir_yayilmaz_cok_konusmaci():
     assert [s["text"] for s in y.bitir()] == [b]
 
 
-# ---------------------------------------------------------------- motor: guncelleme, hiz siniri, K5 sinirlari
+# ---------------------------------------------------------------- motor: guncelleme, tasma (Faz 1)
+# Eskiden altyazi satiri transkripte giriyordu (altyazi modu, K5, A6); tasmaya karsi hiz siniri ve K5 sinirlari
+# vardi. Faz 1'de altyazi metni transkripte hic girmez: tasma transkripti bozamaz. Satir guncellemesi artik
+# konusmaci kararidir (altyazi buyumesi degil); kapanmis parcadaki satir da guncellenir (eskiden atlaniyordu).
 
-def _motor(tmp_path, kaynak="ses", ben="Zeynep Örnek", olay=None):
-    return motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 30), duzelt=False, kaynak=kaynak, ben=ben,
-                           olay=olay)
+def _motor(tmp_path, ben="Zeynep Örnek", olay=None):
+    m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date.fromtimestamp(T0), duzelt=False, ben=ben, olay=olay)
+    m._isle = lambda veri, duzelt: None
+    m.konusmaci = SahteKonusmaci()
+    return m
 
 
-def _transkript(m):
-    return [(s["speaker"], s["kaynak"], s["text"]) for s in m.mevcut]
-
-
-def test_guncelleme_acik_parcada_yerinde_uygulanir(tmp_path):
+def test_karar_guncellemesi_acik_ve_kapanmis_parcada_uygulanir(tmp_path, saat):
     olaylar = []
-    m = _motor(tmp_path, kaynak="altyazi", olay=lambda t, v: olaylar.append((t, v)))
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Rapor ekranındaki gecikmeyi"})
+    m = _motor(tmp_path, olay=lambda t, v: olaylar.append((t, v)))
+    s = m.ses_olayi(klip(1, 0, 3, "Rapor ekranındaki gecikmeyi bu sprintte çözelim"))
     tok = m.mevcut_tok
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Rapor ekranındaki gecikmeyi bu sprintte çözelim",
-                      "guncelle": True, "onceki_text": "Rapor ekranındaki gecikmeyi"})
-    assert _transkript(m) == [("Kisi A", "altyazi", "Rapor ekranındaki gecikmeyi bu sprintte çözelim")]
-    assert m.mevcut[0]["raw"].endswith("çözelim") and m.mevcut_tok > tok
+    m.konusmaci.kararlar = [karar(1, "Kisi A", 0.9)]
+    m.kontrol()
+    assert m.mevcut[0]["speaker"] == "Kisi A" and m.mevcut_tok >= tok
     g = [v for t, v in olaylar if t == "satir_guncelle"]
-    assert g and g[-1]["text"].endswith("çözelim") and g[-1]["id"] == m.mevcut[0]["id"]
-    kayit = motor_mod.altyazi_kayitlari(str(tmp_path / "t"))
-    assert [s["text"] for s in kayit] == ["Rapor ekranındaki gecikmeyi bu sprintte çözelim"]
-    # parca kapandiktan sonra gelen guncelleme: eski hali kalir, bir log satiri
+    assert g and g[-1]["id"] == s["id"] and g[-1]["text"].endswith("çözelim")
+    assert [x["speaker"] for x in motor_mod.altyazi_kayitlari(str(tmp_path / "t"))] == ["Kisi A"]
+    # parca kapandiktan sonra gelen karar: parca dosyasi ve jsonl guncellenir, bir log satiri
+    m.ses_olayi(klip(2, 4, 6, "Test ortamı perşembe hazır"))
+    m.konusmaci.bekleyen_fn = lambda bas, bit: 2 if bas is None else 1
     m.parca_kapat("test")
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A",
-                      "text": "Rapor ekranındaki gecikmeyi bu sprintte çözelim mi",
-                      "guncelle": True, "onceki_text": "Rapor ekranındaki gecikmeyi bu sprintte çözelim"})
-    assert m.mevcut == [] and any(t == "log" and "kapanmış parçada" in v for t, v in olaylar)
+    saat.t += motor_mod.KAPANIS_BEKLE_SN + 1
+    m.kontrol()
+    assert m.mevcut == [] and m.parca_oku(1)["satirlar"][1]["speaker"] == "?"
+    m.konusmaci.kararlar = [karar(2, "Kisi B", 0.8)]
+    m.kontrol()
+    assert m.parca_oku(1)["satirlar"][1]["speaker"] == "Kisi B"
+    assert any(t == "log" and "kapanmış parça" in v for t, v in olaylar)
     m.kapat()
 
 
-def test_k5_ile_eklenen_satirin_guncellemesi(tmp_path, monkeypatch):
-    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
-    m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi B", "text": "Test ortamı perşembe hazır olacak"})
-    m.ses_satiri("10:00:02", None, "Test ortamı perşembe hazır olacak.", "loopback")
-    assert ("Kisi A", "altyazi-cakisma", "Kampanya bütçesini yarın") in _transkript(m)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın onaylarım",
-                      "guncelle": True, "onceki_text": "Kampanya bütçesini yarın"})
-    assert ("Kisi A", "altyazi-cakisma", "Kampanya bütçesini yarın onaylarım") in _transkript(m)
-    assert len(m.mevcut) == 2 and len(m.konusmaci_izi) == 2
-    m.kapat()
-
-
-def test_altyazi_tasmasinda_k5_askiya_alinir_whisper_etkilenmez(tmp_path, monkeypatch):
-    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
-    saat = [1000.0]
-    monkeypatch.setattr(motor_mod.time, "time", lambda: saat[0])
+def test_altyazi_tasmasi_transkripti_etkilemez(tmp_path, saat):
     olaylar = []
     m = _motor(tmp_path, olay=lambda t, v: olaylar.append((t, v)))
     for i in range(160):                                     # 1 dakikada 160 altyazi satiri: tasma
-        saat[0] += 0.3
+        saat.t += 0.3
         m.altyazi_satiri({"ts": "10:00:%02d" % (i % 4), "speaker": KISILER[i % 3],
                           "text": f"Eski panel satırı {i % 5} yeniden yayıldı"})
-    loglar = [v for t, v in olaylar if t == "log" and "altyazı taşması" in v]
-    assert len(loglar) == 1 and "askıya alındı" in loglar[0]
-    s = m.ses_satiri("10:00:02", "Kisi D", "Yük testi raporunu pazartesi paylaşırım.", "loopback")
-    assert s is not None and [x[1] for x in _transkript(m)] == ["ses"]      # yalniz Whisper satiri
-    # tasma bitti: 61 sn sonra yeni satirlar normal islenir (askidaki satirlar sonradan eklenmez)
-    saat[0] += 61
-    m.altyazi_satiri({"ts": "10:02:00", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın onaylarım"})
-    m.altyazi_satiri({"ts": "10:02:01", "speaker": "Kisi B", "text": "Test ortamı hazır olacak"})
-    m.ses_satiri("10:02:01", None, "Test ortamı hazır olacak.", "loopback")
-    assert [x[1] for x in _transkript(m)] == ["ses", "altyazi-cakisma", "ses"]
-    m.kapat()
-
-
-def test_k5_satir_basina_ust_sinir_ve_ayni_kisiden_bir(tmp_path, monkeypatch):
-    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
-    m = _motor(tmp_path)
-    for i, kim in enumerate(["Kisi A", "Kisi A", "Kisi B", "Kisi C", "Kisi D", "Kisi E"]):
-        m.altyazi_satiri({"ts": "10:00:0%d" % (i % 4), "speaker": kim,
-                          "text": f"{KONULAR[i]} konusunu ayrıca konuşalım"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi F", "text": "Bağlantı havuzunu büyütüp testi yeniden koşarım"})
-    s = m.ses_satiri("10:00:02", None, "Bağlantı havuzunu büyütüp testi yeniden koşarım.", "loopback")
-    assert s["speaker"] == "Kisi F"
-    eklenen = [x for x in _transkript(m) if x[1] == "altyazi-cakisma"]
-    assert len(eklenen) == motor_mod.K5_UST == 3
-    assert len({x[0] for x in eklenen}) == 3                 # ayni konusmacidan en fazla bir
-    m.kapat()
-
-
-def test_k5_son_2_dakikada_yazilmis_metni_eklemez(tmp_path, monkeypatch):
-    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
-    m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın onaylarım"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi B", "text": "Test ortamı hazır olacak"})
-    m.ses_satiri("10:00:02", None, "Test ortamı hazır olacak.", "loopback")
-    assert sum(1 for x in _transkript(m) if x[1] == "altyazi-cakisma") == 1
-    # ayni metin (eski panelden) yeniden geldi: transkripte ikinci kez girmez, kullanildi isaretlenir
-    m.altyazi_satiri({"ts": "10:00:40", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın onaylarım"})
-    m.altyazi_satiri({"ts": "10:00:41", "speaker": "Kisi B", "text": "Yük testi pazartesi biter"})
-    m.ses_satiri("10:00:41", None, "Yük testi pazartesi biter.", "loopback")
-    assert sum(1 for x in _transkript(m) if x[1] == "altyazi-cakisma") == 1
-    assert m.konusmaci_izi[2]["kullanildi"] == "altyazi"
+    assert m.mevcut == [] and sum(1 for t, _ in olaylar if t == "altyazi_izi") == 160
+    s = m.ses_olayi(klip(1, 0, 3, "Yük testi raporunu pazartesi paylaşırım."))
+    assert s is not None and [x["kaynak"] for x in m.mevcut] == ["ses"]      # yalniz Whisper satiri
     m.kapat()
 
 

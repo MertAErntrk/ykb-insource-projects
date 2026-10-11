@@ -1,18 +1,28 @@
 """
 motor.py — toplanti notu boru hatti (UI'dan bagimsiz).
 
-Akis:  satir_ekle() -> sozluk (birebir+bulanik) -> altyazi.jsonl -> parca
-       parca kapaninca arka planda: [duzeltme gecisi] -> ozet -> oneri kuyrugu
-       bitir()             -> son parcayi kapatir, ozetleri bekler, bekleyen onerileri verir
-       kararlari_uygula()  -> onaylananlar sozluge + tum parcalara uygulanir, degisen parcalar
-                              yeniden ozetlenir (sadece onlar)
+Akis (Faz 1, docs/MIMARI_v3.md §3):
+       ses_olayi(klip)     -> satir v2 hemen olusur (konusmaci 'beklemede…'), altyazi.jsonl + acik parca
+       okuma_ekle(okuma)   -> konusmaci.py cizelgesi (Teams altyazi METNI transkripte girmez; yalniz ad + zaman)
+       kontrol()           -> hazir konusmaci kararlari satirlara (satir_guncelle), yanki klibi atilir (satir_sil),
+                              klip ici devirde yeniden kesme (yeniden_kes_fn; parcalar gelince satir_degistir)
+       parca kapaninca arka planda: [duzeltme gecisi] -> ozet -> oneri kuyrugu (kapanis bekleyen kararlari en fazla
+                              KAPANIS_BEKLE_SN bekler)
+       bitir()             -> bekleyen kararlar zorlanir, son parcayi kapatir, ozetleri bekler, bekleyen onerileri verir
+       kararlari_uygula()  -> onaylananlar sozluge + tum parcalara uygulanir, degisen parcalar yeniden ozetlenir
        notu_uret()         -> birlestirme -> sorumlu dogrulama -> dayanak kontrolu -> not.md
        yeniden_ozetle()    -> (Gecmis) sozluk tum parcalara, TUM parcalar yeniden duzeltme + ozet
 
-Disk (toplantilar/<tarih>_<slug>/): meta.json, altyazi.jsonl, parcalar/parca_NNN.json, oneriler.json, not.md
-olay(tip, veri) geri cagrisi: "satir", "satir_guncelle" ({"id", "speaker"[, "text"]}: konusmaci atandi ya da
-       altyazi satiri buyudu), "parca_kapandi", "parca_ozetlendi", "oneri", "log",
+Disk (toplantilar/<tarih>_<slug>/): meta.json, altyazi.jsonl (satir v2 + {'guncelle'} / {'sil'} kayitlari),
+       parcalar/parca_NNN.json, oneriler.json, not.md, cizelge.json (konusmaci araliklari, metin yok),
+       olaylar.jsonl (konusmaci gunlugu)
+olay(tip, veri) geri cagrisi: "satir" (yeni satir, konusmaci beklemede), "satir_guncelle" (satirin tamami + "gorunen":
+       konusmaci karari geldi), "satir_sil" ({"id", "neden"}: yanki klibi atildi), "satir_degistir" ({"eski_id",
+       "yeni": [satir, ...]}: yeniden kesilen klibin satiri parcalariyla degisti), "altyazi_izi" (canli altyazi
+       gorunumu; transkripte girmez), "kapsama" ({"var", "bas"}: konusmaci bilgisi 60 sn'den uzun yok / geri geldi),
+       "stt_bosluk", "parca_kapandi", "parca_ozetlendi", "oneri", "log",
        "adim" ({"metin", "no", "toplam"}: not uretiminin/yeniden ozetlemenin o anki asamasi; arayuz seridi)
+Gosterim: konusmaci adi her yuzeyde metin.gorunen_ad ile yazilir ("Ad?", "Bilinmeyen", "A / B (aynı anda)").
 """
 import concurrent.futures as cf
 import datetime as dt
@@ -22,30 +32,31 @@ import re
 import shutil
 import threading
 import time
-from collections import deque
+from collections import OrderedDict
 
 import llm
 import rag
 import tarih as tarih_mod
-from metin import ad_geciyor, metin_benzerligi, tr_kucuk
+from konusmaci import Konusmaci
+from metin import ad_geciyor, gorunen_ad, kesin_ad_mi, tr_kucuk
 from sozluk import Sozluk, normalize
 
 KOK = "toplantilar"
+SURUM = 2                       # satir veri modeli (MIMARI_v3 §3); surumsuz kayitlar yuklenirken goc eder
 PARCA_TOKEN = 0                 # 0: LLM baglam penceresine gore (llm.butce("parca"): 8k 2500, 16k 3000, 32k+ 4000)
 PARCA_SURE_SN = 12 * 60
 SESSIZLIK_SN = 180
 SESSIZLIK_MIN_TOKEN = 500
 DUZELT_MIN_TOKEN = 800          # bundan kucuk (genelde son) parcada duzeltme gecisi atlanir
 PARALEL = 0                     # 0: llm.butce("paralel") (varsayilan 2; config.json 'paralel' ile artirilabilir)
-CAKISMA_SN = 4                  # K5: Whisper satiriyla ayni anda (±) konusan baska kisinin altyazisi aranir
-CAKISMA_KAPSAMA = 0.30          # K5: altyazi koklerinin en fazla bu kadari Whisper'da geciyorsa soz kaybolmus
-IKISI_BEKLE_SN = 8              # A6: 'ikisi' modunda altyazi satiri Whisper karsiligini bu kadar bekler
-AYNI_SOZ = 0.45                 # Whisper cumlesi ile altyazi satiri ayni sozu tasiyor (metin_benzerligi)
-# Altyazi tasmasina karsi guvenlik agi (2026-09-30: panel her okumada yeniden yayiliyordu, bkz. GELISTIRME_PLANI 13)
-TASMA_SATIR_DK = 150            # son 60 sn'de bundan fazla altyazi satiri: tasma, K5/A6 eklemeleri askiya alinir
-TASMA_ASKI_SN = 60              # ... son asiri hizli satirdan sonra bu kadar sure
-K5_UST = 0                      # K5: Whisper satiri basina en fazla bu kadar altyazi satiri eklenir (0: K5 kapali, varsayilan)
-TEKRAR_SN = 120                 # K5/A6: son 2 dk'da transkripte girmis bir satirla birebir ayni metin eklenmez
+KAPANIS_BEKLE_SN = 20           # parca kapanisi satirlarinin konusmaci kararini en fazla bu kadar bekler
+KESIM_BEKLE_SN = 20             # yeniden kesilen klibin iki parcasi en fazla bu kadar beklenir
+GEC_KESIM_TAVAN = 500           # suresi dolmus (parcasi eksik) kesimlerde gec parca icin tutulan en fazla kayit
+OZET_YENI_SN = 10               # kapanmis parcaya gec satir girdiyse yeniden ozet bu kadar sessizlikten sonra
+KAPSAMA_UYARI_SN = 60           # konusmaci bilgisi (altyazi cizelgesi) bu kadar yoksa arayuz uyarir
+YEDEK_GUVEN = 0.6               # altyazi yedegi satirinin spk_guven'i (gosterim 'Ad?', sahip uretmez)
+ESKI_GUVEN = 0.5                # v2 oncesi kayitlarin spk_guven'i (goc)
+KLIP_TAVAN = 5000               # klip_no -> satir eslemesinde tutulan en fazla kayit
 # Bozuk (tasmis) kaydin algisi ve temizligi (transkript_temizle, tasma_var_mi)
 TASMA_ALGI_DK = 120             # dakikada bundan fazla satir
 TASMA_ALGI_TEKRAR = 0.30        # ya da (konusmaci, metin) birebir tekrar orani
@@ -65,10 +76,6 @@ def slug(s):
     for a, b in zip("çğıöşü", "cgiosu"):
         s = s.replace(a, b)
     return re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:40] or "toplanti"
-
-
-KISA_ONAY = {"evet", "hayır", "tamam", "peki", "yok", "ok", "olur", "aynen", "doğru", "tamamdır", "teşekkürler",
-             "selam", "merhaba", "selamlar"}
 
 
 def _kokler(metin):
@@ -160,6 +167,7 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
 
 
 def _sn(x):
+    """'HH:MM[:SS]' -> gun icindeki saniye (gecersizse 0). Iki saat arasindaki fark icin _sn_fark (gece yarisi)."""
     try:
         p = [int(k) for k in str(x).split(":")]
         return p[0] * 3600 + p[1] * 60 + (p[2] if len(p) > 2 else 0)
@@ -167,19 +175,72 @@ def _sn(x):
         return 0
 
 
+def _sn_fark(a, b):
+    """a - b (sn); gece yarisini gecen saatlerde 24 saat sarar: 00:00:05 - 23:59:50 = 15 (eskiden -86385)."""
+    d = (_sn(a) - _sn(b)) % 86400
+    return d - 86400 if d >= 43200 else d
+
+
+def _ts(epoch):
+    """epoch -> yerel 'HH:MM:SS'."""
+    try:
+        return dt.datetime.fromtimestamp(float(epoch)).strftime("%H:%M:%S")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "00:00:00"
+
+
+def _konusan(s):
+    """Transkriptte yazilan konusmaci: gosterim kurali (+ altyazi yedegi isareti)."""
+    ad = gorunen_ad(s)
+    if s.get("kaynak") == "altyazi-yedek":
+        ad += " (altyazıdan, düşük güven)"
+    return ad
+
+
 def blok_metni(satirlar):
     birlesik = []
     for s in satirlar:
-        if birlesik and birlesik[-1][0] == s["speaker"]:
-            birlesik[-1] = (s["speaker"], birlesik[-1][1] + " " + s["text"])
+        kim = _konusan(s)
+        if birlesik and birlesik[-1][0] == kim:
+            birlesik[-1] = (kim, birlesik[-1][1] + " " + s["text"])
         else:
-            birlesik.append((s["speaker"], s["text"]))
+            birlesik.append((kim, s["text"]))
     return "\n".join(f"{k}: {t}" for k, t in birlesik)
+
+
+def satirlari_goc(satirlar, tarih):
+    """v2 oncesi satirlar ('surum' yok, MIMARI_v3 §3 geriye uyum): bas=bit=ts'den epoch (gece yarisi sarmali),
+    spk_guven 0.5, durum 'eski' -> gosterimde 'Ad?', sahip ve katilimci uretmez. Yerinde degistirir.
+    Dondurur: goc eden satir sayisi."""
+    n, onceki, gun = 0, None, 0
+    try:
+        taban = dt.datetime.combine(tarih, dt.time()).timestamp()
+    except Exception:
+        taban = 0.0
+    for s in satirlar or []:
+        if not isinstance(s, dict):
+            continue
+        t = _sn(s.get("ts"))
+        if onceki is not None and t < onceki - 12 * 3600:
+            gun += 1                                         # toplanti gece yarisini gecti
+        onceki = t
+        if s.get("surum"):
+            continue
+        e = taban + gun * 86400 + t
+        s.setdefault("bas", e)
+        s.setdefault("bit", s["bas"])
+        if s.get("durum") != "eski":
+            s["spk_guven"], s["durum"] = ESKI_GUVEN, "eski"
+        for k, v in (("adaylar", []), ("devir", False), ("cakisma", False), ("supheli", False), ("belirsiz", []),
+                     ("duzeltmeler", [])):
+            s.setdefault(k, v)
+        n += 1
+    return n
 
 
 class Motor:
     def __init__(self, klasor, baslik, tarih, sozluk=None, katilimcilar=None, gundem="",
-                 duzelt=True, olay=None, kaynak="altyazi", ben=None, sablon="genel"):
+                 duzelt=True, olay=None, kaynak="ses", ben=None, sablon="genel", esikler=None, altyazi_yedek=False):
         self.klasor, self.baslik, self.tarih = klasor, baslik, tarih
         self.sozluk = sozluk or Sozluk()
         self.katilimcilar = list(katilimcilar or [])
@@ -192,21 +253,38 @@ class Motor:
         self.mevcut, self.mevcut_tok, self.mevcut_bas, self.son_satir = [], 0, None, None
         self.parca_no = len([f for f in os.listdir(self.parca_klasor) if f.endswith(".json")])
         self.seri = slug(baslik)             # toplanti serisi (sozluk kapsami, baglam ayirimi)
-        self.kaynak = kaynak                 # altyazi | ses | ikisi
+        self.kaynak = kaynak                 # yeni toplanti: hep "ses"; eski kayitta meta'daki deger korunur
         self.ben = ben                       # mikrofon akisinin sahibi (kullanicinin adi)
-        self.kulaklik = None                 # True: kulaklik var | False: yok (hoparlor, eko) | None: bilinmiyor
-        # altyazidan: {"ts", "speaker", "text", "kullanildi", "son"}. kullanildi: None | "ses" (bir Whisper
-        # satiri bu sozu yazdi) | "altyazi" (altyazi metni transkripte girdi: K5 cakisma ya da A6 zaman asimi).
-        # son: 'ikisi' modunda Whisper karsiliginin beklendigi son an (A6), digerlerinde None.
-        self.konusmaci_izi = []
-        self._son_ses = []                   # son Whisper satirlari {"ts", "text"} (K5 kapsama, A6 eslesme)
-        self._iz_kilit = threading.RLock()   # altyazi (yakalama is parcacigi) ve Whisper (STT iscileri) ayni izi kullanir
-        self.bekleyen_ses = []               # konusmacisi henuz bilinmeyen Whisper satirlari
-        self._alt_zaman = deque()            # son 60 sn'deki altyazi satirlarinin gelis anlari (tasma algisi)
-        self._askida_sona = 0.0              # bu ana kadar K5/A6 altyazi eklemeleri askida
-        self._k5_eklenen = deque(maxlen=200)  # K5 ile eklenen (konusmaci, sn): ayni kisiden ±4 sn'de en fazla 1
-        self._son_transkript = deque(maxlen=600)  # (sn, normalize(metin)): son transkript satirlari (tekrar denetimi)
-        self.uyum = []                       # son Whisper cumlelerinin altyaziyla benzerligi (0-1)
+        self.kulaklik = None                 # pasif tespit (ses 'kulaklik' olayi): True | False | None
+        self.altyazi_yedek = bool(altyazi_yedek)   # opt-in: STT yokken altyazi metni 'altyazi-yedek' olarak girer
+        self.kilit = threading.Lock()
+        self._gunluk_kilit = threading.Lock()
+        self._iz_kilit = threading.RLock()   # ses olaylari (STT iscileri) ve okumalar (yakalama dongusu) ayni durumu kullanir
+        self.konusmaci = Konusmaci(ben=ben, katilimcilar=self.katilimcilar, esikler=esikler,
+                                   olay_fn=self._konusmaci_olayi)
+        self.yeniden_kes_fn = None           # isler: SesServisi.yeniden_kes(klip_no, an) -> bool
+        self._satir_no = 0
+        self._klip_satir = {}                # klip_no -> satir (karar, kesim; kapanmis parcadakiler dahil, tavanli)
+        self._satir_parca = {}               # satir id -> kapanmis parcanin sirasi
+        self._parca_veri = {}                # sira -> parca verisi (gec karar/kesim; _isle ayni nesneyi yazar)
+        self._kesimler = {}                  # ust klip_no -> {"son", "gelen", "parcalar": [satir]}
+        self._kesilen = set()                # parcalari yerine konmus ust klip_no'lar
+        self._gec_kesim = OrderedDict()      # ust klip_no -> [parca satir]: sure doldu, ozgun satir 'A → B' kaldi,
+                                             # parcalar gec gelirse ikisi gelince ozgunun yerine gecer
+        self._parca_nesil = {}               # sira -> kapanmis parcanin satir listesi degisim sayaci (gec satir)
+        self._ozet_kirli = {}                # sira -> son gec satir zamani (yeniden ozet bekliyor)
+        self._silinen = set()                # atilmis / degistirilmis satir id'leri
+        self._kapanis = None                 # ertelenmis parca kapanisi {"neden", "son", "sinir": {id}}
+        self._bitiyor = False
+        self._goc = False                    # Motor.yukle: surumsuz satirlar okunurken goc eder
+        self.stt_kesik = False               # STT kesintisi (isler: SesServisi.stt_durumu)
+        self._stt_eksik = []                 # ses servisinin hic cozulemeyecek araliklari [[bas, bit]]
+        self._bosluklar = []                 # [(akis, bas, bit)] cozulmemis klip araliklari ('bosluk' olaylari)
+        self._yuklu_eksik = []               # yuklenen kaydin meta.json'daki stt_eksik'i
+        self._yedek_son = {}                 # (konusmaci, metin) -> altyazi yedegi satir id'si (buyuyen satir)
+        self._kapsama_yok_bas = None
+        self._kapsama_uyarildi = False
+        self.ses_olay_sayisi = 0             # gelen klip/bosluk olayi (isler: 'yakalama basladi')
         self.oneriler = []
         self._oneri_yolu = os.path.join(klasor, "oneriler.json")
         if os.path.exists(self._oneri_yolu):
@@ -214,8 +292,6 @@ class Motor:
                 self.oneriler = json.load(f)
         self.havuz = cf.ThreadPoolExecutor(max_workers=paralel())
         self.isler = []
-        self.kilit = threading.Lock()
-        self._gunluk_kilit = threading.Lock()
         llm.GUNLUK_FN = self._llm_gunluk
         llm.UYARI_FN = lambda m: self.log(f"  ! LLM: {m}")
         llm.SON_HATA = None                  # arayuz 'Not eksik' satirinda bu toplantinin son LLM hatasini gosterir
@@ -269,7 +345,10 @@ class Motor:
         # _onceki_konular bir onceki parcayi okurken o parcanin ozeti yaziliyor olabilir
         with self.kilit:
             with open(self.parca_yolu(no), encoding="utf-8") as f:
-                return json.load(f)
+                veri = json.load(f)
+        if self._goc:
+            satirlari_goc(veri.get("satirlar"), self.tarih)       # v2 oncesi kayit: 'Ad?', sahip uretmez
+        return veri
 
     def parca_yaz(self, veri):
         with self.kilit:
@@ -299,396 +378,613 @@ class Motor:
         parcalar.append(blok_metni(self.mevcut))
         return "\n".join(parcalar)
 
-    # ---------- yakalama tarafi ----------
-    def altyazi_satiri(self, satir):
-        """Altyazidan gelen satir: konusmaci-zaman haritasina (iz) yazilir.
-        'altyazi': normal satir olarak hemen islenir. 'ses': nota girmez (metni Whisper veriyor).
-        'ikisi' (A6): hemen girmez; IKISI_BEKLE_SN icinde benzer bir Whisper satiri gelirse (ya da gelmisse)
-        duser, gelmezse kontrol() altyazi satirini ekler (Whisper kacirmis)."""
+    # ---------- yakalama tarafi (Faz 1: konusmaci yalniz zamandan, konusmaci.py) ----------
+    def _konusmaci_olayi(self, d):
+        """Konusmaci gunlugu (sozluk, metin yok) -> olaylar.jsonl."""
+        try:
+            kayit = dict(d, an=round(time.time(), 3))
+            with self._gunluk_kilit:
+                with open(os.path.join(self.klasor, "olaylar.jsonl"), "a", encoding="utf-8") as f:
+                    f.write(json.dumps(kayit, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _jsonl(self, kayit):
+        with self._gunluk_kilit:
+            with open(os.path.join(self.klasor, "altyazi.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(kayit, ensure_ascii=False) + "\n")
+
+    def ses_olayi(self, olay):
+        """Ses servisinin olaylari (C1, SesServisi(olay_fn=...)); STT iscisi is parcacigindan cagrilir.
+        klip: satir v2 hemen olusur, konusmaci 'beklemede…' (karar kontrol()'de gelir); ust_klip'li klip yeniden
+        kesilen satirin parcasidir. bosluk: STT kesintisi araligi (nota 'transkript eksik'). kulaklik: pasif tespit.
+        capa: ses saat capasi yenilendi (konusmaci L capalarini duzeltir).
+        Dondurur: olusan satir | None."""
+        if not isinstance(olay, dict):
+            return None
+        tur = olay.get("tur")
         with self._iz_kilit:
-            if satir.get("guncelle") and self._altyazi_guncelle(satir):
-                return
-            satir = {k: v for k, v in satir.items() if k not in ("guncelle", "onceki_text")}
-            giris = {"ts": satir["ts"], "speaker": satir["speaker"], "text": satir.get("text", ""),
-                     "kullanildi": None, "son": None, "satir_id": None}
-            self.konusmaci_izi.append(giris)
-            self.konusmaci_izi = self.konusmaci_izi[-400:]
-            if satir["speaker"] not in self.katilimcilar and satir["speaker"] != "?":
-                self.katilimcilar.append(satir["speaker"])
-            askida = self._tasma_denetle()
-            if self.kaynak == "altyazi":
-                giris["kullanildi"] = "altyazi"
-                if askida and self._yakin_tekrar(satir["ts"], satir["text"]):
-                    return              # tasma surerken birebir tekrar transkripte girmez
-                yeni = self.satir_ekle(satir)
-                giris["satir_id"] = yeni["id"] if yeni else None
-                return
-            if askida:
-                giris["kullanildi"] = "askida"      # konusmaci haritasinda kalir, transkripte eklenmez
-            if self.kaynak == "ikisi":
-                giris["son"] = time.time() + IKISI_BEKLE_SN
-                # altyazi genelde Whisper'dan 1-3 sn gec gelir: ayni soz zaten yazilmis olabilir
-                hedef = _sn(giris["ts"])
-                if any(abs(_sn(w["ts"]) - hedef) <= 30 and metin_benzerligi(w["text"], giris["text"]) >= AYNI_SOZ
-                       for w in self._son_ses):
-                    giris["kullanildi"] = "ses"
-            self._olay("altyazi_izi", {"ts": satir["ts"], "speaker": satir["speaker"],
-                                       "text": satir["text"]})
-            self._bekleyenleri_coz()
-
-    def _altyazi_guncelle(self, satir):
-        """Yakalayici: Teams yayilmis bir satiri buyuttu/duzeltti. Iz girdisi yerinde guncellenir; satir
-        transkripte girdiyse (altyazi modu, K5, A6) acik parcadaki hali de guncellenir. Iz girdisi bulunamazsa
-        False (cagiran yeni satir olarak isler)."""
-        g = next((x for x in reversed(self.konusmaci_izi)
-                  if x["speaker"] == satir["speaker"] and x["text"] == satir.get("onceki_text")), None)
-        if g is None:
-            if self.kaynak == "altyazi":
-                self.satir_ekle(satir)          # iz kirpilmis olabilir: acik parcada metinle aranir
-                return True
-            return False
-        g["text"] = satir["text"]
-        if g["kullanildi"] == "altyazi" and (g.get("satir_id") or self.kaynak == "altyazi"):
-            self.satir_ekle(dict(satir, id=g.get("satir_id")))
-        return True
-
-    def _tasma_denetle(self):
-        """Son 60 sn'de TASMA_SATIR_DK'dan fazla altyazi satiri: altyazi tasmasi. K5/A6 eklemeleri son asiri
-        hizli satirdan TASMA_ASKI_SN sonrasina kadar askiya alinir (Whisper satirlari etkilenmez). Tasma
-        basina bir kez loglanir. Dondurur: su an askida mi."""
-        simdi = time.time()
-        z = self._alt_zaman
-        z.append(simdi)
-        while z and simdi - z[0] > 60:
-            z.popleft()
-        if len(z) > TASMA_SATIR_DK:
-            if simdi >= self._askida_sona:
-                self.log(f"! altyazı taşması: {len(z)} satır/dk, altyazı eklemeleri askıya alındı "
-                         f"({TASMA_ASKI_SN} sn; Whisper satırları etkilenmez)")
-            self._askida_sona = simdi + TASMA_ASKI_SN
-        return simdi < self._askida_sona
-
-    def _askida(self):
-        return time.time() < self._askida_sona
-
-    def _yakin_tekrar(self, ts, metin):
-        """Metin, son TEKRAR_SN icinde transkripte girmis bir satirla (normalize) birebir ayni mi?"""
-        n, hedef = normalize(metin or ""), _sn(ts)
-        return bool(n) and any(m == n and abs(hedef - t) <= TEKRAR_SN for t, m in self._son_transkript)
-
-    def _bekleyen_altyazilar(self, hepsi=False):
-        """A6: Whisper karsiligi suresi icinde gelmeyen altyazi satirlarini transkripte ekler (hepsi=True:
-        bitiste, sure beklemeden)."""
-        with self._iz_kilit:
-            simdi = time.time()
-            askida = self._askida()
-            for g in list(self.konusmaci_izi):
-                if g["son"] is None or g["kullanildi"] or not (hepsi or simdi >= g["son"]):
-                    continue
-                if askida:
-                    g["kullanildi"] = "askida"       # tasma: altyazi eklemeleri askida
-                    continue
-                g["kullanildi"] = "altyazi"
-                if self._yakin_tekrar(g["ts"], g["text"]):
-                    continue                         # ayni metin az once transkripte girdi
-                yeni = self.satir_ekle({"ts": g["ts"], "speaker": g["speaker"], "text": g["text"]}, kaynak="altyazi")
-                g["satir_id"] = yeni["id"] if yeni else None
-
-    def _en_benzer_giris(self, ts, metin, pencere_sn=30):
-        """ts cevresinde metne en benzeyen altyazi izi girdisi -> (giris, benzerlik) ya da (None, 0)."""
-        hedef, en, en_b, en_fark = _sn(ts), None, 0.0, None
-        for g in self.konusmaci_izi:
-            fark = abs(hedef - _sn(g["ts"]))
-            if fark > pencere_sn or not g["text"]:
-                continue
-            b = metin_benzerligi(metin, g["text"])
-            if b > en_b or (en is not None and b == en_b and fark < en_fark):
-                en, en_b, en_fark = g, b, fark
-        return en, en_b
-
-    def _cakisanlar(self, ts, kim, metin):
-        """K5: Whisper satiri `kim`e yazildi; ±CAKISMA_SN icinde BASKA bir konusmacinin henuz kullanilmamis
-        altyazi satiri var ve kelime koklerinin en fazla %30'u bu (ve civardaki) Whisper metninde geciyorsa
-        Whisper o kisinin sozunu yazmamis demektir (iki kisi ayni anda konustu, baskin ses yazildi)."""
-        if K5_UST <= 0:
-            return []                       # K5 kapali (varsayilan): altyazi metni transkripte hic girmez
-        if self._askida():
-            return []                       # altyazi tasmasi: eklemeler askida
-        hedef = _sn(ts)
-        yazilan = _kokler(metin)
-        for w in self._son_ses:
-            if abs(_sn(w["ts"]) - hedef) <= CAKISMA_SN:
-                yazilan |= _kokler(w["text"])
-        adaylar = []
-        for g in self.konusmaci_izi:
-            if g["kullanildi"] or g["speaker"] in (kim, "?") or self._ben_mi(g["speaker"]):
-                continue                    # kullanicinin kendi sozu mikrofon akisindan ayrica gelir
-            if abs(_sn(g["ts"]) - hedef) > CAKISMA_SN:
-                continue
-            gk = _kokler(g["text"])
-            if gk and len(gk & yazilan) / len(gk) <= CAKISMA_KAPSAMA:
-                adaylar.append(g)
-        # Sinirlar (tasmaya karsi): satir basina en fazla K5_UST; ayni konusmacidan ±CAKISMA_SN icinde en fazla
-        # bir satir (bu ve onceki K5 eklemeleri dahil); son 2 dk'da transkripte girmis metin eklenmez.
-        sonuc = []
-        for g in sorted(adaylar, key=lambda x: abs(_sn(x["ts"]) - hedef)):
-            if self._yakin_tekrar(g["ts"], g["text"]):
-                g["kullanildi"] = "altyazi"
-                continue
-            gs = _sn(g["ts"])
-            if any(k == g["speaker"] and abs(t - gs) <= CAKISMA_SN for k, t in self._k5_eklenen) or \
-                    any(x["speaker"] == g["speaker"] for x in sonuc):
-                continue
-            if len(sonuc) >= K5_UST:
-                break                       # sinir EKLEMEDEN ONCE denetlenir
-            sonuc.append(g)
-            self._k5_eklenen.append((g["speaker"], gs))
-        sonuc.sort(key=lambda x: _sn(x["ts"]))
-        return sonuc
-
-    def _bekleyenleri_coz(self):
-        """Altyazi Whisper'dan 1-3 sn gec gelir: '?' kalmis satirlara konusmaci sonradan atanir."""
-        simdi = time.time()
-        kalan = []
-        for kayit in self.bekleyen_ses:
-            satir, son = kayit
-            kim, benzer = self._konusmaci_bul(satir["ts"], satir["text"], puanla=True)
-            if benzer is not None and (benzer >= 0.25 or simdi >= son):
-                self.uyum = (self.uyum + [benzer])[-30:]
-            if kim and benzer < 0.25 and simdi >= son and not self._tek_konusmaci(satir["ts"], kim):
-                kim = None      # sure doldu, metin hic eslesmedi ve pencerede baska konusan da var: tahmin etme
-            if kim and (benzer >= 0.25 or simdi >= son):
-                giris, gb = self._en_benzer_giris(satir["ts"], satir["text"])
-                if giris is not None and gb >= AYNI_SOZ and not giris["kullanildi"]:
-                    giris["kullanildi"] = "ses"
-                satir["speaker"] = kim
-                if kim not in self.katilimcilar:
-                    self.katilimcilar.append(kim)
-                self._olay("satir_guncelle", {"id": satir["id"], "speaker": kim})
-            elif simdi < son:
-                kalan.append(kayit)
-        self.bekleyen_ses = kalan
-
-    def ses_satiri(self, ts, konusmaci, metin, akis):
-        """Whisper'dan gelen satir. konusmaci None ise altyaziyla zaman hizalamasi yapilir."""
-        with self._iz_kilit:
-            return self._ses_satiri(ts, konusmaci, metin, akis)
-
-    def _ses_satiri(self, ts, konusmaci, metin, akis):
-        if konusmaci == "ben":
-            kim, benzer = (self.ben or "Ben"), None
-            # Kulakliksiz (hoparlorle) calisilirken karsi tarafin sesi mikrofona da girer; eko tekillestirmesi
-            # iki Whisper cikisi farkli yazinca kacirir. Altyazida bu cumleyi baskasi soylediyse ona yaz.
-            # Yalniz kulaklik YOK diye biliniyorsa (self.kulaklik is False); kulaklikli/bilinmeyen durumda
-            # mikrofon satiri kullanicinin kendisidir ("ben").
-            if self.kulaklik is False:
-                alt_kim, alt_benzer = self._konusmaci_bul(ts, metin, puanla=True)
-                if alt_kim and (alt_benzer or 0) >= 0.6 and not self._ben_mi(alt_kim):
-                    kim = alt_kim
-        else:
-            kim, benzer = self._konusmaci_bul(ts, metin, puanla=True)
-            if benzer is not None:
-                self.uyum = (self.uyum + [benzer])[-30:]
-                # Cok kisa (<=2 kelime) ve altyazinin hic dogrulamadigi parca: buyuk olasilikla Whisper
-                # gurultuye yazdi ("Rides", "Hesap etrafi"). Kisa onaylar (tamam/evet) haric elenir.
-                # 3 kelimelik gercek cumleler, Teams altyazisi bozuk oldugunda da korunur.
-                kelime = [k for k in re.findall(r"[^\W\d_]+", metin) if len(k) >= 3]
-                if len(kelime) <= 2 and metin.lower().strip(" .?!,") not in KISA_ONAY:
-                    alt_kok = self._altyazi_kokleri(ts)
-                    if alt_kok and not any(_kokler(k) & alt_kok for k in kelime):
-                        self._olay("log", f"  · elendi (altyazı doğrulamadı): {metin[:40]}")
-                        return None
-        if konusmaci != "ben" and kim and (benzer or 0) < 0.25 and not self._tek_konusmaci(ts, kim):
-            # Metin hicbir altyazi satiriyla eslesmedi, yalnizca zamana gore tahmin: o aralikta birden fazla
-            # kisi konusuyorsa yanlis kisiye yazmamak icin '?' ile baslar; altyazi gelince atanir.
-            kim = None
-        giris, gb = self._en_benzer_giris(ts, metin)
-        if giris is not None and gb >= AYNI_SOZ:
-            if giris["kullanildi"] == "altyazi":
-                # K5/A6: bu soz altyazidan transkripte girdi; Whisper satiri ikinci kez yazilmaz
-                self._olay("log", f"  · atlandı (altyazıdan zaten yazıldı): {metin[:40]}")
+            if tur == "kulaklik":
+                self.kulaklik = olay.get("durum") if olay.get("durum") in (True, False) else None
+                self.konusmaci.kulaklik_ayarla(self.kulaklik)
                 return None
-            giris["kullanildi"] = "ses"
-        cakisan = self._cakisanlar(ts, kim, metin) if (konusmaci != "ben" and kim) else []
-        for g in cakisan:
-            g["kullanildi"] = "altyazi"
-        once = [g for g in cakisan if _sn(g["ts"]) <= _sn(ts)]
-        for g in once:                      # transkript zaman sirasiyla: onceki altyazi satiri once
-            g["satir_id"] = self.satir_ekle({"ts": g["ts"], "speaker": g["speaker"], "text": g["text"]},
-                                            kaynak="altyazi-cakisma")["id"]
-        yeni = self.satir_ekle({"ts": ts, "speaker": kim or "?", "text": metin}, kaynak="ses")
-        for g in cakisan:
-            if g not in once:
-                g["satir_id"] = self.satir_ekle({"ts": g["ts"], "speaker": g["speaker"], "text": g["text"]},
-                                                kaynak="altyazi-cakisma")["id"]
-        if cakisan:
-            self._olay("log", f"  · aynı anda konuşma: {len(cakisan)} altyazı satırı eklendi "
-                              f"({', '.join(g['speaker'] for g in cakisan)})")
-        self._son_ses = (self._son_ses + [{"ts": ts, "text": metin}])[-50:]
-        if konusmaci != "ben" and yeni is not None and (not kim or (benzer or 0) < 0.25):
-            # altyazi henuz gelmemis olabilir: 8 sn boyunca yeniden dene
-            self.bekleyen_ses.append((yeni, time.time() + 8))
-        return yeni
+            if tur == "capa":                   # ses saat capasi yenilendi: L capalari duzeltilir
+                self.konusmaci.saat_capasi(olay.get("akis"), olay.get("fark"))
+                return None
+            if tur == "bosluk":
+                self.ses_olay_sayisi += 1
+                self._bosluk_ekle(olay)
+                return None
+            if tur != "klip":
+                return None
+            self.ses_olay_sayisi += 1
+            return self._klip_ekle(olay)
 
-    def _ben_mi(self, ad):
-        """Altyazidaki ad uygulamayi kullanan kisi mi? ('Deniz' ~ 'Deniz Can Ozturk')"""
-        if not self.ben or not ad:
-            return False
-        a, b = set(normalize(self.ben).split()), set(normalize(ad).split())
-        return bool(a & b)
+    def _bosluk_ekle(self, olay):
+        try:
+            b = (olay.get("akis") or "loopback", float(olay["bas"]), float(olay["bit"]))
+        except (KeyError, TypeError, ValueError):
+            return
+        self._bosluklar = (self._bosluklar + [b])[-2000:]
+        self._olay("stt_bosluk", {"akis": b[0], "bas": b[1], "bit": b[2], "neden": olay.get("neden")})
 
-    def _tek_konusmaci(self, ts, kim, pencere_sn=10):
-        """ts cevresinde (±pencere) altyazida yalnizca `kim` mi konusuyor?"""
-        hedef = _sn(ts)
-        pencere = [g for g in self.konusmaci_izi if abs(hedef - _sn(g["ts"])) <= pencere_sn]
-        return bool(pencere) and all(g["speaker"] == kim for g in pencere)    # bos pencere: tek konusmaci DEGIL
+    def _klip_ekle(self, olay):
+        try:
+            no = int(olay["klip_no"])
+            bas = float(olay["bas"])
+            bit = max(float(olay.get("bit", bas)), bas)
+        except (KeyError, TypeError, ValueError):
+            self.log("  · geçersiz klip olayı atlandı")
+            return None
+        akis = olay.get("akis") or "loopback"
+        # kesinti sonrasi gec cozulen klip: ayni araligin boslugu artik eksik degil
+        self._bosluklar = [x for x in self._bosluklar if not (x[0] == akis and x[1] < bit + 0.5 and x[2] > bas - 0.5)]
+        self.konusmaci.klip_ekle(dict(olay, klip_no=no, akis=akis, bas=bas, bit=bit))
+        raw = (olay.get("text") or "").strip()
+        ust = olay.get("ust_klip")
+        if not raw:
+            if ust is not None:
+                self._bos_parca(ust)          # metinsiz yeniden kesme parcasi: geldi sayilir, satir yok
+            return None                       # metinsiz klip: satir yok (karari yok sayilir)
+        satir = self._yeni_satir(no, akis, bas, bit, raw, ts=olay.get("ts"), supheli=bool(olay.get("supheli")))
+        self._klip_satir[no] = satir
+        while len(self._klip_satir) > KLIP_TAVAN:
+            self._klip_satir.pop(next(iter(self._klip_satir)))
+        if ust is not None and ust in self._kesilen:
+            # ust klip parcalariyla zaten degisti: fazladan parca asla ayri satir olmaz
+            self._silinen.add(satir["id"])
+            self.log(f"  · yeniden kesme parçası fazladan geldi, atıldı (üst klip {ust})")
+        elif ust is not None and ust in self._gec_kesim:
+            self._gec_parca(ust, satir)
+        elif ust is not None and (ust in self._kesimler or ust in self._klip_satir):
+            self._kesim_parcasi(ust, satir)
+        else:
+            self._satir_yerlestir(satir)
+        return satir
 
-    def _altyazi_kokleri(self, ts, pencere_sn=20):
-        """ts cevresindeki (±pencere) altyazi satirlarinin kelime kokleri."""
-        def sn(x):
-            try:
-                p = [int(k) for k in str(x).split(":")]
-                return p[0] * 3600 + p[1] * 60 + (p[2] if len(p) > 2 else 0)
-            except (ValueError, IndexError):
-                return 0
-        hedef, kokler = sn(ts), set()
-        for g in self.konusmaci_izi:
-            if abs(hedef - sn(g["ts"])) <= pencere_sn:
-                kokler |= _kokler(g["text"])
-        return kokler
-
-    def uyum_orani(self):
-        """Whisper cumleleri ile altyazi ne kadar ortusuyor (0-1)? Dusukse ses yanlis cihazdan
-        geliyor ya da altyazi kapali olabilir."""
-        return (sum(self.uyum) / len(self.uyum)) if self.uyum else None
-
-    def _konusmaci_bul(self, ts, metin="", pencere_sn=30, puanla=False):
-        """Whisper cumlesine konusmaci atar: altyazi izindeki satirlarla hem ZAMAN yakinligi hem
-        METIN benzerligi (Teams'in bozuk altyazisi bile ayni cumlenin izini tasir) puanlanir."""
-
-        def sn(x):
-            try:
-                p = [int(k) for k in str(x).split(":")]
-                return p[0] * 3600 + p[1] * 60 + (p[2] if len(p) > 2 else 0)
-            except (ValueError, IndexError):
-                return 0
-
-        def sade(m):
-            m = (m or "").lower()
-            for a, b in zip("çğıöşü", "cgiosu"):
-                m = m.replace(a, b)
-            return m
-
-        hedef, m1 = sn(ts), sade(metin)
-        en_iyi, en_puan, en_benzer, gorulen = None, -1.0, 0.0, False
-        for g in reversed(self.konusmaci_izi):
-            t, kim, alt = g["ts"], g["speaker"], g["text"]
-            fark = hedef - sn(t)
-            if abs(fark) > pencere_sn:
-                continue
-            gorulen = True
-            zaman = 1.0 - abs(fark) / pencere_sn
-            if fark < 0:
-                zaman *= 0.6                                   # gelecekteki altyazi daha az guvenilir
-            benzer = metin_benzerligi(metin, alt) if m1 and alt else 0.0
-            en_benzer = max(en_benzer, benzer)
-            if benzer >= 0.45:                                 # altyazi ayni cumleyi tasiyor: kesin eslesme
-                puan = 1.0 + benzer + 0.2 * zaman
-            elif benzer >= 0.25:
-                puan = 0.35 * zaman + 0.65 * benzer
-            else:
-                puan = 0.35 * zaman
-            if puan > en_puan:
-                en_iyi, en_puan = kim, puan
-        if puanla:
-            return en_iyi, (en_benzer if gorulen else None)
-        return en_iyi
-
-    def satir_ekle(self, satir, kaynak="altyazi"):
-        if satir.get("guncelle"):
-            return self._satir_guncelle(satir)
-        raw = satir["text"]
+    def _yeni_satir(self, klip_no, akis, bas, bit, raw, ts=None, supheli=False, kaynak="ses"):
+        self._satir_no += 1
         metin, _ = self.sozluk.uygula(raw)
-        self._satir_no = getattr(self, "_satir_no", 0) + 1
-        satir = {"id": self._satir_no, "ts": satir["ts"], "speaker": satir["speaker"], "text": metin,
-                 "raw": raw, "kaynak": kaynak}
-        with open(os.path.join(self.klasor, "altyazi.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(satir, ensure_ascii=False) + "\n")
-        self._son_transkript.append((_sn(satir["ts"]), normalize(raw)))
-        if satir["speaker"] not in self.katilimcilar:
-            self.katilimcilar.append(satir["speaker"])
-        self._olay("satir", satir)
+        return {"surum": SURUM, "id": self._satir_no, "klip_no": klip_no, "akis": akis,
+                "bas": round(bas, 3), "bit": round(bit, 3), "ts": ts or _ts(bas), "raw": raw, "text": metin,
+                "speaker": "?", "spk_guven": 0.0, "adaylar": [], "devir": False, "cakisma": False,
+                "supheli": supheli, "belirsiz": [], "duzeltmeler": [], "kaynak": kaynak, "durum": "beklemede"}
 
+    @staticmethod
+    def _tok(s):
+        return llm.token_tahmin(f"{s.get('speaker') or '?'}: {s.get('text', '')}")
+
+    def _tok_yenile(self):
+        self.mevcut_tok = sum(self._tok(s) for s in self.mevcut)
+
+    def _satir_yerlestir(self, satir):
+        """Yeni satir: altyazi.jsonl + acik parca (bas sirasiyla; kesinti sonrasi gec gelen klip araya girer),
+        'satir' olayi, parca sinirlari. bas'i kapanmis bir parcanin araligina dusen gec klip (STT kesintisi sonrasi
+        cozulen) o parcaya girer: transkript ve parca araliklari kronolojik kalir, parca yeniden yazilir/ozetlenir."""
+        self._jsonl(satir)
         simdi = time.time()
+        sira = self._kapali_parca_bul(satir.get("bas"))
+        if sira is not None:
+            self._kapali_parcaya_ekle(sira, satir)
+            return
         if self.mevcut and self.mevcut_tok >= SESSIZLIK_MIN_TOKEN and simdi - self.son_satir > SESSIZLIK_SN:
             self.parca_kapat("sessizlik")
-        self.mevcut.append(satir)
-        self.mevcut_tok += llm.token_tahmin(f"{satir['speaker']}: {satir['text']}")
+        i = len(self.mevcut)
+        while i > 0 and (self.mevcut[i - 1].get("bas") or 0) > satir["bas"]:
+            i -= 1
+        self.mevcut.insert(i, satir)
+        self.mevcut_tok += self._tok(satir)
         self.mevcut_bas = self.mevcut_bas or simdi
         self.son_satir = simdi
+        self._olay("satir", dict(satir, gorunen=gorunen_ad(satir)))
         if self.mevcut_tok >= parca_token():
             self.parca_kapat("token")
         elif simdi - self.mevcut_bas >= PARCA_SURE_SN:
             self.parca_kapat("süre")
-        return satir
 
-    def _satir_guncelle(self, satir):
-        """Altyazi satiri buyudu/duzeltildi ({'guncelle': True, 'onceki_text'}; varsa 'id'). Satir hala acik
-        parcadaysa metni, ham hali ve parca token sayisi yerinde guncellenir, altyazi.jsonl'e guncelleme kaydi
-        eklenir ve 'satir_guncelle' olayi yayilir. Parca kapanmissa eski hali kalir. Dondurur: satir | None."""
-        hedef = None
-        for s in reversed(self.mevcut):
-            if (satir.get("id") and s["id"] == satir["id"]) or (
-                    not satir.get("id") and s["speaker"] == satir["speaker"] and s["raw"] == satir.get("onceki_text")):
-                hedef = s
-                break
-        if hedef is None:
-            self.log(f"  · altyazı güncellemesi uygulanmadı (satır kapanmış parçada): {satir['text'][:40]}")
+    def _kapali_parca_bul(self, bas):
+        """bas, son kapanmis parcanin bitisinden onceyse hedef parca sirasi: bas'i kapsayan (ya da ondan once baslayan
+        en son) parca; hepsinden onceyse ilk parca. Aksi (normal akis) None: acik parca."""
+        if not isinstance(bas, (int, float)) or not self._parca_veri:
             return None
-        eski_tok = llm.token_tahmin(f"{hedef['speaker']}: {hedef['text']}")
-        hedef["raw"] = satir["text"]
-        hedef["text"], _ = self.sozluk.uygula(satir["text"])
-        self.mevcut_tok += llm.token_tahmin(f"{hedef['speaker']}: {hedef['text']}") - eski_tok
-        with open(os.path.join(self.klasor, "altyazi.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(dict(hedef, guncelle=True), ensure_ascii=False) + "\n")
-        self._son_transkript.append((_sn(hedef["ts"]), normalize(hedef["raw"])))
-        self._olay("satir_guncelle", {"id": hedef["id"], "speaker": hedef["speaker"], "text": hedef["text"]})
-        return hedef
+        son = self._parca_veri[max(self._parca_veri)]
+        if not isinstance(son.get("bit"), (int, float)) or bas >= son["bit"]:
+            return None
+        onceki = [n for n, v in self._parca_veri.items() if isinstance(v.get("bas"), (int, float)) and v["bas"] <= bas]
+        return max(onceki) if onceki else min(self._parca_veri)
+
+    def _kapali_parcaya_ekle(self, sira, satir):
+        veri = self._parca_veri[sira]
+        liste = veri["satirlar"]
+        i = len(liste)
+        while i > 0 and (liste[i - 1].get("bas") or 0) > satir["bas"]:
+            i -= 1
+        liste.insert(i, satir)
+        self._satir_parca[satir["id"]] = sira
+        if isinstance(veri.get("bas"), (int, float)):
+            veri["bas"] = min(veri["bas"], satir["bas"])
+            veri["bit"] = max(veri["bit"], satir.get("bit", satir["bas"]))
+            veri["baslangic"], veri["bitis"] = _ts(veri["bas"]), _ts(veri["bit"])
+        veri["token"] = sum(self._tok(x) for x in liste)
+        self._parca_nesil[sira] = self._parca_nesil.get(sira, 0) + 1
+        self._ozet_kirli[sira] = time.time()
+        self.parca_yaz(veri)
+        self.log(f"  · geç gelen klip ({satir['ts']}) kapanmış parça {sira}'e eklendi; parça yeniden özetlenecek")
+        self._olay("satir", dict(satir, gorunen=gorunen_ad(satir), parca=sira))
+
+    def _ozetleri_yenile(self, simdi=None, hepsi=False):
+        """Gec satir eklenmis kapanmis parcalari (OZET_YENI_SN sessizlikten sonra ya da hepsi) yeniden ozetler."""
+        for sira in [n for n, t in self._ozet_kirli.items() if hepsi or (simdi or time.time()) - t >= OZET_YENI_SN]:
+            del self._ozet_kirli[sira]
+            veri = self._parca_veri.get(sira)
+            if veri is not None:
+                self.isler.append(self.havuz.submit(self._isle, veri, False))
+
+    def _satir_bul(self, sid):
+        """id -> (liste, indeks, parca sirasi | None: acik parca) ya da None (yerlesmemis / silinmis)."""
+        if sid is None or sid in self._silinen:
+            return None
+        for i in range(len(self.mevcut) - 1, -1, -1):
+            if self.mevcut[i]["id"] == sid:
+                return self.mevcut, i, None
+        sira = self._satir_parca.get(sid)
+        veri = self._parca_veri.get(sira)
+        if veri is not None:
+            for i, s in enumerate(veri["satirlar"]):
+                if s["id"] == sid:
+                    return veri["satirlar"], i, sira
+        return None
+
+    def _degisti(self, sira):
+        """Satir listesi degisti: acik parcada token yeniden sayilir, kapanmis parca diske yeniden yazilir."""
+        if sira is None:
+            self._tok_yenile()
+        elif sira in self._parca_veri:
+            self.parca_yaz(self._parca_veri[sira])
+
+    # --- konusmaci kararlari ---
+    def _kararlari_isle(self, kararlar):
+        """Konusmaci kararlarini satirlara uygular. Dondurur: yeniden kesilecek [(klip_no, an)] (kilit disinda)."""
+        kes = []
+        for k in kararlar or []:
+            if k.get("bol") is not None and not k.get("at"):
+                satir = self._klip_satir.get(k.get("klip_no"))
+                if satir is None or satir["id"] in self._silinen:
+                    continue                  # metinsiz klip
+                if self._bitiyor or self.yeniden_kes_fn is None or self._satir_bul(satir["id"]) is None:
+                    self._karar_uygula(self.konusmaci.bolunemedi(k["klip_no"]))
+                else:
+                    kes.append((k["klip_no"], k["bol"]))
+                continue
+            self._karar_uygula(k)
+        return kes
+
+    def _kesimleri_yap(self, kes):
+        """bol kararlari: SesServisi.yeniden_kes; False ise Konusmaci.bolunemedi ('A → B')."""
+        for no, an in kes:
+            try:
+                tamam = bool(self.yeniden_kes_fn(no, an)) if self.yeniden_kes_fn else False
+            except Exception as e:
+                self.log(f"✖ yeniden kesme hatası: {e!r}")
+                tamam = False
+            with self._iz_kilit:
+                if tamam and not self._bitiyor:
+                    if no not in self._kesilen:
+                        self._kesimler.setdefault(no, {"son": time.time() + KESIM_BEKLE_SN, "gelen": 0,
+                                                       "parcalar": []})
+                else:
+                    self._karar_uygula(self.konusmaci.bolunemedi(no))
+
+    def _karar_uygula(self, k):
+        satir = self._klip_satir.get(k.get("klip_no"))
+        if satir is None or satir["id"] in self._silinen:
+            return
+        yer = self._satir_bul(satir["id"])
+        if k.get("at"):
+            self._silinen.add(satir["id"])
+            for kesim in self._kesimler.values():         # yerlesmemis parca
+                if satir in kesim["parcalar"]:
+                    kesim["parcalar"].remove(satir)
+            for g in self._gec_kesim.values():
+                if satir in g["parcalar"]:
+                    g["parcalar"].remove(satir)
+            if yer is None:
+                return
+            liste, i, sira = yer
+            del liste[i]
+            self._degisti(sira)
+            self._jsonl({"id": satir["id"], "sil": True, "neden": k.get("neden") or "yanki"})
+            self._olay("satir_sil", {"id": satir["id"], "neden": k.get("neden")})
+            self.log(f"  · yankı klibi atıldı ({satir['ts']}): {satir['text'][:40]}")
+            return
+        alan = {"speaker": k.get("speaker") or "?", "spk_guven": float(k.get("spk_guven") or 0.0),
+                "adaylar": [list(a) for a in (k.get("adaylar") or [])], "devir": bool(k.get("devir")),
+                "cakisma": bool(k.get("cakisma")), "kimlik_turu": k.get("kimlik_turu"),
+                "kapsama": bool(k.get("kapsama", True)), "spk_neden": k.get("neden"), "durum": "karar"}
+        satir.update(alan)
+        if kesin_ad_mi(satir) and satir["speaker"] not in self.katilimcilar:
+            self.katilimcilar.append(satir["speaker"])   # "?", "Ad?", birlesik adlar, oda/genel girmez
+        if yer is None:
+            return                                       # yerlesmemis parca: yerine konunca yazilir
+        self._degisti(yer[2])
+        self._jsonl(dict(alan, id=satir["id"], guncelle=True))
+        if yer[2] is not None:
+            self.log(f"  · kapanmış parça {yer[2]}: satır {satir['id']} konuşmacısı sonradan geldi")
+        self._olay("satir_guncelle", dict(satir, gorunen=gorunen_ad(satir)))
+
+    def _zaman_asimi(self, satir):
+        """Karari gelmeyen satir (parca kapanisi zorlandi): '?' (konusmaci karari sonradan gelirse guncellenir)."""
+        satir.update(speaker="?", spk_guven=0.0, durum="karar", spk_neden="zaman_asimi")
+        self._jsonl({"id": satir["id"], "guncelle": True, "speaker": "?", "spk_guven": 0.0, "durum": "karar",
+                     "spk_neden": "zaman_asimi"})
+        self._olay("satir_guncelle", dict(satir, gorunen=gorunen_ad(satir)))
+
+    # --- yeniden kesme ---
+    def _bos_parca(self, ust):
+        """Metni bos gelen yeniden kesme parcasi (STT bu yarida bir sey duymadi): parca geldi sayilir; diger parca
+        ozgun satirin tamamini tasir."""
+        if ust in self._kesilen:
+            return
+        if ust in self._gec_kesim:
+            self._gec_parca(ust, None)
+        elif ust in self._kesimler or ust in self._klip_satir:
+            self._kesim_parcasi(ust, None)
+
+    def _kesim_parcasi(self, ust, satir):
+        k = self._kesimler.get(ust)
+        if k is None:
+            k = self._kesimler[ust] = {"son": time.time() + KESIM_BEKLE_SN, "gelen": 0, "parcalar": []}
+        k["gelen"] += 1
+        if satir is not None:
+            k["parcalar"].append(satir)
+        if k["gelen"] >= 2:
+            self._kesim_tamamla(ust)
+
+    def _kesim_tamamla(self, ust):
+        """Iki parca geldi (ya da sure doldu): ozgun satir parcalariyla degisir (sirayla). Sure dolup parca eksikse
+        ozgun satir tum metniyle 'A → B' kalir (tek parcayla degismez: diger yarinin metni kaybolurdu); gec gelen
+        parcalar _gec_parca ile beklenir, ikisi gelince ozgunun yerine gecer."""
+        k = self._kesimler.pop(ust, None)
+        if k is None:
+            return
+        eski = self._klip_satir.get(ust)
+        yeni = sorted((s for s in k["parcalar"] if s["id"] not in self._silinen), key=lambda s: s["bas"])
+        if k["gelen"] < 2 or not yeni:
+            if k["gelen"] < 2:
+                self._gec_kesim[ust] = {"gelen": k["gelen"], "parcalar": list(k["parcalar"])}
+                while len(self._gec_kesim) > GEC_KESIM_TAVAN:
+                    self._gec_kesim.popitem(last=False)
+                if k["parcalar"]:
+                    self.log(f"  · yeniden kesme: parçalardan biri {KESIM_BEKLE_SN} sn içinde gelmedi; özgün satır "
+                             "korunuyor ('A → B')")
+            else:
+                self._kesilen.add(ust)
+            self._karar_uygula(self.konusmaci.bolunemedi(ust))
+            return
+        self._kesilen.add(ust)
+        self._yerine_koy(eski, yeni)
+
+    def _gec_parca(self, ust, satir):
+        """Suresi dolmus kesimin gec parcasi: ozgun satir ('A → B', tum metin) hala duruyorsa iki parca gelince onunla
+        degisir (kapanmis parcadaysa parca yeniden yazilir); ozgun satir yoksa parcalar atilir. Asla ayri satir olmaz."""
+        g = self._gec_kesim[ust]
+        g["gelen"] += 1
+        if satir is not None:
+            g["parcalar"].append(satir)
+        if g["gelen"] < 2:
+            return
+        del self._gec_kesim[ust]
+        bekleyen = g["parcalar"]
+        self._kesilen.add(ust)
+        eski = self._klip_satir.get(ust)
+        yeni = sorted((s for s in bekleyen if s["id"] not in self._silinen), key=lambda s: s["bas"])
+        if not yeni or eski is None or self._satir_bul(eski["id"]) is None:
+            for s in bekleyen:
+                self._silinen.add(s["id"])
+            self.log(f"  · geç gelen yeniden kesme parçaları atıldı (üst klip {ust}: "
+                     + ("parçalar boş, özgün satır kaldı)" if not yeni else "özgün satır yok)"))
+            return
+        self.log(f"  · geç gelen yeniden kesme parçaları özgün satırın yerine yazıldı (üst klip {ust})")
+        self._yerine_koy(eski, yeni)
+
+    def _yerine_koy(self, eski, yeni):
+        """Ozgun satiri (eski) parca satirlariyla degistirir; ozgun satir yoksa (atildi) parcalar ayri satir olur."""
+        yer = self._satir_bul(eski["id"]) if eski else None
+        if yer is None:
+            for s in yeni:                                # ozgun satir yok (atildi): parcalar ayri satir
+                self._satir_yerlestir(s)
+            return
+        liste, i, sira = yer
+        for s in yeni:
+            self._jsonl(dict(s, yerine_id=eski["id"]))
+        self._jsonl({"id": eski["id"], "sil": True, "neden": "yeniden_kesildi", "yerine": [s["id"] for s in yeni]})
+        liste[i:i + 1] = yeni
+        self._silinen.add(eski["id"])
+        if sira is not None:
+            for s in yeni:
+                self._satir_parca[s["id"]] = sira
+        elif self._kapanis is not None and eski["id"] in self._kapanis["sinir"]:
+            self._kapanis["sinir"].update(s["id"] for s in yeni)
+        self._degisti(sira)
+        self._olay("satir_degistir", {"eski_id": eski["id"], "yeni": [dict(s, gorunen=gorunen_ad(s)) for s in yeni]})
+
+    # --- okuma / altyazi ---
+    def okuma_ekle(self, okuma):
+        """Yakalayicinin HER UIA okumasi (C2, Yakalayici(okuma_fn=...)): konusmaci cizelgesine gider (ad + zaman;
+        altyazi metni transkripte girmez). Ardindan hazir kararlar uygulanir."""
+        with self._iz_kilit:
+            try:
+                self.konusmaci.okuma_ekle(okuma)
+            except Exception as e:
+                self.log(f"✖ altyazı okuması işlenemedi: {e!r}")
+                return
+            kes = self._kararlari_isle(self.konusmaci.kontrol(time.time()))
+        self._kesimleri_yap(kes)
+
+    def altyazi_satiri(self, satir):
+        """Yakalayicinin altyazi satiri (Yakalayici.oku). Teams altyazi METNI kotudur, transkripte girmez: yalniz
+        canli gorunum ('altyazi_izi', ayar altyazi_goster). Opt-in yedek (config altyazi_yedek): STT yokken satir
+        kaynak 'altyazi-yedek', supheli=True, spk_guven 0.6 ile girer (gosterim 'Ad?', sahip uretmez)."""
+        if not isinstance(satir, dict) or not (satir.get("text") or "").strip():
+            return None
+        self._olay("altyazi_izi", {"ts": satir.get("ts"), "speaker": satir.get("speaker") or "?",
+                                   "text": satir["text"], "guncelle": bool(satir.get("guncelle"))})
+        if not (self.altyazi_yedek and self.stt_kesik):
+            return None
+        return self.satir_ekle(satir, kaynak="altyazi-yedek")
+
+    def satir_ekle(self, satir, kaynak="altyazi-yedek"):
+        """Konusmacisi belli satiri dogrudan ekler (konusmaci kararina girmez). satir: {"ts", "speaker", "text"
+        [, "bas", "bit", "spk_guven"]}; yakalayicinin buyume kaydi ({'guncelle', 'onceki_text'}) acik parcadaki ayni
+        satiri gunceller. Varsayilan kaynak 'altyazi-yedek' (altyazi metni hic 'ses' diye yazilmaz): supheli,
+        spk_guven 0.6. Dondurur: satir v2."""
+        kim = satir.get("speaker") or "?"
+        yedek = kaynak == "altyazi-yedek"
+        with self._iz_kilit:
+            if satir.get("guncelle"):
+                sid = self._yedek_son.pop((kim, satir.get("onceki_text")), None)
+                yer = self._satir_bul(sid)
+                if yer is not None and yer[2] is None:
+                    s = yer[0][yer[1]]
+                    s["raw"] = satir["text"]
+                    s["text"], _ = self.sozluk.uygula(satir["text"])
+                    self._tok_yenile()
+                    self._jsonl({"id": s["id"], "guncelle": True, "raw": s["raw"], "text": s["text"]})
+                    self._yedek_son[(kim, satir["text"])] = s["id"]
+                    self._olay("satir_guncelle", dict(s, gorunen=gorunen_ad(s)))
+                    return s
+            an = time.time()
+            bas = float(satir.get("bas", an))
+            s = self._yeni_satir(None, satir.get("akis") or "loopback", bas, float(satir.get("bit", bas)),
+                                 satir["text"], ts=satir.get("ts"), supheli=yedek or bool(satir.get("supheli")),
+                                 kaynak=kaynak)
+            s.update(speaker=kim, spk_guven=float(satir.get("spk_guven", YEDEK_GUVEN if yedek else 1.0)),
+                     durum="altyazi" if yedek else "karar", kimlik_turu=self.konusmaci.kimlik_turu(kim))
+            self._satir_yerlestir(s)
+            self._yedek_son[(kim, satir["text"])] = s["id"]
+            while len(self._yedek_son) > 200:
+                self._yedek_son.pop(next(iter(self._yedek_son)))
+            return s
+
+    def ses_satiri(self, ts, konusmaci, metin, akis):
+        """ESKI arayuz (tools/replay MevcutHat, SesServisi satir_fn yolu): (ts, kim, metin, akis) -> C1 klip olayi.
+        Klip bitisi bilinmez (bas=bit=ts); konusmaci karari yalniz zaman cizelgesinden gelir (metin eslemesi yok)."""
+        with self._iz_kilit:
+            self._eski_no = getattr(self, "_eski_no", 0) - 1        # ses klip_no'lariyla carpismasin
+            no = self._eski_no
+        bas = self._ts_epoch(ts)
+        return self.ses_olayi({"tur": "klip", "klip_no": no, "akis": akis or "loopback", "bas": bas, "bit": bas,
+                               "text": metin, "ts": ts, "ust_klip": None, "supheli": False})
+
+    @staticmethod
+    def _ts_epoch(ts):
+        """'HH:MM:SS' -> simdiye en yakin (±12 sa) gunun epoch'u."""
+        simdi = time.time()
+        gun = dt.datetime.fromtimestamp(simdi).date()
+        e = dt.datetime.combine(gun, dt.time()).timestamp() + _sn(ts)
+        if e - simdi > 43200:
+            e -= 86400
+        elif simdi - e > 43200:
+            e += 86400
+        return e
+
+    # --- durum ---
+    def stt_durumu_ayarla(self, durum):
+        """isler: SesServisi.stt_durumu her turda. Altyazi yedegi yalniz STT kesikken calisir; hic cozulemeyecek
+        araliklar nota 'STT yok — transkript eksik' olarak yazilir."""
+        if not isinstance(durum, dict):
+            return
+        with self._iz_kilit:
+            self.stt_kesik = durum.get("durum") == "kesinti"
+            self._stt_eksik = [list(a)[:2] for a in (durum.get("eksik") or []) if len(a) >= 2]
+
+    def stt_eksik(self):
+        """Transkripti eksik araliklar [[bas, bit]] (epoch): ses servisinin cozulemeyecek araliklari + cozulmemis
+        bosluk olaylari + yuklenen kayittakiler; 30 sn'den yakin araliklar birlesir."""
+        with self._iz_kilit:
+            ham = sorted([list(a) for a in self._stt_eksik] + [[b, e] for _, b, e in self._bosluklar]
+                         + [list(a) for a in self._yuklu_eksik])
+        out = []
+        for b, e in ham:
+            if out and b - out[-1][1] < 30:
+                out[-1][1] = max(out[-1][1], e)
+            else:
+                out.append([b, e])
+        return out
+
+    def _kapsama_denetle(self, simdi):
+        """Konusmaci kapsamasi (altyazi okumasi) KAPSAMA_UYARI_SN'den uzun yoksa arayuze 'kapsama' olayi."""
+        try:
+            var = bool(self.konusmaci.durum().get("kapsama"))
+        except Exception:
+            return
+        if var:
+            self._kapsama_yok_bas = None
+            if self._kapsama_uyarildi:
+                self._kapsama_uyarildi = False
+                self._olay("kapsama", {"var": True, "bas": None})
+                self.log("konuşmacı bilgisi geri geldi (altyazı okunuyor)")
+            return
+        if self._kapsama_yok_bas is None:
+            self._kapsama_yok_bas = simdi
+        elif not self._kapsama_uyarildi and simdi - self._kapsama_yok_bas > KAPSAMA_UYARI_SN:
+            self._kapsama_uyarildi = True
+            self._olay("kapsama", {"var": False, "bas": self._kapsama_yok_bas})
+            self.log("! Konuşmacı bilgisi yok: Teams altyazısı kapalı ya da okunamıyor — konuşmacılar "
+                     "'Bilinmeyen' yazılır")
+
+    def _bekliyor_mu(self, s):
+        return s.get("durum") == "beklemede"
 
     def kontrol(self):
-        """Yakalama dongusunun her turunda: suresi dolan altyazi satirlari (A6) ve parca suresi."""
-        if self.kaynak == "ikisi":
-            self._bekleyen_altyazilar()
-        if self.mevcut and time.time() - self.mevcut_bas >= PARCA_SURE_SN:
-            self.parca_kapat("süre")
+        """Yakalama dongusunun her turunda: hazir konusmaci kararlari, yeniden kesme zaman asimi, ertelenmis
+        parca kapanisi (en fazla KAPANIS_BEKLE_SN), parca suresi, konusmaci kapsama uyarisi."""
+        simdi = time.time()
+        with self._iz_kilit:
+            kes = self._kararlari_isle(self.konusmaci.kontrol(simdi))
+            for ust in [u for u, k in self._kesimler.items() if simdi >= k["son"]]:
+                self._kesim_tamamla(ust)
+            self._kapsama_denetle(simdi)
+            if self._ozet_kirli:
+                self._ozetleri_yenile(simdi)
+            if self._kapanis is not None:
+                self._kapanis_dene(simdi)
+            elif self.mevcut and self.mevcut_bas is not None and simdi - self.mevcut_bas >= PARCA_SURE_SN:
+                self.parca_kapat("süre")
+        self._kesimleri_yap(kes)
 
-    def parca_kapat(self, neden):
-        if not self.mevcut:
+    def _kapanis_dene(self, simdi):
+        kp = self._kapanis
+        bekleyen = [s for s in self.mevcut if s["id"] in kp["sinir"] and self._bekliyor_mu(s)]
+        if bekleyen and simdi < kp["son"]:
+            return
+        if bekleyen:
+            # sure doldu: aralikta bekleyen klipler zorlanir (konusmaci baska aralikta bekleyen tasimiyorsa bitir)
+            bas, bit = min(s["bas"] for s in bekleyen), max(s["bit"] for s in bekleyen)
+            if self.konusmaci.bekleyen() <= self.konusmaci.bekleyen(bas - 1e-3, bit + 1e-3):
+                eski, self._bitiyor = self._bitiyor, True          # zorlanan kapanista yeniden kesme yok
+                try:
+                    self._kararlari_isle(self.konusmaci.bitir())
+                finally:
+                    self._bitiyor = eski
+            for ust in [u for u in self._kesimler if (self._klip_satir.get(u) or {}).get("id") in kp["sinir"]]:
+                self._kesim_tamamla(ust)
+            kalan = [s for s in self.mevcut if s["id"] in kp["sinir"] and self._bekliyor_mu(s)]
+            for s in kalan:
+                self._zaman_asimi(s)
+            self.log(f"! parça kapanışı {KAPANIS_BEKLE_SN} sn bekledi: {len(bekleyen)} satırın konuşmacı kararı "
+                     f"zorlandı ({len(kalan)} satır '?')")
+        self._parca_kapat_simdi(kp["neden"], kp["sinir"])
+
+    def parca_kapat(self, neden, zorla=False):
+        """Acik parcayi kapatir. Konusmaci karari bekleyen satir varsa kapanis ertelenir (kontrol() en fazla
+        KAPANIS_BEKLE_SN bekler, sonra zorlar); erteleme surerken gelen satirlar sonraki parcaya kalir."""
+        with self._iz_kilit:
+            if not self.mevcut:
+                self._kapanis = None
+                return
+            if zorla:
+                self._parca_kapat_simdi(neden, None)
+                return
+            if self._kapanis is not None:
+                return
+            sinir = {s["id"] for s in self.mevcut}
+            if any(self._bekliyor_mu(s) for s in self.mevcut):
+                self._kapanis = {"neden": neden, "son": time.time() + KAPANIS_BEKLE_SN, "sinir": sinir}
+                return
+            self._parca_kapat_simdi(neden, sinir)
+
+    def _parca_kapat_simdi(self, neden, sinir):
+        self._kapanis = None
+        if sinir is None:
+            satirlar, kalan = self.mevcut, []
+        else:
+            satirlar = [s for s in self.mevcut if s["id"] in sinir]
+            kalan = [s for s in self.mevcut if s["id"] not in sinir]
+        if not satirlar:
             return
         self.parca_no += 1
-        zamanlar = [s["ts"] for s in self.mevcut]
-        veri = {"sira": self.parca_no, "neden": neden, "token": self.mevcut_tok,
-                "baslangic": min(zamanlar), "bitis": max(zamanlar),
-                "satirlar": self.mevcut, "duzeltmeler": [], "ozet": None}
+        if all(isinstance(s.get("bas"), (int, float)) for s in satirlar):
+            bas_e = min(s["bas"] for s in satirlar)
+            bit_e = max(s.get("bit", s["bas"]) for s in satirlar)
+            bas_ts, bit_ts = _ts(bas_e), _ts(bit_e)          # gece yarisi: metin min/max degil, epoch
+        else:
+            bas_e = bit_e = None
+            sn = _gun_sn(satirlar)
+            bas_ts = satirlar[sn.index(min(sn))]["ts"]
+            bit_ts = satirlar[sn.index(max(sn))]["ts"]
+        veri = {"sira": self.parca_no, "neden": neden, "token": sum(self._tok(s) for s in satirlar),
+                "baslangic": bas_ts, "bitis": bit_ts, "bas": bas_e, "bit": bit_e, "surum": SURUM,
+                "satirlar": satirlar, "duzeltmeler": [], "ozet": None}
+        self._parca_veri[veri["sira"]] = veri
+        for s in satirlar:
+            self._satir_parca[s["id"]] = veri["sira"]
         self.parca_yaz(veri)
-        self.mevcut, self.mevcut_tok, self.mevcut_bas = [], 0, None
+        self.mevcut = kalan
+        self._tok_yenile()
+        self.mevcut_bas = time.time() if kalan else None
         self.meta_yaz("devam")
+        self._cizelge_yaz()
         self._olay("parca_kapandi", {"sira": veri["sira"], "neden": neden, "token": veri["token"],
                                      "aralik": f"{veri['baslangic']}–{veri['bitis']}"})
         self.isler.append(self.havuz.submit(self._isle, veri, self.duzelt))
 
+    def _cizelge_yaz(self):
+        """Konusmaci araliklari (metin yok) -> cizelge.json."""
+        try:
+            araliklar = self.konusmaci.araliklar_listesi()
+            if not araliklar:
+                return
+            with open(os.path.join(self.klasor, "cizelge.json"), "w", encoding="utf-8") as f:
+                json.dump({"durum": self.konusmaci.durum(), "araliklar": araliklar}, f, ensure_ascii=False)
+        except Exception as e:
+            self.log(f"! konuşmacı çizelgesi yazılamadı: {e!r}")
+
     # ---------- arka plan ----------
     def _isle(self, veri, duzelt):
+        """Kapanmis parca: LLM duzeltme gecisi + ozet (arka plan). Satir listesi bu sirada degisebilir (gec karar ile
+        atilan / yeniden kesilen satir, gec gelen klip): satirlarin anlik goruntusu kilit altinda alinir, duzeltilmis
+        metinler satir id'siyle geri yazilir (yalniz hala listede olanlara). Arada liste degistiyse (nesil) ozet
+        yazilmaz; yeniden ozet zaten siradadir."""
+        sira = veri.get("sira")
+        with self._iz_kilit:
+            nesil = self._parca_nesil.get(sira, 0)
         # 1) duzeltme gecisi — basarisiz olursa ham metinle devam
         if duzelt and veri["token"] >= DUZELT_MIN_TOKEN:
             self.log(f"  parça {veri['sira']}: altyazı düzeltmesi...")
             try:
-                satirlar = [f"{s['speaker']}: {s['text']}" for s in veri["satirlar"]]
-                yeni, duzeltmeler = llm.satirlari_duzelt(satirlar, self.baglam())
-                for s, y in zip(veri["satirlar"], yeni):
-                    kim, _, ne = y.partition(":")
-                    if ne.strip():
-                        s["text"] = ne.strip()
+                with self._iz_kilit:
+                    anlik = [(s["id"], f"{_konusan(s)}: {s['text']}") for s in veri["satirlar"]]
+                yeni, duzeltmeler = llm.satirlari_duzelt([x[1] for x in anlik], self.baglam())
+                harita = {sid: y for (sid, _), y in zip(anlik, yeni)}
+                with self._iz_kilit:
+                    for s in veri["satirlar"]:
+                        y = harita.get(s["id"])
+                        if y is None:
+                            continue
+                        kim, _, ne = y.partition(":")
+                        if ne.strip():
+                            s["text"] = ne.strip()
                 veri["duzeltmeler"] = duzeltmeler
                 for o, d in duzeltmeler:
                     self.oneri_ekle(veri["sira"], o, d, self._baglam_satiri(veri, o), "duzeltme")
@@ -698,18 +994,25 @@ class Motor:
         self.log(f"  parça {veri['sira']}: özetleniyor...")
         try:
             onceki = self._onceki_konular(veri["sira"])
-            metin = blok_metni(veri["satirlar"])
+            with self._iz_kilit:
+                metin = blok_metni(list(veri["satirlar"]))
             ozet = llm.bolum_ozetle(metin, veri["sira"], self.baglam(metin), onceki)
             for a in (ozet or {}).get("aksiyonlar", []):
                 a["tarih"] = tarih_mod.tarih_coz(a.get("tarih"), self.tarih)
-            veri["ozet"] = ozet
+            with self._iz_kilit:
+                eski_nesil = self._parca_nesil.get(sira, 0) != nesil
+            if eski_nesil:
+                self.log(f"  parça {veri['sira']}: özetlenirken satırlar değişti, yeniden özetlenecek")
+            else:
+                veri["ozet"] = ozet
             if ozet:
                 for t in ozet.get("belirsiz_terimler", []):
                     self.oneri_ekle(veri["sira"], t, "", self._baglam_satiri(veri, t), "belirsiz")
         except Exception as e:
             self.log(f"✖ parça {veri['sira']} özetlenirken hata: {llm.hata_metni(e)}")
             veri["ozet"] = None
-        self.parca_yaz(veri)
+        with self._iz_kilit:
+            self.parca_yaz(veri)
         self._olay("parca_ozetlendi", {"sira": veri["sira"], "ozet": veri["ozet"],
                                        "duzeltme": len(veri["duzeltmeler"])})
         return veri["ozet"]
@@ -724,7 +1027,7 @@ class Motor:
         p = normalize(parca)
         for s in veri["satirlar"]:
             if p and p in normalize(s["text"]):
-                return f"{s['speaker']}: {s['text']}"
+                return f"{_konusan(s)}: {s['text']}"
         return ""
 
     # ---------- oneriler ----------
@@ -764,14 +1067,24 @@ class Motor:
 
     # ---------- bitis ----------
     def bitir(self):
-        """Son parcayi kapatir, arka plan islerini bekler; bekleyen onerileri dondurur."""
-        self._bekleyen_altyazilar(hepsi=True)     # A6: Whisper karsiligi gelmemis son altyazi satirlari
-        self.parca_kapat("bitiş")
+        """Bekleyen konusmaci kararlarini zorlar (yeniden kesme yok: 'A → B'), bekleyen kesimleri eldekiyle
+        tamamlar, son parcayi kapatir, arka plan islerini bekler; bekleyen onerileri dondurur."""
+        with self._iz_kilit:
+            self._bitiyor = True
+            self._kararlari_isle(self.konusmaci.bitir())
+            for ust in list(self._kesimler):
+                self._kesim_tamamla(ust)
+            for s in list(self.mevcut):
+                if self._bekliyor_mu(s):
+                    self._zaman_asimi(s)
+            self.parca_kapat("bitiş", zorla=True)
+            self._ozetleri_yenile(hepsi=True)
+            self._cizelge_yaz()
         bekleyen = [i for i in self.isler if not i.done()]
         if bekleyen:
             self.log(f"{len(bekleyen)} parça işlemi bekleniyor...")
         cf.wait(self.isler)
-        self.meta_yaz("inceleme")
+        self.meta_yaz("inceleme", stt_eksik=self.stt_eksik())
         return self.bekleyen_oneriler()
 
     def kararlari_uygula(self, kararlar):
@@ -899,6 +1212,13 @@ class Motor:
             # sessizce eksik not yerine okuyana hangi araligin notta olmadigini soyle
             not_md = not_md.rstrip("\n") + "\n\n## Eksik bölümler\n" + "\n".join(
                 f"- {a} arası özetlenemedi; ayrıntı için transkripte bakın." for a in eksik) + "\n"
+        stt_eksik = self.stt_eksik()
+        if stt_eksik:
+            # STT kesintisi: bu araliklarin transkripti yok (altyazi metni yerine konmaz)
+            not_md = not_md.rstrip("\n") + "\n\n## Eksik transkript\n" + "\n".join(
+                f"- {stt_eksik_metni([a])}" for a in stt_eksik) + "\n"
+        if any(s.get("kaynak") == "altyazi-yedek" for s in satirlar):
+            not_md = not_md.rstrip("\n") + "\n\n_Bazı bölümler Teams altyazısından alındı (altyazıdan, düşük güven)._\n"
         self.adim("Not kaydediliyor", 4, 4)
         with open(os.path.join(self.klasor, "not.md"), "w", encoding="utf-8") as f:
             f.write(not_md)
@@ -928,6 +1248,7 @@ class Motor:
             except Exception:
                 continue
         satirlar.extend(self.mevcut)
+        satirlar = [dict(s, speaker=_konusan(s)) for s in satirlar]     # gosterim kurali ('Ad?', 'Bilinmeyen')
         pen = rag.pencereler(satirlar)
         if not pen:
             return "Bu toplantının transkripti boş."
@@ -948,6 +1269,8 @@ class Motor:
         m = cls(klasor, meta["baslik"], dt.date.fromisoformat(meta["tarih"]), sozluk,
                 meta.get("katilimcilar"), meta.get("gundem", ""), duzelt=duzelt, olay=olay,
                 kaynak=meta.get("kaynak", "altyazi"), ben=ben, sablon=sablon)
+        m._goc = True                        # surumsuz (v2 oncesi) satirlar okunurken goc eder: 'Ad?', sahip yok
+        m._yuklu_eksik = [list(a)[:2] for a in (meta.get("stt_eksik") or []) if len(a) >= 2]
         return m
 
 
@@ -1011,8 +1334,8 @@ def sorumlu_dogrula(aksiyonlar, satirlar, ben=None):
         kim = (s.get("speaker") or "").strip()
         if kim in ("ben", "Ben") and ben:
             kim = ben
-        if not kim or kim == "?":
-            continue
+        if not kim or kim == "?" or not kesin_ad_mi(s):
+            continue                    # 'Ad?', birlesik ad, eski (goc) ve altyazi yedegi satiri sahip uretmez
         if not _BIRINCI_TEKIL.search(tr_kucuk(s.get("text"))):
             continue
         sorumlu = (a.get("sorumlu") or "").strip()
@@ -1104,8 +1427,10 @@ def _yedek_yolu(yol):
 
 
 def altyazi_kayitlari(klasor):
-    """altyazi.jsonl -> transkript satirlari (ilk gorulus sirasiyla). Yakalayicinin guncelleme kayitlari
-    ({'guncelle': true}, ayni id) asil satirin metnini degistirir, ayri satir sayilmaz. Bozuk satir atlanir."""
+    """altyazi.jsonl -> transkript satirlari (ilk gorulus sirasiyla). Guncelleme kayitlari ({'guncelle': true},
+    ayni id: konusmaci karari, buyuyen satir) asil satira islenir, ayri satir sayilmaz; {'sil': true} satiri
+    kaldirir (yanki klibi, yeniden kesilen klip); 'yerine_id' tasiyan satir (kesilen klibin parcasi) ozgun satirin
+    yerine girer. Bozuk satir atlanir."""
     yol = os.path.join(klasor, "altyazi.jsonl")
     if not os.path.exists(yol):
         return []
@@ -1116,18 +1441,40 @@ def altyazi_kayitlari(klasor):
                 s = json.loads(ham)
             except Exception:
                 continue
-            if not isinstance(s, dict) or "text" not in s:
+            if not isinstance(s, dict):
+                continue
+            if s.get("sil"):
+                hedef = id_ile.pop(s.get("id"), None)
+                if hedef is not None:
+                    satirlar = [x for x in satirlar if x is not hedef]
                 continue
             if s.get("guncelle"):
                 hedef = id_ile.get(s.get("id"))
                 if hedef is not None:
-                    hedef.update({k: s[k] for k in ("text", "raw") if k in s})
+                    hedef.update({k: v for k, v in s.items() if k not in ("id", "guncelle", "onceki_text")})
+                continue
+            if "text" not in s:
                 continue
             s = dict(s)
-            satirlar.append(s)
+            yerine = id_ile.get(s.pop("yerine_id", None))
+            if yerine is not None:                          # ozgun satirin hemen onune (sil kaydi onu kaldirir)
+                satirlar.insert(next(i for i, x in enumerate(satirlar) if x is yerine), s)
+            else:
+                satirlar.append(s)
             if s.get("id") is not None:
                 id_ile[s["id"]] = s
     return satirlar
+
+
+def stt_eksik_metni(araliklar):
+    """[[bas, bit], ...] (epoch) -> 'STT yok — transkript eksik (10:05–10:12, 10:40–10:41)'. bit None: suruyor."""
+    def hhmm(e):
+        try:
+            return dt.datetime.fromtimestamp(float(e)).strftime("%H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return "…"
+    parca = [f"{hhmm(a[0])}–{hhmm(a[1]) if len(a) > 1 and a[1] is not None else '…'}" for a in araliklar or []]
+    return "STT yok — transkript eksik" + (f" ({', '.join(parca)})" if parca else "")
 
 
 def _gun_sn(satirlar):

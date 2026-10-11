@@ -29,6 +29,8 @@ GUNCELLEME_SN = 90           # ayni konusmacinin bu kadar yeni satiri buyur/duze
 GUNCELLEME_SATIR = 3         # ... ve yalnizca o konusmacinin son bu kadar satiri icin
 SIRA_BEKLE = 10              # ustteki buyuyen satir alttaki kararli satirlari en fazla bu kadar okuma bekletir
 BENZER_ORAN = 0.9            # Teams'in sonradan duzelttigi satir (SequenceMatcher) esigi
+AD_ESIGI = 3                 # sezgisel (katilimci listesinde olmayan) ad, bu kadar AYRI satirda gorulunce bilinen ad olur
+                             # (canli gorunumde once '?'; okuma olayina ad oldugu gibi gider, hayalet kurali konusmaci.py)
 
 
 def ekran_okuyucu(acik):
@@ -114,9 +116,16 @@ class Yakalayici:
         gorunmeyen) bir satirinin onek-uzantisi ya da >= BENZER_ORAN benzeri ise yeni satir degil
         {'guncelle': True, 'onceki_text': ...} olarak doner (motor acik parcadaki satiri yerinde gunceller)."""
 
-    def __init__(self):
+    def __init__(self, katilimcilar=(), okuma_fn=None, ad_esigi=AD_ESIGI):
+        """katilimcilar: bilinen adlar (Outlook daveti/ayar) — sezgisel tanima beklemeden gecerli. okuma_fn(okuma): HER UIA
+        okumasinda (bos okuma ve altyazi grubu yokken de) cagrilir, bkz. _okuma_yayinla."""
         self.grup = None
-        self.bilinen = set()
+        self.bilinen = set(a for a in katilimcilar if a)
+        self.okuma_fn = okuma_fn
+        self.ad_esigi = ad_esigi                   # sezgisel ad kac AYRI satirda gorulunce ad sayilir
+        self._ad_adaylari = {}                     # sezgisel ad -> gorulen ayri satirlar (henuz onaylanmamis)
+        self.son_okuma_epoch = None                # heartbeat: son UIA okumasinin bitis epoch'u
+        self._okuma_baslari = deque(maxlen=11)     # son okumalarin baslangic epoch'lari (gercek periyot icin)
         self.kuyruk = []                           # son yayilan 30 satir (yalnizca tani/geri uyumluluk)
         self.canli = {}                            # konusmaci -> {"ts", "speaker", "text"}: paneldeki son satiri
         self.hazir = False
@@ -152,17 +161,43 @@ class Yakalayici:
             self._okuma_yolu = None
             return None
 
-    def _okuma_yaz(self, bas_epoch, gorunen):
-        if not self._okuma_yolu or bas_epoch is None:
+    def _okuma_yaz(self, okuma):
+        if not self._okuma_yolu:
             return
         try:
-            self._okuma_sira += 1
-            satir = {"okuma_no": self._okuma_sira, "bas_epoch": round(bas_epoch, 3),
-                     "bit_epoch": round(time.time(), 3), "gorunen": [[k, n] for k, n in gorunen]}
+            satir = {"okuma_no": okuma["okuma_no"], "bas_epoch": round(okuma["bas_epoch"], 3),
+                     "bit_epoch": round(okuma["bit_epoch"], 3), "grup": okuma["grup"], "gorunen": okuma["gorunen"]}
             with open(self._okuma_yolu, "a", encoding="utf-8") as f:
                 f.write(json.dumps(satir, ensure_ascii=False) + "\n")
         except Exception:
             self._okuma_yolu = None                # IO hatasi: kaydi kapat, okuyucu etkilenmesin
+
+    def _okuma_yayinla(self, bas_epoch, bit_epoch, grup, gorunen):
+        """Her UIA okumasi (bos okuma ve altyazi grubu yokken de) bir okuma olayi uretir (plan 3 'Cizelge', C2):
+          {"tur": "okuma", "okuma_no", "bas_epoch", "bit_epoch", "grup": altyazi paneli bulundu mu,
+           "gorunen": [[konusmaci, metin], ...]}
+        bas_epoch okuma baslamadan, bit_epoch okuma bittikten HEMEN sonra olculur (satirlarin gorundugu an bu aralikta).
+        Olay okuma_fn'e gider (konusmaci.py cizelgesi + heartbeat) ve olcum kaydi aciksa okumalar.jsonl'e yazilir."""
+        self._okuma_sira += 1
+        self.son_okuma_epoch = bit_epoch
+        self._okuma_baslari.append(bas_epoch)
+        okuma = {"tur": "okuma", "okuma_no": self._okuma_sira, "bas_epoch": bas_epoch, "bit_epoch": bit_epoch,
+                 "grup": bool(grup), "gorunen": [[k, n] for k, n in gorunen]}
+        self._okuma_yaz(okuma)
+        if self.okuma_fn is not None:
+            try:
+                self.okuma_fn(okuma)
+            except Exception:
+                pass                                # tuketici hatasi okuyucuyu durdurmaz
+        return okuma
+
+    def okuma_periyodu(self):
+        """Son okumalarin gercek periyodu (sn): okuma baslangiclari arasi ortalama = okuma suresi + uyku. Yoksa None.
+        (konusmaci.py R'yi okuma olaylarindan kendisi de hesaplar; bu yalniz tani/heartbeat icin.)"""
+        b = list(self._okuma_baslari)
+        if len(b) < 2:
+            return None
+        return (b[-1] - b[0]) / (len(b) - 1)
 
     def onerilen_aralik(self):
         """A7: dongunun bir sonraki okumaya kadar beklemesi. UIA agaci yuruyusu son 10 okumada ortalama
@@ -177,26 +212,55 @@ class Yakalayici:
                     for c, _ in auto.WalkControl(self.grup, includeTop=False, maxDepth=15)
                     if c.ControlTypeName == "TextControl"]
         metinler = [m for m in metinler if m and not _durum_mesaji(m)]
+        tanidik = self.bilinen | set(self._ad_adaylari)        # yapi tanima: gorulmus adaylar da sayilir
         ciftler = []
         if metinler and len(metinler) % 2 == 0 and all(
-                _isim_gibi(metinler[i], self.bilinen, gevsek=True) for i in range(0, len(metinler), 2)):
+                _isim_gibi(metinler[i], tanidik, gevsek=True) for i in range(0, len(metinler), 2)):
             for i in range(0, len(metinler), 2):
-                self.bilinen.add(metinler[i])
                 if len(metinler[i + 1]) >= 2:
                     ciftler.append((metinler[i], metinler[i + 1]))
-            return ciftler
+            return self._adlari_dogrula(ciftler)
         konusan = None
         for m in metinler:
-            if _isim_gibi(m, self.bilinen):
+            if _isim_gibi(m, tanidik):
                 konusan = m
-                self.bilinen.add(m)
             elif konusan and len(m) >= 2:
                 ciftler.append((konusan, m))
-        return ciftler
+        return self._adlari_dogrula(ciftler)
+
+    def _adlari_dogrula(self, ciftler):
+        """Sezgisel ad (katilimci listesinde olmayan, buyuk harf kalibiyla bulunan) ad_esigi AYRI satirda gorulunce bilinen
+        adlara girer (yapi tanima, canli gorunum). Ayni satirin buyumesi ya da ayni panelin yeniden okunmasi yeni satir
+        sayilmaz. Okuma olayina adlar OLDUGU GIBI gider: hayalet ad kurali (hayalet_satir) konusmaci.py'de uygulanir.
+        Burada '?' ikamesi yapilsaydi esik dolunca eski satirlarin etiketi '?'dan gercek ada doner, konusmaci onlari
+        yeni satir/aralik sanip sahte 'A → B' / 'A / B' uretirdi."""
+        for kim, ne in ciftler:
+            if kim not in self.bilinen and kim != "?":
+                self._ad_say(kim, ne)
+        return list(ciftler)
+
+    def _etiketle(self, gorunen):
+        """Canli gorunum / altyazi satiri yolu: henuz onaylanmamis sezgisel ad '?' gosterilir."""
+        return [(kim if kim in self.bilinen or kim not in self._ad_adaylari else "?", ne) for kim, ne in gorunen]
+
+    def _ad_say(self, kim, ne):
+        satirlar = self._ad_adaylari.setdefault(kim, [])
+        for i, s in enumerate(satirlar):
+            if s == ne or _buyumus(s, ne) or _buyumus(ne, s):
+                if len(ne) > len(s):
+                    satirlar[i] = ne                           # ayni satirin buyumus hali
+                break
+        else:
+            satirlar.append(ne)
+        if len(satirlar) >= self.ad_esigi:
+            self.bilinen.add(kim)
+            del self._ad_adaylari[kim]
+        elif len(self._ad_adaylari) > 200:                     # ust sinir: en eski aday dussun
+            self._ad_adaylari.pop(next(iter(self._ad_adaylari)))
 
     def oku(self):
         """Yeni kesinlesmis satirlari (ve guncellemeleri) dondurur. self.hazir: altyazi grubu bulundu mu.
-        Okuma suresi olculur (onerilen_aralik)."""
+        Okuma suresi olculur (onerilen_aralik). Her cagri bir okuma olayi yayar (okuma_fn, bkz. _okuma_yayinla)."""
         bas = time.perf_counter()
         try:
             return self._oku()
@@ -204,6 +268,8 @@ class Yakalayici:
             self.okuma_sureleri.append(time.perf_counter() - bas)
 
     def _oku(self):
+        bas_epoch = time.time()                    # UIA okumasi baslamadan once
+        gorunen = []
         try:
             if self.grup is None:
                 self.grup, baslik = _grup_bul()
@@ -214,18 +280,22 @@ class Yakalayici:
                     if self.hazir:
                         self.kayip_zamani = self.kayip_zamani or dt.datetime.now()
                     self.hazir = False
+                    self._okuma_yayinla(bas_epoch, time.time(), False, [])
                     return []
                 self.hazir, self.kayip_zamani = True, None
                 self.hazir_zamani = self.hazir_zamani or dt.datetime.now()
-            bas_epoch = time.time() if self._okuma_yolu else None
             gorunen = self._ciftler()
         except Exception:
             self.grup = None
+            self._okuma_yayinla(bas_epoch, time.time(), False, [])
             return []
-        self._okuma_yaz(bas_epoch, gorunen)
+        bit_epoch = time.time()                    # okuma biter bitmez (yayim hesabindan once)
+        self._okuma_yayinla(bas_epoch, bit_epoch, True, gorunen)
         if not gorunen:
             return []
-        return self._isle(gorunen, dt.datetime.now().strftime("%H:%M:%S"))
+        # satir zamani: okumanin ortasi (eskiden okuma bittikten sonraki an: yavas okumada kayardi)
+        orta = dt.datetime.fromtimestamp((bas_epoch + bit_epoch) / 2)
+        return self._isle(self._etiketle(gorunen), orta.strftime("%H:%M:%S"))
 
     # ---------- yayim karari (UIA'dan bagimsiz; testler dogrudan cagirir)
     def _isle(self, gorunen, simdi):
@@ -265,6 +335,12 @@ class Yakalayici:
                     # panelin basina kaymis, daha once yayilmis kisa satir; ancak bir onceki okumada beklerken
                     # (ustundeki satir buyurken) basa kaydiysa ve panelde tek ise o bekleyen satirdir
                     if self._kisa_ad.get(a) and not (adet[a] == 1 and a in bekleyen_kisa):
+                        # gorulmus satir: kaydi bu okumada da gorulmus sayilir (duzeltme/buyume tespiti) ve altindaki kisa
+                        # satirlar ona gore taninir (eskiden durum 'ust' kalip alttaki tekrar eden 'Evet.' yutuluyordu)
+                        k = self._kisa.get((kim, a[1], None))          # panel basindayken yayilmis kayit
+                        if k is not None:
+                            k["son_gorulme"] = self._okuma_no
+                            durum, onceki_no = "kayit", k["no"]
                         onceki_a = a
                         continue
                 elif durum == "kayit":
@@ -305,7 +381,7 @@ class Yakalayici:
     def _kaybolanlar(self, gorunen):
         """Bir onceki okumada bekleyen (kararlilik/canli) ama artik panelde olmayan satirlar: kararli hale
         gelmeden yukari kaydi. Ayni konusmacinin buyumus hali gorunuyorsa kaybolmamistir (buyudu)."""
-        cikan = []
+        cikan, son = [], None
         gorunen_kume = self._son_gorunen
         for aday in self._son_adaylar:
             if aday["a"] in gorunen_kume:
@@ -314,7 +390,12 @@ class Yakalayici:
                 continue
             if aday["uzun"] and aday["a"] in self._uzun:
                 continue
-            cikan.append(self._yay(aday)["_satir"])
+            # topluca yayilirken bir onceki satirin bu arada aldigi kayit no'su gecilir (bitir ile ayni zincir): yoksa
+            # alttaki kisa satir 'panel basi' anahtariyla kaydolur ve ayni satir sonra yeniden yayilabilirdi
+            k = self._yay(aday, son["no"] if son is not None and son["_kkey"] == aday["onceki_kkey"] else None)
+            k["_kkey"] = aday["kkey"]
+            son = k
+            cikan.append(k["_satir"])
         return cikan
 
     def _zincir(self, kim, ne):

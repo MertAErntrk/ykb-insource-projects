@@ -102,6 +102,7 @@ QProgressBar { border: none; background: #CCFBF1; border-radius: 3px; height: 6p
 QProgressBar::chunk { background: #0D9488; border-radius: 3px; }
 QFrame#serit { background: white; border: 1px solid #99F6E4; border-radius: 6px; }
 QLabel#canli_sayac { color: #0F766E; font-weight: 700; }
+QLabel#uyari { background: #FFF7ED; color: #9A3412; border: 1px solid #FDBA74; border-radius: 6px; padding: 6px 10px; }
 QStatusBar { background: white; border-top: 1px solid #CCFBF1; color: #475569; }
 """
 

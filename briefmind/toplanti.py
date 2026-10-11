@@ -3,7 +3,8 @@ toplanti.py — tek komut: yakala -> (arka planda duzelt + ozetle) -> bitiste in
 
   python toplanti.py basla [--baslik "..."] [--outlook] [--sessiz] [--duzeltme-yok] [--otobitir 180] [--inceleme-yok]
       Baslik verilmezse Outlook takviminden aktif toplanti alinir (katilimcilar + gundem de).
-      Teams'te altyazi grubu gorunene kadar bekler, gorununce yakalamaya baslar.
+      Teams'te altyazi grubu gorunene kadar bekler, gorununce yakalamaya baslar. Metin sesten (STT), konusmaci
+      altyazinin zamanindan gelir; Teams altyazi metni transkripte girmez.
       Altyazi grubu --otobitir saniye boyunca kaybolursa (toplantidan cikildi) kendiliginden bitirir;
       Ctrl+C de bitirir. Bitiste supheli terimler konsolda sorulur, sonra not uretilir.
       --inceleme-yok: konsol incelemesi atlanir, not dogrudan uretilir (oneriler oneriler.json'da kalir).
@@ -18,6 +19,7 @@ import os
 import sys
 import time
 
+import ayar as ayar_mod
 import llm
 import motor as motor_mod
 import outlook
@@ -113,25 +115,66 @@ def tamamla(m, a_outlook, alicilar=None, inceleme=True):
 
 # ---------- komutlar ----------
 
+def ses_servisi_kur(m, ayar, klasor):
+    """isler.YakalamaIsi ile ayni baglanti: SesServisi klip/bosluk/kulaklik olaylari -> m.ses_olayi (C1), yeniden kesme
+    m.yeniden_kes_fn. Transkript metni yalniz sesten (STT) gelir. Kurulamazsa None ('STT yok' durumu motora yazilir;
+    altyazi moduna dusulmez)."""
+    try:
+        import ses as ses_mod
+        servis = ses_mod.SesServisi(
+            ayar.get("stt_url", ""),
+            ipucu_fn=lambda: (m.sozluk.metin(m.seri) + "; " + ", ".join(m.katilimcilar)),
+            mod="otomatik", mik_cihaz=ayar.get("mikrofon_cihaz"), olay=olay, olay_fn=m.ses_olayi,
+            model=ayar.get("stt_model", "whisper"), api_key=ayar.get("stt_key", ""),
+            proxy=ayar.get("stt_proxy", True), verify=ayar_mod.tls_dogrulama(ayar))
+        if ayar.get("olcum_kaydi", False):
+            servis.olcum_kaydi_ac(klasor)
+        elif ayar.get("kesinti_kaydi", False):
+            servis.kesinti_kaydi_ac(klasor)
+        m.yeniden_kes_fn = servis.yeniden_kes
+        if servis.baslat():
+            return servis
+        neden = "ses yakalama açılamadı"
+    except Exception as e:
+        neden = repr(e)
+    m.yeniden_kes_fn = None
+    print(f"✖ ses yakalama başlatılamadı: {neden} — transkript yazılamayacak (Teams altyazı metni transkripte girmez)")
+    m.stt_durumu_ayarla({"durum": "kesinti", "bas": time.time(), "bekleyen": 0, "kayit": False, "eksik": [],
+                         "hata": str(neden)[:200]})
+    return None
+
+
 def komut_basla(a):
+    """Yakalama: metin sesten (SesServisi -> Motor.ses_olayi), konusmaci altyazi okumalarinin ZAMANINDAN
+    (Yakalayici okuma_fn -> Motor.okuma_ekle). Teams altyazi metni transkripte girmez; Yakalayici satirlari yalniz
+    Motor.altyazi_satiri'na gider (canli iz; opt-in 'altyazi_yedek' ve STT yokken yedek)."""
     olay.sessiz = a.sessiz
+    ayar = ayar_mod.ayar_oku()
     tarih = dt.date.today()
     ctx = outlook.aktif_toplanti() or {}
     baslik = a.baslik or ctx.get("baslik") or input("Toplantı başlığı: ").strip() or "Toplantı"
     if ctx:
         print(f"Outlook: '{ctx['baslik']}' — {len(ctx['katilimcilar'])} katılımcı, gündem {'var' if ctx.get('gundem') else 'yok'}")
     klasor = motor_mod.yeni_klasor(baslik, tarih)
-    m = Motor(klasor, baslik, tarih, Sozluk(), ctx.get("katilimcilar"), ctx.get("gundem", ""),
-              duzelt=not a.duzeltme_yok, olay=olay)
-    y = Yakalayici()
+    katilimcilar = list(ctx.get("katilimcilar") or [])
+    m = Motor(klasor, baslik, tarih, Sozluk(), katilimcilar, ctx.get("gundem", ""),
+              duzelt=not a.duzeltme_yok, olay=olay, kaynak="ses", ben=outlook.ben_adi(ayar),
+              esikler=ayar.get("esikler"), altyazi_yedek=bool(ayar.get("altyazi_yedek", False)))
+    servis = ses_servisi_kur(m, ayar, klasor)
+    y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=m.okuma_ekle)
     print(f"Klasör: {klasor}\nTeams'te altyazı bekleniyor (pencere arkada kalabilir, küçültme). Bitirmek için Ctrl+C.")
 
     ekran_okuyucu(True)
     basladi, son_durum, uyari = False, time.time(), 0
     try:
         while True:
-            for satir in y.oku():
-                m.satir_ekle(satir)
+            if servis is not None:
+                try:
+                    m.stt_durumu_ayarla(servis.stt_durumu)
+                except Exception:
+                    pass
+            for satir in y.oku():                # okuma olayi okuma_fn ile motora; satir yalniz canli iz / yedek
+                m.altyazi_satiri(satir)
             if y.hazir and not basladi:
                 print("altyazı bulundu, yakalama başladı.")
                 basladi = True
@@ -154,8 +197,14 @@ def komut_basla(a):
         print("\nToplantı bitiriliyor...")
     finally:
         ekran_okuyucu(False)
+        if servis is not None:
+            try:
+                servis.durdur()
+            except Exception as e:
+                print(f"! ses servisi durdurulamadı: {e!r}")
+        m.yeniden_kes_fn = None                   # ses durdu: bitiste devir bolunmez ('A → B')
     for satir in y.bitir():
-        m.satir_ekle(satir)
+        m.altyazi_satiri(satir)
     tamamla(m, a.outlook, ctx.get("katilimcilar"), inceleme=not a.inceleme_yok)
 
 

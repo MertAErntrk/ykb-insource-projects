@@ -1,14 +1,23 @@
-"""Cok konusmacili toplanti: satir sirasi, konusmaci atamasi, yanki; aksiyon tarihleri; LLM gunlugu."""
+"""Cok konusmacili toplanti: satir sirasi, konusmaci atamasi (Faz 1: yalniz zaman), yanki; aksiyon tarihleri;
+LLM gunlugu."""
 import datetime as dt
 import json
 import threading
 import time
 import types
 
+import pytest
+
 import llm
 import motor as motor_mod
 import ses
 import tarih
+from test_motor_faz1 import T0, akit, saat_kur
+
+
+@pytest.fixture
+def saat(monkeypatch):
+    return saat_kur(monkeypatch)
 
 
 # ---------------------------------------------------------------- sira (A3)
@@ -49,49 +58,50 @@ def test_iki_isci_ters_bitirse_de_sira_korunur(monkeypatch):
     assert yayilan == ["Parça numarası 0 için uzun bir cümle.", "Parça numarası 1 için uzun bir cümle."]
 
 
-# ---------------------------------------------------------------- konusmaci
+# ---------------------------------------------------------------- konusmaci (Faz 1: yalniz zaman)
+
+A_, B_ = "Ahmet Yılmaz", "Ayşe Demir"
+
 
 def _motor(tmp_path, ben="Deniz"):
-    m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 29), duzelt=False, kaynak="ses", ben=ben)
+    m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date.fromtimestamp(T0), duzelt=False, ben=ben,
+                        katilimcilar=[A_, B_, ben])
+    m._isle = lambda veri, duzelt: None
     return m
 
 
-def test_metin_eslesmezse_ve_iki_kisi_konusuyorsa_tahmin_etmez(tmp_path):
+def test_iki_kisi_konusurken_metin_degil_zaman_belirler(tmp_path, saat):
+    """Eskiden: metin eslesmezse '?', eslesirse metnin sahibine (zamanca daha yakin olsa bile). Simdi altyazi
+    metnine hic bakilmaz; klip kimin konusma araligindaysa ona yazilir (altyazi metni ayni cumleyi tasisa da)."""
     m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ahmet Yılmaz", "text": "Bütçe tablosunu güncelledim"})
-    m.altyazi_satiri({"ts": "10:00:04", "speaker": "Ayşe Demir", "text": "Test ortamı hazır olacak"})
-    s = m.ses_satiri("10:00:03", None, "Kampanya görsellerini kim onaylıyor acaba", "loopback")
-    assert s["speaker"] == "?"                 # eskiden zamana en yakin kisiye yaziliyordu
+    sozler = [(A_, 1, 4), (B_, 6, 9), (A_, 11, 14), (B_, 16, 19)]
+    klipler = [(i + 1, "loopback", s_, e, "Test ortamı perşembe hazır olacak.") for i, (_, s_, e) in
+               enumerate(sozler)]
+    akit(m, saat, sozler, klipler, 25, metin="Test ortamı perşembe hazır olacak")
+    assert [s["speaker"] for s in m.mevcut] == [A_, B_, A_, B_]
     m.kapat()
 
 
-def test_metin_eslesirse_dogru_kisiye_yazar(tmp_path):
+def test_tek_kisi_konusuyorsa_ona_atar_kapsama_disi_bilinmeyen(tmp_path, saat):
     m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ahmet Yılmaz", "text": "Bütçe tablosunu güncelledim"})
-    m.altyazi_satiri({"ts": "10:00:04", "speaker": "Ayşe Demir", "text": "Test ortamı perşembe hazır olacak"})
-    s = m.ses_satiri("10:00:02", None, "Test ortamı perşembe hazır olacak.", "loopback")
-    assert s["speaker"] == "Ayşe Demir"        # zamanca Ahmet daha yakin ama metin Ayse'nin
+    akit(m, saat, [(A_, 1, 4)], [(1, "loopback", 1, 4, "Bütçe tablosunu güncelledim."),
+                                (2, "loopback", 10, 12, "Kampanya görsellerini de ekledim.")], 15)
+    assert m.mevcut[0]["speaker"] == A_
+    assert m.mevcut[1]["speaker"] == "?"            # o anda altyazida kimse yok: eskiden son konusana yaziliyordu
     m.kapat()
 
 
-def test_tek_kisi_konusuyorsa_zamana_gore_atar(tmp_path):
+def test_hoparlor_yankisi_atilir_kullanicinin_sozu_ben(tmp_path, saat):
+    """Kulakliksiz: Ayse'nin sesi mikrofona da girdi -> yanki klibi atilir (eskiden Ayse'ye ikinci satir
+    yaziliyordu). Kullanicinin kendi sozu (altyazida kendi adiyla) mikrofon klibinde 'ben'."""
     m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ahmet Yılmaz", "text": "Bütçe tablosunu güncelledim"})
-    s = m.ses_satiri("10:00:03", None, "Kampanya görsellerini de ekledim", "loopback")
-    assert s["speaker"] == "Ahmet Yılmaz"
-    m.kapat()
-
-
-def test_hoparlor_yankisi_mikrofon_satirini_konusana_yazar(tmp_path):
-    m = _motor(tmp_path)
-    m.kulaklik = False                         # Faz0: yalniz kulaklik YOK diye biliniyorsa mikrofon satiri baskasina yazilir
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Test ortamı perşembe hazır olacak"})
-    s = m.ses_satiri("10:00:02", "ben", "Test ortamı perşembe hazır olacak.", "mikrofon")
-    assert s["speaker"] == "Ayşe Demir"
-    # kullanicinin kendi sozu (altyazida kendi adiyla) 'ben' olarak kalir
-    m.altyazi_satiri({"ts": "10:00:10", "speaker": "Deniz Can Öztürk", "text": "Ben Jira kaydını açarım"})
-    s2 = m.ses_satiri("10:00:11", "ben", "Ben Jira kaydını açarım.", "mikrofon")
-    assert s2["speaker"] == "Deniz"
+    m.ses_olayi({"tur": "kulaklik", "durum": False, "guven": 0.9})
+    sozler = [(B_, 1, 5), ("Deniz Can Öztürk", 10, 13)]
+    klipler = [(1, "loopback", 1, 5, "Test ortamı perşembe hazır olacak."),
+               (2, "mikrofon", 1.1, 4.9, "Test ortamı perşembe hazır olacak."),
+               (3, "mikrofon", 10, 13, "Ben Jira kaydını açarım.")]
+    akit(m, saat, sozler, klipler, 16)
+    assert [(s["akis"], s["speaker"]) for s in m.mevcut] == [("loopback", B_), ("mikrofon", "Deniz")]
     m.kapat()
 
 

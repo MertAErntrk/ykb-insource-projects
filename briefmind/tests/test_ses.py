@@ -1,5 +1,11 @@
-"""Ses parcalama ve Whisper sonuc filtreleri (cihaz/STT gerekmez)."""
+"""Ses parcalama, zaman tabani, klip olaylari, halka tampon, pasif kulaklik, STT kesintisi (cihaz/STT/ag gerekmez)."""
+import datetime as dt
+import itertools
+import json
+import os
 import queue
+import threading
+import time
 
 import numpy as np
 
@@ -140,3 +146,739 @@ def test_stt_kalici_kopmada_hata_verir(monkeypatch):
     import pytest
     with pytest.raises(ses.requests.ConnectionError):
         s.coz(np.zeros(16000, dtype="float32"))
+
+
+# ================================================================ Faz 1: zaman tabani, klip olaylari, halka tampon,
+# yeniden kesme, pasif kulaklik, STT kesintisi, sira (cihaz ve ag yok; sahte saat/STT)
+
+T0 = 1_700_000_000.0
+
+
+def _sessiz(rng, n):
+    return [_blok(0.0005, rng) for _ in range(n)]
+
+
+def _konusma(rng, n, dipler=None, genlik=0.1):
+    """n blokluk konusma; dipler: {blok_indeksi: genlik} daha sessiz bloklar."""
+    dipler = dipler or {}
+    return [_blok(dipler.get(i, genlik), rng) for i in range(n)]
+
+
+def _akis(bloklar, kuyruk=None, saat=None, sayac=None, **kw):
+    class Sahte(ses.AkisYakalayici):
+        def _bloklar_mikrofon(self_):
+            yield from bloklar
+
+    return Sahte("mikrofon", kuyruk if kuyruk is not None else queue.Queue(),
+                 sayac=sayac if sayac is not None else itertools.count(), saat=saat or (lambda: T0), **kw)
+
+
+def _tek_klip_akisi(dipler=None, n=20, **kw):
+    rng = np.random.default_rng(7)
+    a = _akis(_sessiz(rng, 10) + _konusma(rng, n, dipler) + _sessiz(rng, 10), **kw)
+    a.run()
+    return a
+
+
+# ---------------------------------------------------------------- zaman tabani
+
+def test_klip_zamani_ornek_sayacindan_gelir_varistan_degil():
+    a = _tek_klip_akisi()
+    p = a.kuyruk.get_nowait()
+    capa = T0 - 0.1                                            # ilk blok T0'da bitti
+    assert abs(a.epoch_capa - capa) < 1e-9
+    assert p["v_ornek_bas"] == 10 * ses.BLOK and p["v_ornek_bit"] == 30 * ses.BLOK
+    # bas = ilk SESLI blok (on-yuk disarida), bit = SON SESLI blogun sonu (sondaki sessizlik disarida)
+    assert abs(p["bas_epoch"] - (capa + 1.0)) < 1e-9 and abs(p["bit_epoch"] - (capa + 3.0)) < 1e-9
+    assert p["ornek_bas"] == 7 * ses.BLOK and p["ornek_bit"] > p["v_ornek_bit"]       # ses: on-yuk + sondaki sessizlik dahil
+    # gercek saat 2023'ten sonra; zaman sahte saatten (sayactan) geldi: parca_bas artik now()'dan turemez
+    assert abs(p["basla"].timestamp() - p["bas_epoch"]) < 1e-3 and abs(p["bitis"].timestamp() - p["bit_epoch"]) < 1e-3
+    assert abs(time.time() - p["bas_epoch"]) > 1e6
+    assert p["klip_no"] == 1 and p["no"] == 0 and p["ust_klip"] is None
+    assert len(p["zarf"]) == 20 and all(0.05 < z < 0.2 for z in p["zarf"])             # 100 ms basina RMS (sesli aralik)
+    assert 0.08 < p["rms"] < 0.12
+
+
+def test_klip_numaralari_global_artar():
+    rng = np.random.default_rng(3)
+    bloklar = []
+    for _ in range(3):
+        bloklar += _sessiz(rng, 10) + _konusma(rng, 20)
+    bloklar += _sessiz(rng, 10)
+    a = _akis(bloklar)
+    a.run()
+    nolar = [a.kuyruk.get_nowait()["klip_no"] for _ in range(3)]
+    assert nolar == [1, 2, 3]
+
+
+def _sessiz_akis(saat, atlama_blok=None, atlama_sn=0.0, blok_sayisi=1300):
+    def gen():
+        for i in range(blok_sayisi):
+            saat[0] += 0.1                                      # blok varis ani
+            if i == atlama_blok:
+                saat[0] += atlama_sn                            # cihaz takildi / saat kaydi
+            yield np.zeros(ses.BLOK, dtype="float32")
+    return gen()
+
+
+def test_saat_capasi_60sn_da_kayma_varsa_yeniden_kurulur():
+    saat = [T0]
+    olaylar = []
+    a = _akis(_sessiz_akis(saat, atlama_blok=700, atlama_sn=0.5), saat=lambda: saat[0],
+              olay=lambda t, v: olaylar.append((t, v)))
+    a.run()                                                     # 130 sn'lik akis
+    assert a.capa_sayisi == 1                                   # 60. sn'de senkron, 120. sn'de 0.5 sn kayma
+    capa_olay = [v for t, v in olaylar if t == "capa"]
+    assert len(capa_olay) == 1 and abs(capa_olay[0]["fark"] - 0.5) < 1e-3 and capa_olay[0]["akis"] == "mikrofon"
+    assert any(t == "log" and "çapa" in v for t, v in olaylar)
+    ilk_capa = T0
+    assert abs(a.epoch_capa - (ilk_capa + 0.5)) < 1e-3                                  # sahte saat 0.1'lik toplamlarla ilerler
+    # eski orneklerin zamani degismez, yenilerinki yeni capayla
+    assert abs(a.ornek_epoch(100 * ses.BLOK) - (ilk_capa + 10.0)) < 1e-3
+    assert abs(a.ornek_epoch(1250 * ses.BLOK) - (ilk_capa + 0.5 + 125.0)) < 1e-3
+    for n in (100 * ses.BLOK, 1250 * ses.BLOK):
+        assert abs(a.epoch_ornek(a.ornek_epoch(n)) - n) < 1e-3
+
+
+def test_kucuk_kayma_yeniden_capalamaz():
+    saat = [T0]
+    olaylar = []
+    a = _akis(_sessiz_akis(saat, atlama_blok=700, atlama_sn=0.2), saat=lambda: saat[0],
+              olay=lambda t, v: olaylar.append((t, v)))
+    a.run()
+    assert a.capa_sayisi == 0 and not [1 for t, _ in olaylar if t == "capa"]
+
+
+def test_servis_capa_olayini_olaylar_jsonl_ye_yazar(tmp_path):
+    s = ses.SesServisi("", olcum_klasor=str(tmp_path))
+    s._akis_olayi("capa", {"akis": "loopback", "fark": 0.42})
+    with open(s._olcum.olaylar_jsonl, encoding="utf-8") as f:
+        satirlar = [json.loads(x) for x in f if x.strip()]
+    assert satirlar[0]["tur"] == "capa" and satirlar[0]["akis"] == "loopback" and satirlar[0]["fark"] == 0.42
+
+
+# ---------------------------------------------------------------- halka tampon
+
+def test_halka_tampon_pencere_ve_dilim():
+    assert ses.HALKA_SN == 600 and ses.HalkaTampon().maks * 2 == 19_200_000            # 10 dk float16 ~ 19 MB
+    h = ses.HalkaTampon(sn=1)
+    x = (0.5 * np.sin(np.arange(48000) / 11.0)).astype("float32")
+    for i in range(30):
+        h.ekle(i * ses.BLOK, x[i * ses.BLOK:(i + 1) * ses.BLOK])
+    assert h.bitis == 48000 and h.baslangic == 32000
+    d = h.al(40000, 41000)
+    assert d.dtype == np.float32 and len(d) == 1000 and float(np.max(np.abs(d - x[40000:41000]))) < 1e-3
+    assert h.al(0, 1000) is None and h.al(47000, 49000) is None                         # pencere disi
+    assert len(h.al(5, 5)) == 0
+
+
+def test_akis_halka_tamponu_dolar():
+    a = _tek_klip_akisi()
+    assert a.halka.bitis == a.toplam_ornek == 40 * ses.BLOK
+    assert a.halka.al(0, ses.BLOK) is not None
+
+
+# ---------------------------------------------------------------- yeniden kesme
+
+def _kesilebilir(dipler, halka_sn=ses.HALKA_SN, n=60):
+    a = _tek_klip_akisi(dipler, n=n, halka_sn=halka_sn)
+    p = a.kuyruk.get_nowait()
+    return a, p
+
+
+def test_yeniden_kes_en_sessiz_blokta_boler():
+    # 6 sn'lik klip; 3.0. sn'de dip (genlik 0.02); aralik disinda (5.5. sn) daha derin dip: pencere +-1 sn olmali
+    a, p = _kesilebilir({30: 0.02, 55: 0.01})
+    v0 = p["v_ornek_bas"]
+    assert a.kes(p["klip_no"], p["bas_epoch"] + 3.0) is True
+    ilk, ikinci = a.kuyruk.get_nowait(), a.kuyruk.get_nowait()
+    kes = v0 + 30 * ses.BLOK + ses.BLOK // 2                                # dip blogunun ortasi
+    assert ilk["v_ornek_bit"] == kes == ikinci["v_ornek_bas"]
+    assert ilk["v_ornek_bas"] == v0 and ikinci["v_ornek_bit"] == p["v_ornek_bit"]
+    assert ilk["ust_klip"] == p["klip_no"] == ikinci["ust_klip"]
+    assert (ilk["klip_no"], ikinci["klip_no"]) == (2, 3)                    # yeni, artan klip_no'lar
+    assert ilk["bit_epoch"] == ikinci["bas_epoch"]
+    assert abs(ilk["bas_epoch"] - p["bas_epoch"]) < 1e-9 and abs(ikinci["bit_epoch"] - p["bit_epoch"]) < 1e-9
+    assert abs((ilk["bit_epoch"] - ilk["bas_epoch"]) - 3.05) < 1e-6
+    # ses: ilk parca on-yukten kesime, ikinci parca kesimden klibin sonuna (sondaki sessizlik dahil)
+    assert len(ilk["ses"]) == kes - p["ornek_bas"] and len(ikinci["ses"]) == p["ornek_bit"] - kes
+    assert len(ilk["zarf"]) == 31 and len(ikinci["zarf"]) == 30
+    assert ilk["ornek_bas"] == p["ornek_bas"] and ikinci["ornek_bit"] == p["ornek_bit"]
+    # ayni klip ikinci kez kesilmez
+    assert a.kes(p["klip_no"], p["bas_epoch"] + 3.0) is False and a.kuyruk.empty()
+
+
+def test_yeniden_kes_parca_1_sn_den_kisaysa_false():
+    a, p = _kesilebilir({5: 0.02})                                          # dip 0.5. sn: ilk parca 0.55 sn
+    assert a.kes(p["klip_no"], p["bas_epoch"] + 0.5) is False
+    assert a.kuyruk.empty() and a.klipler[p["klip_no"]]["kesildi"] is False
+    a2, p2 = _kesilebilir({55: 0.02})                                       # dip 5.5. sn: ikinci parca 0.45 sn
+    assert a2.kes(p2["klip_no"], p2["bas_epoch"] + 5.5) is False and a2.kuyruk.empty()
+
+
+def test_yeniden_kes_bilinmeyen_ya_da_halkadan_cikmis_klip_false():
+    a, p = _kesilebilir({30: 0.02})
+    assert a.kes(999, p["bas_epoch"] + 3.0) is False
+    a2, p2 = _kesilebilir({30: 0.02}, halka_sn=2)                           # 2 sn'lik halka: 6 sn'lik klip sigmaz
+    assert a2.kes(p2["klip_no"], p2["bas_epoch"] + 3.0) is False and a2.kuyruk.empty()
+
+
+def test_servis_yeniden_kes_iki_parcayi_ust_klip_ile_yayar():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    rng = np.random.default_rng(7)
+    a = _akis(_sessiz(rng, 10) + _konusma(rng, 60, {30: 0.02}) + _sessiz(rng, 10), kuyruk=s.kuyruk, sayac=s._sayac)
+    a.run()
+    s.akislar = [a]
+    metinler = iter(["Birinci konuşmacı raporu anlattı.", "Ardından ikincisi itiraz etti.",
+                     "Sonunda ikisi de uzlaştı."])
+    s.stt = _KlipStt(lambda ses_: [{"text": next(metinler)}])
+    s._dur.set()
+    s._calis()                                                              # ana klip
+    ana = olaylar[-1]
+    assert ana["tur"] == "klip" and ana["klip_no"] == 1 and ana["ust_klip"] is None
+    assert s.yeniden_kes(1, ana["bas"] + 3.0) is True
+    assert s.yeniden_kes(77, ana["bas"] + 3.0) is False
+    s._calis()                                                              # iki parca STT'ye gider
+    parcalar = olaylar[1:]
+    assert [(e["klip_no"], e["ust_klip"]) for e in parcalar] == [(2, 1), (3, 1)]
+    assert parcalar[0]["bit"] == parcalar[1]["bas"] and abs(parcalar[0]["bas"] - ana["bas"]) < 1e-9
+    assert abs(parcalar[1]["bit"] - ana["bit"]) < 1e-9
+    assert abs(parcalar[0]["sure"] + parcalar[1]["sure"] - ana["sure"]) < 1e-6
+
+
+class _KlipStt:
+    verbose = True
+    yeniden_deneme = 0
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def coz(self, ses_, onceki=""):
+        return self._fn(ses_)
+
+    def saglik(self, deneme=1):
+        return True
+
+
+# ---------------------------------------------------------------- C1 klip olayi
+
+def _klip_p(no=0, akis="loopback", bas=T0 + 10.0, sure=2.0, klip_no=None, ust=None):
+    x = (0.1 * np.sin(np.arange(int(16000 * (sure + 0.6))) / 7.0)).astype("float32")
+    return {"kaynak": akis, "basla": dt.datetime.fromtimestamp(bas), "bitis": dt.datetime.fromtimestamp(bas + sure),
+            "ses": x, "no": no, "klip_no": no + 1 if klip_no is None else klip_no, "bas_epoch": bas,
+            "bit_epoch": bas + sure, "zarf": [0.1] * int(sure * 10), "rms": 0.07, "ust_klip": ust,
+            "ornek_bas": 0, "ornek_bit": len(x), "epoch_capa": bas}
+
+
+def test_bir_klip_bir_olay_metin_birden_cok_cumle_icerir():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    s.stt = _KlipStt(lambda ses_: [{"text": "Raporu perşembeye yetiştirelim. Sonra toplantıyı kapatalım.",
+                                    "avg_logprob": -0.3, "no_speech_prob": 0.01}])
+    s.kuyruk.put(_klip_p())
+    s._dur.set()
+    s._calis()
+    assert len(olaylar) == 1
+    e = olaylar[0]
+    assert set(e) == {"tur", "klip_no", "akis", "bas", "bit", "sure", "text", "ts", "rms", "zarf", "ust_klip", "supheli"}
+    assert e["tur"] == "klip" and e["klip_no"] == 1 and e["akis"] == "loopback"
+    assert e["text"] == "Raporu perşembeye yetiştirelim. Sonra toplantıyı kapatalım."
+    assert e["bas"] == T0 + 10.0 and e["bit"] == T0 + 12.0 and abs(e["sure"] - 2.0) < 1e-9
+    assert e["ts"] == dt.datetime.fromtimestamp(T0 + 10.0).strftime("%H:%M:%S")
+    assert e["zarf"] == [0.1] * 20 and e["rms"] == 0.07 and e["ust_klip"] is None and e["supheli"] is False
+
+
+def test_halusinasyon_klibi_olay_uretmez_sira_kapanir():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    cevaplar = iter([[{"text": "İzlediğiniz için teşekkür ederim."}], [{"text": "Gerçek bir toplantı cümlesi."}]])
+    s.stt = _KlipStt(lambda ses_: next(cevaplar))
+    s.kuyruk.put(_klip_p(no=0))
+    s.kuyruk.put(_klip_p(no=1, bas=T0 + 20.0))
+    s._dur.set()
+    s._calis()
+    assert [e["klip_no"] for e in olaylar] == [2] and s.elenen >= 1
+
+
+def test_ayni_cumle_ayni_akista_90sn_icinde_tekrar_olay_olmaz():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    s.stt = _KlipStt(lambda ses_: [{"text": "Raporu perşembeye yetiştirelim."}])
+    for no in range(3):
+        s.kuyruk.put(_klip_p(no=no, bas=T0 + 10.0 + 10 * no))
+    s._dur.set()
+    s._calis()
+    assert [e["klip_no"] for e in olaylar if e["text"]] == [1]
+    # suzgecte dusen loopback klibi metinsiz yayilir (o anda loopback'te ses vardi: yanki tespiti / L capasi)
+    assert [(e["klip_no"], e["text"]) for e in olaylar[1:]] == [(2, ""), (3, "")]
+
+
+def test_suzgecte_dusen_mikrofon_klibi_olay_uretmez():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    s.stt = _KlipStt(lambda ses_: [{"text": "Raporu perşembeye yetiştirelim."}])
+    for no in range(3):
+        s.kuyruk.put(_klip_p(no=no, akis="mikrofon", bas=T0 + 10.0 + 10 * no))
+    s._dur.set()
+    s._calis()
+    assert [e["klip_no"] for e in olaylar] == [1]
+
+
+def test_yeniden_kesme_parcalari_tekrar_suzgecinden_muaf():
+    """Parcanin cumleleri ust klibin (kaydedilmis) cumleleridir: suzgec ikisini de dusurmemeli (bulgu: parcalar hic
+    gelmiyor ya da biri dusunce ust klibin cumlesi kayboluyordu)."""
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    ust = {"tur": "klip", "klip_no": 1, "akis": "loopback", "bas": T0, "bit": T0 + 7.0, "sure": 7.0,
+           "text": "Raporu ben hazirlarim. Peki ya sen bakar misin?", "ts": "10:00:00", "rms": 0.1,
+           "zarf": [0.1] * 70, "ust_klip": None, "supheli": False}
+    s._sirali_yay(None, [ust])
+    s._sirali_yay(None, [dict(ust, klip_no=2, bit=T0 + 3.0, text="Raporu ben hazirlarim.", ust_klip=1)])
+    s._sirali_yay(None, [dict(ust, klip_no=3, bas=T0 + 3.0, text="Peki ya sen bakar misin?", ust_klip=1)])
+    assert [(e["klip_no"], e["text"]) for e in olaylar] == [
+        (1, "Raporu ben hazirlarim. Peki ya sen bakar misin?"), (2, "Raporu ben hazirlarim."),
+        (3, "Peki ya sen bakar misin?")]
+
+
+def test_yeniden_kesme_parcasi_metni_bos_olsa_da_olay_olur():
+    """Parcanin STT'si bos donerse (o yarida soz yok) olay metinsiz gelir: motor parcanin geldigini bilir."""
+    s = ses.SesServisi("", olay_fn=lambda e: None)
+    p = _klip_p(no=0, ust=7)
+    ev = s.klip_olayi_uret(p, [{"text": ""}])
+    assert ev is not None and ev["text"] == "" and ev["ust_klip"] == 7
+    assert s.klip_olayi_uret(_klip_p(no=1), [{"text": ""}]) is None              # normal klip: olay yok
+
+
+def test_saat_capasi_olay_fn_ile_motora_gider():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    s._akis_olayi("capa", {"akis": "loopback", "fark": 2.0, "ornek": 1, "epoch_capa": 1.0, "saat": 2.0})
+    assert olaylar == [{"tur": "capa", "akis": "loopback", "fark": 2.0}]
+
+
+def test_olaylar_klip_sirasiyla_iki_isci_ters_bitirse_de(monkeypatch):
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    gecikme = {0: 0.3, 1: 0.0}
+
+    def coz(ses_):
+        no = int(round(float(ses_[0]) * 1000))
+        time.sleep(gecikme[no])
+        return [{"text": f"{no + 1} numaralı klip için uzun bir cümle."}]
+
+    s.stt = _KlipStt(coz)
+    for no in (0, 1):
+        p = _klip_p(no=no, bas=T0 + 10.0 * no)
+        p["ses"] = np.full(16000 * 2, no / 1000.0, dtype="float32")
+        s.kuyruk.put(p)
+    s._dur.set()
+    isciler = [threading.Thread(target=s._calis, daemon=True) for _ in range(2)]
+    for i in isciler:
+        i.start()
+    for i in isciler:
+        i.join(timeout=5)
+    assert [e["klip_no"] for e in olaylar] == [1, 2]
+
+
+def test_eski_yol_olay_fn_yokken_satir_fn_calisir():
+    satirlar = []
+    s = ses.SesServisi("", satir_fn=lambda ts, kim, metin, akis: satirlar.append((kim, metin, akis)))
+    s.stt = _KlipStt(lambda ses_: [{"text": "Raporu perşembeye yetiştirelim."}])
+    s.kuyruk.put(_klip_p(akis="mikrofon"))
+    s._dur.set()
+    s._calis()
+    assert satirlar == [("ben", "Raporu perşembeye yetiştirelim.", "mikrofon")]
+
+
+def test_olcum_kaydi_klip_no_zarf_ve_sesli_zaman_yazar(tmp_path):
+    s = ses.SesServisi("", olcum_klasor=str(tmp_path))
+    s.stt = _KlipStt(lambda ses_: [{"text": "Raporu perşembeye yetiştirelim."}])
+    s.kuyruk.put(_klip_p(ust=5))
+    s._dur.set()
+    s._calis()
+    with open(os.path.join(str(tmp_path), "olcum", "klipler.jsonl"), encoding="utf-8") as f:
+        (k,) = [json.loads(x) for x in f if x.strip()]
+    assert k["klip_no"] == 1 and k["ust_klip"] == 5 and k["zarf"] == [0.1] * 20 and k["rms"] == 0.07
+    assert k["bas"] == T0 + 10.0 and k["bit"] == T0 + 12.0                  # sesli aralik, ornek sayacindan degil
+    assert len(k["tsler"]) == 1 and k["tsler"][0] == k["ts"]
+
+
+# ---------------------------------------------------------------- sira: bastaki numara takilirsa
+
+def test_bastaki_numara_60sn_takilirsa_atlanir_gec_gelen_kaybolmaz():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    saat = [1000.0]
+    s._mono = lambda: saat[0]
+    ev = lambda no: {"tur": "klip", "klip_no": no + 1, "akis": "loopback", "bas": T0 + no, "bit": T0 + no + 1,
+                     "sure": 1.0, "text": f"{no} numaralı konuşma cümlesi burada.", "ts": "10:00:00", "rms": 0.1,
+                     "zarf": [], "ust_klip": None, "supheli": False}
+    s._sirali_yay(1, [ev(1)])
+    s._sirali_yay(2, [ev(2)])
+    assert olaylar == []                                    # 0 numara bekleniyor
+    saat[0] += ses.HOL_SN - 1
+    s._hol_kontrol()
+    assert olaylar == []
+    saat[0] += 2
+    s._hol_kontrol()                                        # 60 sn doldu: 0 atlanir, arkadakiler yayilir
+    assert [e["klip_no"] for e in olaylar] == [2, 3] and s.atlanan_numara == 1
+    s._sirali_yay(0, [ev(0)])                               # gec gelen sonuc kaybolmaz
+    assert [e["klip_no"] for e in olaylar] == [2, 3, 1]
+    s._sirali_yay(3, [ev(3)])                               # sira normale doner
+    assert [e["klip_no"] for e in olaylar][-1] == 4
+
+
+# ---------------------------------------------------------------- durdur: son klip kaybolmaz
+
+def test_durdur_akisin_son_klibini_isciler_bitmeden_isler():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+    s.stt = _KlipStt(lambda ses_: [{"text": "Toplantı bitmeden söylenen son cümle."}])
+    rng = np.random.default_rng(5)
+
+    class Sahte(ses.AkisYakalayici):
+        def _bloklar_mikrofon(self_):
+            for _ in range(20):
+                yield _blok(0.1, rng)
+            while not self_._dur.is_set():                  # konusma suruyor; durdur() ile akis biter, yarim klip gonderilir
+                time.sleep(0.01)
+                yield _blok(0.1, rng)
+
+    a = Sahte("mikrofon", s.kuyruk, sayac=s._sayac)
+    s.akislar = [a]
+    a.start()
+    s._isciler = [threading.Thread(target=s._calis, daemon=True) for _ in range(2)]
+    for i in s._isciler:
+        i.start()
+    time.sleep(0.2)
+    s.durdur()                                              # eskiden isciler akis son klibi koymadan cikabilirdi
+    assert len(olaylar) == 1 and olaylar[0]["akis"] == "mikrofon" and olaylar[0]["sure"] > 2.0
+
+
+# ---------------------------------------------------------------- kuyruk tasmasi
+
+def test_kuyruk_tavan_tasma_fn_varsa_klip_ona_gider_yoksa_dusurulur():
+    q = queue.Queue()
+    for _ in range(ses.KUYRUK_TAVAN):
+        q.put({"ses": None})
+    olaylar, alinan = [], []
+    ses_ = np.full(ses.ORNEK * 2, 0.1, dtype="float32")
+    a = ses.AkisYakalayici("mikrofon", q, olay=lambda t, v: olaylar.append((t, v)), sayac=itertools.count(),
+                           tasma_fn=lambda p: alinan.append(p) or True)
+    a._gonder([ses_], None)
+    assert q.qsize() == ses.KUYRUK_TAVAN and len(alinan) == 1 and alinan[0]["klip_no"] == 1
+    assert [v["atlandi"] for t, v in olaylar if t == "stt_gecikme"] == [False]     # diske alindi: atlanmadi
+    b = ses.AkisYakalayici("mikrofon", q, olay=lambda t, v: olaylar.append((t, v)))     # eski davranis
+    b._gonder([ses_], None)
+    assert q.qsize() == ses.KUYRUK_TAVAN and olaylar[-1][1]["atlandi"] is True
+
+
+# ---------------------------------------------------------------- pasif kulaklik tespiti
+
+def _bursty(rng, n):
+    """Konusma benzeri 100 ms zarf: var/yok bolumleri + hece duzeyinde dalgalanma."""
+    z = np.zeros(n)
+    i, acik = 0, bool(rng.integers(0, 2))
+    while i < n:
+        uz = int(rng.integers(8, 30))
+        if acik:
+            mod = 0.5 + 0.5 * np.abs(np.sin(np.arange(uz) * rng.uniform(0.6, 1.2) + rng.uniform(0, 6))) * rng.uniform(0.6, 1.4, uz)
+            z[i:i + uz] = (rng.uniform(0.04, 0.15) * mod)[:len(z[i:i + uz])]
+        else:
+            z[i:i + uz] = 0.0005
+        i += uz
+        acik = not acik
+    return z[:n]
+
+
+def _kareler(L, M, faz=0.03):
+    return {"loopback": [(0.05 + 0.1 * i, float(L[i])) for i in range(len(L))],
+            "mikrofon": [(0.05 + faz + 0.1 * i, float(M[i])) for i in range(len(M))]}
+
+
+def test_kulaklik_hoparlor_yankisi_yuksek_korelasyon():
+    for tohum in range(5):
+        rng = np.random.default_rng(tohum)
+        L = _bursty(rng, 300)
+        M = 0.2 * np.roll(L, 2) + 0.0005 * rng.random(300)               # 200 ms gecikmeli, zayif yanki
+        durum, guven, r = ses.KulaklikTespit().hesapla(_kareler(L, M))
+        assert durum is False and r > 0.8 and guven > 0.8
+
+
+def test_kulaklik_yanki_arada_kullanici_konusunca_da_hoparlor():
+    rng = np.random.default_rng(11)
+    L = _bursty(rng, 300)
+    M = 0.2 * np.roll(L, 3) + 0.0005 * rng.random(300) + 0.15 * _bursty(rng, 300) * (L < 0.01)
+    durum, guven, r = ses.KulaklikTespit().hesapla(_kareler(L, M))
+    assert durum is False and r >= ses.KULAKLIK_YUKSEK
+
+
+def test_kulaklik_bagimsiz_akislar_kulaklik_var():
+    for tohum in range(8):
+        L = _bursty(np.random.default_rng(100 + tohum), 300)
+        M = _bursty(np.random.default_rng(200 + tohum), 300)           # kullanici kendi bagimsiz sesi
+        durum, guven, r = ses.KulaklikTespit().hesapla(_kareler(L, M))
+        assert durum is True and r < ses.KULAKLIK_DUSUK, (tohum, r)
+
+
+def test_kulaklik_yetersiz_veri_none():
+    rng = np.random.default_rng(1)
+    L, M = _bursty(rng, 300), _bursty(rng, 300)
+    t = ses.KulaklikTespit()
+    assert t.hesapla(_kareler(L[:100], M[:100]))[0] is None             # 10 sn < 15 sn
+    assert t.hesapla({"loopback": [], "mikrofon": []})[0] is None
+    sessiz = np.full(300, 0.0005)
+    assert t.hesapla(_kareler(sessiz, M))[0] is None                    # karsi taraf konusmuyor: anlamsiz
+    assert t.hesapla(_kareler(L, np.zeros(300)))[0] is True             # mikrofon sessiz (kapali): yanki yok
+
+
+def test_kulaklik_olayi_yalniz_degisimde_ve_gecmis_korunur():
+    olaylar = []
+    t = ses.KulaklikTespit(olay_fn=olaylar.append)
+    rng = np.random.default_rng(4)
+
+    def besle(L, M, bas):
+        for i in range(len(L)):
+            t.blok_ekle("loopback", bas + 0.05 + 0.1 * i, float(L[i]))
+            t.blok_ekle("mikrofon", bas + 0.08 + 0.1 * i, float(M[i]))
+
+    L1 = _bursty(rng, 400)
+    besle(L1, 0.2 * np.roll(L1, 2) + 0.0005 * rng.random(400), 0.0)                 # 40 sn hoparlor
+    assert t.durum is False and [e["durum"] for e in olaylar] == [False]
+    assert olaylar[0]["tur"] == "kulaklik" and 0.0 < olaylar[0]["guven"] <= 1.0
+    L2 = _bursty(rng, 600)
+    besle(L2, _bursty(rng, 600), 40.0)                                               # 60 sn bagimsiz: kulaklik takildi
+    assert t.durum is True and [e["durum"] for e in olaylar] == [False, True]
+    # karsi taraf susunca (veri yetersiz) durum degismez
+    besle(np.full(400, 0.0005), _bursty(rng, 400), 100.0)
+    assert t.durum is True and len(olaylar) == 2
+
+
+def test_kulaklik_mod_ayari_tespiti_ezer():
+    assert ses.SesServisi("", mod="cift").kulaklik is True
+    assert ses.SesServisi("", mod="tek").kulaklik is False
+    assert ses.SesServisi("", mod="otomatik").kulaklik is None
+    olaylar = []
+    t = ses.KulaklikTespit(olay_fn=olaylar.append)
+    t.sabitle(True)
+    assert olaylar == [{"tur": "kulaklik", "durum": True, "guven": 1.0}]
+    rng = np.random.default_rng(2)
+    L = _bursty(rng, 400)
+    for i in range(400):                                                              # yanki gelse de sabit karar degismez
+        t.blok_ekle("loopback", 0.1 * i, float(L[i]))
+        t.blok_ekle("mikrofon", 0.1 * i, float(0.2 * L[i]))
+    assert t.durum is True and len(olaylar) == 1
+
+
+def test_akis_kare_rms_sini_kulaklik_tespitine_verir():
+    kareler = []
+    rng = np.random.default_rng(9)
+    a = _akis(_sessiz(rng, 3) + _konusma(rng, 3), blok_fn=lambda akis, t, r: kareler.append((akis, t, r)))
+    a.run()
+    assert len(kareler) == 6 and all(k[0] == "mikrofon" for k in kareler)
+    capa = a.epoch_capa
+    assert abs(kareler[0][1] - (capa + 0.05)) < 1e-9 and abs(kareler[5][1] - (capa + 0.55)) < 1e-9   # blok ortasi (epoch)
+    assert kareler[0][2] < 0.01 < kareler[5][2]
+
+
+# ---------------------------------------------------------------- STT kesintisi
+
+class _Kesintili:
+    """coz: acik=False iken ConnectionError; saglik acik'a bagli."""
+    verbose = True
+    yeniden_deneme = 0
+
+    def __init__(self):
+        self.acik = False
+        self.cagrilar = 0
+        self.metin = lambda n: f"{['Birinci', 'İkinci', 'Üçüncü'][n]} klibin uzun bir toplantı cümlesi."
+        self.saglik_cagrilari = 0
+
+    def coz(self, ses_, onceki=""):
+        self.cagrilar += 1
+        if not self.acik:
+            raise ses.requests.ConnectionError("baglanti reddedildi")
+        return [{"text": self.metin(int(round(float(ses_[0]) * 1000)))}]
+
+    def saglik(self, deneme=1):
+        self.saglik_cagrilari += 1
+        return self.acik
+
+
+def _kesinti_p(no, akis="loopback"):
+    p = _klip_p(no=no, akis=akis, bas=T0 + 10.0 * no)
+    p["ses"] = np.full(16000 * 2, no / 1000.0, dtype="float32")
+    return p
+
+
+def _bekle(kosul, sn=5.0):
+    son = time.time() + sn
+    while time.time() < son:
+        if kosul():
+            return True
+        time.sleep(0.01)
+    return kosul()
+
+
+def test_stt_kesintisi_bosluk_olaylari_ve_yedek_diske_yazilir_donunce_sirayla_cozulur(tmp_path, monkeypatch):
+    monkeypatch.setattr(ses, "KESINTI_YOKLAMA", 0.02)
+    olaylar, loglar = [], []
+    s = ses.SesServisi("", olay_fn=olaylar.append, olay=lambda t, v: loglar.append((t, v)),
+                       kesinti_klasor=str(tmp_path))
+    stt_ = s.stt = _Kesintili()
+    # worker: ilk istekte kesinti acilir, kalan klipler istek atmadan saklanir
+    for no in (0, 1, 2):
+        s._isle(_kesinti_p(no, "loopback" if no != 1 else "mikrofon"))
+    assert stt_.cagrilar == 1
+    assert [e["tur"] for e in olaylar] == ["bosluk"] * 3 and {e["neden"] for e in olaylar} == {"stt_yok"}
+    assert [e["akis"] for e in olaylar] == ["loopback", "mikrofon", "loopback"]
+    assert olaylar[0]["bas"] == T0 and olaylar[0]["bit"] == T0 + 2.0
+    d = s.stt_durumu
+    assert d["durum"] == "kesinti" and d["bekleyen"] == 3 and d["kayit"] is True and d["eksik"] == []
+    assert any(t == "stt_durum" and v["durum"] == "kesinti" for t, v in loglar)
+    assert not any("altyazı" in str(v) for t, v in loglar if t == "log")          # altyazi moduna dusme yok
+    assert sorted(os.listdir(os.path.join(str(tmp_path), "olcum", "kesinti"))) == \
+        [f"{n:06d}.{u}" for n in (1, 2, 3) for u in ("json", "wav")]
+    # servis geri geldi: bekci diskteki klipleri klip_no sirasiyla cozer
+    stt_.acik = True
+    assert _bekle(lambda: len([e for e in olaylar if e["tur"] == "klip"]) == 3 and s.stt_durumu["durum"] == "ok")
+    klipler = [e for e in olaylar if e["tur"] == "klip"]
+    assert [e["klip_no"] for e in klipler] == [1, 2, 3]                            # sirayla, ilk gelen once
+    assert [e["akis"] for e in klipler] == ["loopback", "mikrofon", "loopback"]
+    assert klipler[0]["bas"] == T0 and klipler[1]["bas"] == T0 + 10.0 and klipler[0]["zarf"] == [0.1] * 20
+    assert klipler[0]["text"].startswith("Birinci")
+    assert s.stt_durumu["bekleyen"] == 0 and os.listdir(os.path.join(str(tmp_path), "olcum", "kesinti")) == []
+    s._dur.set()
+
+
+def test_kesinti_kuyrugu_basinda_kalici_5xx_veren_klip_atlanir_kalanlar_cozulur(tmp_path, monkeypatch):
+    """Bulgu: /health 200 donerken tek klip kalici 500 verince kuyruk basinda sonsuza dek yeniden deneniyor, durum
+    'kesinti' kaliyor, arkasindaki klipler hic cozulmuyordu. KUYRUK_KLIP_DENEME kez ust uste hatadan sonra klip
+    'stt_hata' boslugu olur ve kuyruktan duser; kalanlar sirayla cozulur."""
+    monkeypatch.setattr(ses, "KESINTI_YOKLAMA", 0.02)
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append, kesinti_klasor=str(tmp_path))
+    stt_ = s.stt = _Kesintili()
+    stt_.metin = lambda n: f"{n}. klibin uzun bir toplantı cümlesi."
+    gercek_coz = stt_.coz
+
+    def coz(ses_, onceki=""):
+        if stt_.acik and int(round(float(ses_[0]) * 1000)) == 0:
+            e = ses.requests.HTTPError("500 Server Error")
+            e.response = type("R", (), {"status_code": 500})()
+            stt_.cagrilar += 1
+            raise e
+        return gercek_coz(ses_, onceki)
+
+    stt_.coz = coz
+    for no in range(5):
+        s._isle(_kesinti_p(no))                                   # servis kapali: hepsi diske
+    assert s.stt_durumu["bekleyen"] == 5
+    stt_.acik = True
+    assert _bekle(lambda: len([e for e in olaylar if e["tur"] == "klip"]) == 4 and s.stt_durumu["durum"] == "ok")
+    assert [e["klip_no"] for e in olaylar if e["tur"] == "klip"] == [2, 3, 4, 5]
+    assert [(e["neden"], e["bas"]) for e in olaylar if e["tur"] == "bosluk"][-1] == ("stt_hata", T0)
+    d = s.stt_durumu
+    assert d["bekleyen"] == 0 and [T0, T0 + 2.0] in d["eksik"]
+    s._dur.set()
+
+
+def test_stt_kesintisi_izin_yoksa_diske_yazilmaz_eksik_aralik_tutulur():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)                                  # olcum_kaydi/kesinti_kaydi kapali
+    s.stt = _Kesintili()
+    for no in (0, 1, 2):
+        s.kuyruk.put(_kesinti_p(no))
+    s._dur.set()
+    s._calis()
+    assert [e["tur"] for e in olaylar] == ["bosluk"] * 3
+    d = s.stt_durumu
+    assert d["durum"] == "kesinti" and d["bekleyen"] == 0 and d["kayit"] is False
+    assert d["eksik"] == [[T0, T0 + 22.0]]                                          # yakin araliklar birlesir (UI: "STT yok hh:mm-hh:mm")
+    assert "baglanti" in d["hata"]
+
+
+def test_stt_istemci_hatasi_400_yalniz_o_klibi_atar_kesinti_acmaz():
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append)
+
+    class Red:
+        verbose = True
+        yeniden_deneme = 0
+
+        def coz(self, ses_, onceki=""):
+            r = type("R", (), {"status_code": 422})()
+            e = ses.requests.HTTPError("422")
+            e.response = r
+            raise e
+
+    s.stt = Red()
+    s.kuyruk.put(_kesinti_p(0))
+    s._dur.set()
+    s._calis()
+    assert [(e["tur"], e["neden"]) for e in olaylar] == [("bosluk", "stt_hata")] and s.stt_durumu["durum"] == "ok"
+
+
+def test_kuyruk_tasmasi_diske_yazilir_sira_kapanir(tmp_path, monkeypatch):
+    monkeypatch.setattr(ses, "KESINTI_YOKLAMA", 0.02)
+    olaylar = []
+    s = ses.SesServisi("", olay_fn=olaylar.append, kesinti_klasor=str(tmp_path))
+    stt_ = s.stt = _Kesintili()
+    stt_.acik = True
+    p = _kesinti_p(0)
+    assert s._tasma(p) is True                                                      # diske yazildi, bosluk olayi cikti
+    assert [(e["tur"], e["neden"]) for e in olaylar[:1]] == [("bosluk", "kuyruk_tasti")]
+    assert s._sonraki == 1                                                          # numara kapandi: sira takilmaz
+    assert _bekle(lambda: any(e["tur"] == "klip" for e in olaylar))                 # kuyruk bosalinca bekci cozer
+    s._dur.set()
+
+
+def test_baslat_stt_yoksa_altyazi_moduna_dusmez_yakalamayi_baslatir(monkeypatch):
+    baslayan, loglar = [], []
+
+    class SahteAkisT(threading.Thread):
+        def __init__(self, kaynak, kuyruk, **kw):
+            super().__init__(daemon=True)
+            self.kaynak = kaynak
+            self.kw = kw
+
+        def run(self):
+            baslayan.append(self.kaynak)
+
+        def durdur(self):
+            pass
+
+    monkeypatch.setattr(ses, "AkisYakalayici", SahteAkisT)
+    monkeypatch.setattr(ses, "KESINTI_YOKLAMA", 0.02)
+    s = ses.SesServisi("https://stt.ornek", olay=lambda t, v: loglar.append((t, v)))
+    s.stt = _Kesintili()                                                            # saglik False
+    assert s.baslat() is True
+    assert _bekle(lambda: sorted(baslayan) == ["loopback", "mikrofon"])
+    assert s.stt_durumu["durum"] == "kesinti"
+    assert not any("altyazı moduna" in str(v) for t, v in loglar)
+    # pasif tespit akislara baglandi
+    assert s.kulaklik is None and s._kulaklik_tespit is not None
+    s.durdur()
+    assert s._bekci is None or not s._bekci.is_alive()
+
+
+def test_baslat_mod_cift_tek_kulaklik_olayi_yayar(monkeypatch):
+    olaylar = []
+
+    class SahteAkisT(threading.Thread):
+        def __init__(self, *a, **kw):
+            super().__init__(daemon=True)
+
+        def run(self):
+            pass
+
+        def durdur(self):
+            pass
+
+    monkeypatch.setattr(ses, "AkisYakalayici", SahteAkisT)
+    s = ses.SesServisi("https://stt.ornek", mod="cift", olay_fn=olaylar.append)
+    s.stt = _KlipStt(lambda x: [])
+    assert s.baslat() and s.kulaklik is True
+    assert olaylar == [{"tur": "kulaklik", "durum": True, "guven": 1.0}]
+    s.durdur()

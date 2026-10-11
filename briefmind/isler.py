@@ -12,6 +12,7 @@ from PyQt5 import QtCore
 import ayar as ayar_mod
 import llm
 import motor as motor_mod
+import outlook
 from motor import Motor
 from yakalayici import Yakalayici, ekran_okuyucu
 
@@ -32,7 +33,8 @@ def hata_logla(tb):
 
 
 class YakalamaIsi(QtCore.QThread):
-    """Toplanti boyunca calisir: altyazi -> motor. Bitince bekleyen onerileri yayar.
+    """Toplanti boyunca calisir: ses olaylari (SesServisi olay_fn) ve altyazi okumalari (Yakalayici okuma_fn) -> motor.
+    Bitince bekleyen onerileri yayar.
     Her yolda (hata dahil) motor.bitir() bir kez cagrilir ve inceleme_hazir yayilir; hata ayrica hata sinyaliyle."""
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
@@ -82,6 +84,7 @@ class YakalamaIsi(QtCore.QThread):
         if self.motor is None or self._bitirildi:
             return []
         self._bitirildi = True
+        self.motor.yeniden_kes_fn = None              # ses durdu: bitiste devir bolunmez ('A → B')
         try:
             self.durum.emit("Parçalar tamamlanıyor…")
             return self.motor.bitir() or []
@@ -90,47 +93,57 @@ class YakalamaIsi(QtCore.QThread):
             self._bildir(f"Parçalar tamamlanamadı: {type(e).__name__}: {e}")
             return []
 
-    def _ses_satiri(self, ts, kim, metin, akis):
-        # kulaklik durumu (True/False/None) motora her satirda aktarilir: mikrofon->baskasi yalniz False iken
-        self.motor.kulaklik = getattr(self.ses_servisi, "kulaklik", None)
-        return self.motor.ses_satiri(ts, kim, metin, akis)
+    def _stt_yok(self, neden):
+        """Ses servisi kurulamadi/baslatilamadi: altyazi moduna DUSULMEZ; arayuz 'STT yok' durumunu gosterir."""
+        self.olay.emit("log", f"✖ ses yakalama başlatılamadı: {neden} — transkript yazılamayacak "
+                              "(Teams altyazı metni transkripte girmez)")
+        durum = {"durum": "kesinti", "bas": time.time(), "bekleyen": 0, "kayit": False, "eksik": [],
+                 "hata": str(neden)[:200]}
+        self.motor.stt_durumu_ayarla(durum)
+        self.olay.emit("stt_durum", durum)
 
     def _yakala(self):
         tarih = dt.date.today()
         klasor = motor_mod.yeni_klasor(self.baslik, tarih)
-        kaynak = self.ayar.get("kaynak", "altyazi")
-        self.motor = Motor(klasor, self.baslik, tarih, self.sozluk, self.ctx.get("katilimcilar"),
+        if self.ayar.get("kaynak", "ses") != "ses":
+            # 'altyazi' / 'ikisi' kaldirildi (MIMARI_v3 §3): metin hep sesten, konusmaci altyazi zamanindan
+            self.olay.emit("log", f"! kaynak '{self.ayar.get('kaynak')}' artık yok, ses kullanılıyor "
+                                  "(altyazı metni yalnız 'altyazi_yedek' açıkken ve STT yokken girer)")
+        katilimcilar = list(self.ctx.get("katilimcilar") or [])
+        self.motor = Motor(klasor, self.baslik, tarih, self.sozluk, katilimcilar,
                            self.ctx.get("gundem", ""), duzelt=self.duzelt,
                            olay=lambda t, v: self.olay.emit(t, v),
-                           kaynak=kaynak, ben=self.ayar.get("ben") or None,
-                           sablon=self.ayar.get("not_sablonu", "genel"))
+                           kaynak="ses", ben=outlook.ben_adi(self.ayar),   # ayar bossa Outlook/Windows tam adi
+                           sablon=self.ayar.get("not_sablonu", "genel"),
+                           esikler=self.ayar.get("esikler"),
+                           altyazi_yedek=bool(self.ayar.get("altyazi_yedek", False)))
         self.olay.emit("log", f"Klasör: {klasor}")
         olcum = bool(self.ayar.get("olcum_kaydi", False))
-        if kaynak in ("ses", "ikisi"):
-            try:
-                import ses as ses_mod
-                self.ses_servisi = ses_mod.SesServisi(
-                    self.ayar.get("stt_url", ""),
-                    ipucu_fn=lambda: (self.sozluk.metin(self.motor.seri) + "; " + ", ".join(self.motor.katilimcilar)),
-                    mod="otomatik",
-                    mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
-                    olay=lambda t, v: self.olay.emit(t, v),
-                    satir_fn=self._ses_satiri,
-                    model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
-                    proxy=self.ayar.get("stt_proxy", True),   # false: Windows proxy'sini atla (kopmalar icin)
-                    verify=ayar_mod.tls_dogrulama(self.ayar))
-                if olcum:
-                    self.ses_servisi.olcum_kaydi_ac(klasor)       # olcum/klipler/*.wav + klipler.jsonl
-                if not self.ses_servisi.baslat():
-                    self.ses_servisi = None
-                    self.motor.kaynak = "altyazi"
-                    self.olay.emit("kaynak_degisti", "altyazi")
-            except Exception as e:
-                self.olay.emit("log", f"✖ ses yakalama başlatılamadı: {e!r} — altyazı moduna geçildi")
+        try:
+            import ses as ses_mod
+            self.ses_servisi = ses_mod.SesServisi(
+                self.ayar.get("stt_url", ""),
+                ipucu_fn=lambda: (self.sozluk.metin(self.motor.seri) + "; " + ", ".join(self.motor.katilimcilar)),
+                mod="otomatik",
+                mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
+                olay=lambda t, v: self.olay.emit(t, v),
+                olay_fn=self.motor.ses_olayi,                   # C1: klip / bosluk / kulaklik -> motor
+                model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
+                proxy=self.ayar.get("stt_proxy", True),   # false: Windows proxy'sini atla (kopmalar icin)
+                verify=ayar_mod.tls_dogrulama(self.ayar))
+            if olcum:
+                self.ses_servisi.olcum_kaydi_ac(klasor)       # olcum/klipler/*.wav + klipler.jsonl (kesinti diski dahil)
+            elif self.ayar.get("kesinti_kaydi", False):
+                self.ses_servisi.kesinti_kaydi_ac(klasor)     # STT yokken klipler diske, donunce cozulur
+            self.motor.yeniden_kes_fn = self.ses_servisi.yeniden_kes
+            if not self.ses_servisi.baslat():                 # STT yokken de True (kesinti durumu); False: yakalama yok
                 self.ses_servisi = None
-                self.motor.kaynak = "altyazi"
-                self.olay.emit("kaynak_degisti", "altyazi")
-        y = Yakalayici()
+                self._stt_yok("ses yakalama açılamadı")
+        except Exception as e:
+            self.ses_servisi = None
+            self.motor.yeniden_kes_fn = None
+            self._stt_yok(repr(e))
+        y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=self.motor.okuma_ekle)
         if olcum:
             try:
                 y.okuma_kaydi_ac(klasor)                          # olcum/okumalar.jsonl
@@ -146,10 +159,21 @@ class YakalamaIsi(QtCore.QThread):
                 bekleme_bas, deneme, ipucu_verildi = time.time(), 0, False
                 pencere_yok_sn, son_pencere_kontrol = 0.0, time.time()
                 while not self._dur:
-                    # --- altyazisiz mod: ses akiyorsa toplanti basladi sayilir
-                    if not basladi and self.ses_servisi and self.ses_servisi.cozulen > 0:
+                    stt_kesik = False
+                    if self.ses_servisi is not None:
+                        try:
+                            durum = self.ses_servisi.stt_durumu
+                            self.motor.stt_durumu_ayarla(durum)
+                            stt_kesik = durum.get("durum") == "kesinti"
+                        except Exception:
+                            pass
+                    else:
+                        stt_kesik = True
+                    # --- altyazisiz mod: ses olayi geliyorsa (STT yokken bosluk olayi da) toplanti basladi sayilir
+                    if not basladi and self.motor.ses_olay_sayisi > 0:
                         basladi = True
-                        self.olay.emit("log", "ses akıyor, yakalama başladı (altyazı yok: konuşmacı adları '?' olur)")
+                        self.olay.emit("log", "ses akıyor, yakalama başladı (altyazı yok: konuşmacı adları "
+                                              "'Bilinmeyen' olur)")
                         self.durum.emit("Yakalanıyor (ses) — altyazı yok")
                     if (not basladi and not ipucu_verildi and time.time() - bekleme_bas > 20
                             and not self.ayar.get("altyazi_otomatik", True)):
@@ -183,7 +207,7 @@ class YakalamaIsi(QtCore.QThread):
                             self.olay.emit("log", f"altyazı otomatik açma hatası: {e!r}")
                         if not basarili and deneme >= 2:
                             self.olay.emit("altyazi_iste", None)
-                    for s in y.oku():
+                    for s in y.oku():                    # okuma olayi okuma_fn ile motora; satirlar yalniz gorunum/yedek
                         self.motor.altyazi_satiri(s)
                     if y.hazir and not basladi:
                         basladi = True
@@ -196,16 +220,17 @@ class YakalamaIsi(QtCore.QThread):
                         self.durum.emit("Yakalanıyor")
                         self.olay.emit("log", "altyazı bulundu, yakalama başladı.")
                     self.motor.kontrol()
+                    ek = " — STT yok, transkript eksik" if stt_kesik else ""
                     if basladi and y.kayip_saniye() > 0:
                         kalan = int(self.otobitir - y.kayip_saniye())
                         if kalan <= 0:
                             self.olay.emit("log", "altyazı kayboldu, toplantı bitti kabul edildi.")
                             self.olay.emit("sure_dondur", None)
                             break
-                        self.durum.emit(f"Altyazı görünmüyor — {kalan} sn sonra otomatik bitiş")
+                        self.durum.emit(f"Altyazı görünmüyor — {kalan} sn sonra otomatik bitiş{ek}")
                     elif basladi:
                         self.durum.emit(f"Yakalanıyor — {self.motor.parca_no} parça, "
-                                        f"açık parça ~{self.motor.mevcut_tok} token")
+                                        f"açık parça ~{self.motor.mevcut_tok} token{ek}")
                     time.sleep(y.onerilen_aralik())      # A7: UIA okumasi yavassa 1,2 sn
             finally:
                 ekran_okuyucu(False)

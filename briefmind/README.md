@@ -7,9 +7,11 @@ Ses hiçbir yere kaydedilmez; yalnızca metin diske yazılır. Tüm işleme kuru
 ## Mimari
 
 ```
-Ses (hoparlör + mikrofon) ─ cümle bazlı VAD ─► Whisper STT (OpenAI uyumlu)   [ne söylendi]
-Teams canlı altyazısı (UI Automation) ────────► konuşmacı + zaman           [kim söyledi]
-        └─ zaman + metin benzerliğiyle eşleşir; uyum ölçümü (ses doğru mu)
+Ses (hoparlör + mikrofon) ─ kısa klip VAD (epoch) ─► Whisper STT (OpenAI uyumlu)   [ne söylendi]
+Teams canlı altyazısı (UI Automation) ─ okuma (epoch) ─► konuşmacı aralıkları    [kim, ne zaman]
+        └─ konusmaci.py: klip [bas, bit] ile aralıkların ZAMAN kesişimi (metin eşlemesi yok); altyazı metni
+           transkripte girmez. Karar gelene kadar satır "beklemede…", sonra "Ad", belirsizse "Ad?", "Bilinmeyen",
+           "A → B" (sıralı devir; mümkünse klip ikiye kesilir), "A / B (aynı anda)"
 Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inceleme (şüpheli terimler)
      ─► birleştirme ─► dayanak kontrolü (transkriptte olmayan madde düşer) ─► Markdown not
      ─► Outlook taslağı (takvimdeki katılımcılara)
@@ -23,10 +25,11 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 | `isler.py` | Arayüzü dondurmayan arka plan işleri (yakalama, not üretimi, yeniden özetleme, soru) |
 | `gorunum.py` | Tema (QSS), notun HTML görünümü, ikonlar |
 | `ayar.py` | `config.json` okuma/yazma |
-| `motor.py` | Parçalama, arka plan özetleme, konuşmacı hizalama, dayanak kontrolü, not üretimi |
+| `motor.py` | Ses/okuma olaylarından satır v2 (`surum: 2`), konuşmacı kararlarının uygulanması (yankı atma, yeniden kesme), parçalama, arka plan özetleme, dayanak kontrolü, not üretimi; eski kayıt göçü |
+| `konusmaci.py` | Yalnız zamana dayalı konuşmacı ataması: altyazı çizelgesi, gecikme (L/MAD), okuma periyodu (R), devir/çakışma, ben/yankı |
 | `llm.py` | LLM istemcisi, bölüm/birleştirme promptları, token bütçeleri, notun deterministik temizliği |
 | `rag.py` | Toplantıya soru için hibrit arama: transkript pencereleri, BM25 (Türkçe kök), embedding, RRF; vektör önbelleği toplantı klasöründe (`rag_dizin.npz`) |
-| `metin.py` | Metin benzerliği (kelime kökü), Türkçe küçük harf, ad eşleşmesi |
+| `metin.py` | Metin benzerliği (kelime kökü), Türkçe küçük harf, ad eşleşmesi, konuşmacı gösterim kuralı (`gorunen_ad`) |
 | `ses.py` | Ses yakalama (WASAPI loopback + mikrofon), VAD, STT istemcisi, tekrar/halüsinasyon filtreleri |
 | `yakalayici.py` | Teams altyazısını UI Automation ile okuma, toplantı adı, altyazıyı otomatik açma |
 | `outlook.py` | Takvimden toplantı eşleştirme, taslak e-posta, oturum kullanıcısı |
@@ -56,7 +59,11 @@ python app.py
 | `llm_key`, `llm_tekrar`, `llm_zaman_asimi` | (isteğe bağlı) LLM Bearer anahtarı (sunucu `--api-key` ile açıldıysa); hata sonrası yeniden deneme sayısı (varsayılan 1); istek zaman aşımı (sn, varsayılan 300) |
 | `parca_token`, `paralel` | (isteğe bağlı) Canlı parça boyutu (token) ve aynı anda işlenen parça sayısı; boşsa pencereye göre (16k: 3000/2, 32k+: 4000/2) |
 | `stt_url`, `stt_model`, `stt_key` | OpenAI uyumlu STT adresi (`/v1/audio/transcriptions`), model, Bearer anahtarı |
-| `kaynak` | `ses` (Whisper metni, konuşmacı altyazıdan) / `ikisi` / `altyazi` (yalnız Teams altyazısı). `ikisi`: metin Whisper'dan gelir; bir altyazı satırının 8 sn içinde benzer Whisper karşılığı gelmezse (Whisper kaçırmış) altyazı satırı eklenir, gelirse eklenmez (çift satır olmaz) |
+| `kaynak` | Yalnız `ses`: metin Whisper'dan, konuşmacı Teams altyazısının **zamanından**. `ikisi` ve `altyazi` kaldırıldı (eski değer `ses` sayılır). STT erişilemezse altyazı moduna düşülmez: Canlı sekmesinde "STT yok — transkript eksik (hh:mm–hh:mm)" şeridi, notta aynı satır |
+| `altyazi_yedek` | (varsayılan `false`) `true`: STT yokken Teams altyazı metni yedek olarak girer (`kaynak: altyazi-yedek`, şüpheli; notta "altyazıdan, düşük güven"; sahip/aksiyon üretmez). Ayarlar → "STT yokken Teams altyazı metnini yedek olarak nota al" |
+| `altyazi_goster` | (varsayılan `false`) Canlı ekranda Teams altyazısı da `[altyazı]` etiketiyle görünür; transkripte girmez |
+| `kesinti_kaydi` | (varsayılan `false`) STT yokken klipler toplantı klasörüne (`olcum/kesinti/`) yazılır, STT dönünce sırayla çözülür (`olcum_kaydi` açıkken zaten açık) |
+| `esikler` | (isteğe bağlı) Konuşmacı atama eşikleri, ör. `{"baskin": 0.6, "ikinci": 0.25, "kesin": 0.7, "erteleme_sn": 15}` (tam liste: `konusmaci.VARSAYILAN_ESIKLER`) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
 | `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
 | `otomatik_not` | (varsayılan `true`) Toplantı bitince İnceleme beklenmez, not doğrudan üretilir. `false`: önce İnceleme sekmesi (eski akış). Ayarlar → "Toplantı bitince incelemeyi atla" |
@@ -87,10 +94,12 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
 
 1. Teams toplantısına gir (altyazı açık olsun; kapalıysa uygulama Alt+Shift+C ile açmayı dener).
 2. **Başlat** — üstteki listeden toplantı seçilir (takvimden, Teams penceresine göre otomatik).
-3. Konuşmalar cümle cümle Canlı sekmesine düşer; parçalar arka planda özetlenir. İki kişi aynı anda konuşunca
-   Whisper genelde baskın sesi yazar; öbür kişinin Teams altyazısındaki satırı transkripte ayrıca eklenir
-   (`kaynak: altyazi-cakisma`), sonradan gelen aynı sözlü Whisper satırı ikinci kez yazılmaz. Kısık gelen ses
-   (tepe < 0,3) Whisper'a gitmeden yükseltilir.
+3. Konuşmalar klip klip Canlı sekmesine düşer; konuşmacı önce "beklemede…" görünür, altyazı çizelgesi o anı
+   kapsayınca (en geç 15 sn) yerleşir. Güven 0,7'nin altındaysa ad "Ad?" yazılır, kimse yoksa "Bilinmeyen".
+   Klip içinde konuşmacı değiştiyse klip en sessiz noktadan ikiye kesilip yeniden çözülür; kesilemezse "A → B".
+   Kulaklıksız (hoparlör) kullanımda mikrofona giren karşı taraf sesi atılır. Altyazı 60 sn'den uzun okunamazsa
+   "Konuşmacı bilgisi yok" şeridi çıkar. Parçalar arka planda özetlenir; kapanış, satırlarının konuşmacı kararını
+   en fazla 20 sn bekler. Kısık gelen ses (tepe < 0,3) Whisper'a gitmeden yükseltilir.
 4. **Bitir** → not doğrudan üretilir (`otomatik_not`); Not sekmesindeki şeritte aşama ve geçen süre görünür
    ("Parça 3/12 özetleniyor", "Özet paragrafı yazılıyor"…) → Outlook taslağı. Şüpheli terimler İnceleme
    sekmesinde bilgi için durur: onaylayıp **Uygula ve notu üret** ile sözlüğe alınır ve not yeniden üretilir.

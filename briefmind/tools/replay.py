@@ -1,17 +1,24 @@
 """
-replay.py — Kaydedilmis bir toplantiyi (olcum/okumalar.jsonl + olcum/klipler) MEVCUT boru hattindan cevrimdisi gecirir.
-Ag yok: LLM cagrilari kapali (parca isleme saplanir), STT yalniz --stt ile ve yalniz wav'lar icin kullanilir.
+replay.py — Kaydedilmis bir toplantiyi (olcum/okumalar.jsonl + olcum/klipler) boru hattindan cevrimdisi gecirir.
+Ag yok: LLM cagrilari kapali (parca isleme saplanir), STT yalniz --stt ile (wav'lar yeniden cozulur; devirde yeniden kesme).
 
-Akis: okumalar (UIA ham panel okumasi) ve klipler (STT cikisi) zaman sirasiyla bir Hat'a verilir; zaman sanal saatle
-akar (motor.time / yakalayici.time epoch'a sabitlenir, bekleme yok). Cikan son satirlar <cikti>/satirlar.jsonl'e
-(klip_no ile) yazilir, ardindan olcum.py metrikleri hesaplanip <cikti>/olcum.json'a yazilir.
+Akis: okumalar (UIA ham panel okumasi, C2) ve klipler (STT cikisi, C1) zaman sirasiyla bir Hat'a verilir; zaman sanal saatle
+akar (motor.time epoch'a sabitlenir, bekleme yok). Cikan son satirlar <cikti>/satirlar.jsonl'e (klip_no ile) yazilir,
+ardindan olcum.py metrikleri hesaplanip <cikti>/olcum.json'a yazilir.
 
-Faz1 dikisi: hat degistirilebilir. `Hat` sozlesmesini uygulayan bir sinif (or. konusmaci.py'yi saran) --hat modul:Sinif
-ile takilir; kurucusu `ayar` sozlugunu alir ({"kaynak", "ben", "kulaklik"}). Dongu yalniz Hat metotlarini cagirir.
+Hatlar (--hat):
+  Faz1Hat (varsayilan, MIMARI_v3 §3): okuma -> Motor.okuma_ekle; klip -> SesServisi.klip_olayi_uret + sirali yayim ->
+      Motor.ses_olayi; konusmaci karari yalniz zamandan (konusmaci.py). Devirde yeniden kesme: --stt ve klip wav'i varsa
+      gercek (wav enerjisi + STT), yoksa Motor 'A -> B' kararina duser. Cikti satirlarinin `speaker`i gosterim kurali
+      (spk_guven < 0.7 -> "Ad?") uygulanmis halidir (olcum.py kesin / belirsiz ayrimi icin); ham ad `speaker_ham`.
+  MevcutHat (--eski ya da --hat replay:MevcutHat): Faz 0 hatti; Yakalayici._isle + Motor.ses_satiri uyum katmani.
+      Okuma olayi yaymadigindan konusmaci cizelgesi olusmaz; yalniz eski kayitlari karsilastirmak icin durur.
+Baska hat: `Hat` sozlesmesini uygulayan bir sinif --hat modul:Sinif ile takilir; kurucusu `ayar` sozlugunu alir
+({"kaynak", "ben", "kulaklik", "katilimcilar", "stt", "klasor"}). Dongu yalniz Hat metotlarini cagirir.
 
 Kullanim:
-  python tools/replay.py toplantilar/<klasor> [--stt] [--cikti klasor] [--bas 0 --bit 10] [--hat modul:Sinif]
-                         [--kaynak ses|ikisi|altyazi] [--ben ad] [--hoparlor]
+  python tools/replay.py toplantilar/<klasor> [--stt] [--cikti klasor] [--bas 0 --bit 10] [--hat modul:Sinif | --eski]
+                         [--ben ad] [--katilimcilar "Ad1,Ad2"] [--hoparlor]
 """
 import argparse
 import contextlib
@@ -85,13 +92,17 @@ def saat_kaymasi(klipler):
 # ---------------------------------------------------------------- hat sozlesmesi
 
 class Hat:
-    """Replay'in cagirdigi arayuz. Faz1 hatti da bunu uygular. `an` her zaman epoch saniyesidir."""
+    """Replay'in cagirdigi arayuz. `an` her zaman epoch saniyesidir."""
 
     def __init__(self, ayar):
         self.ayar = ayar
 
     def baslat(self, klasor):
         """klasor: gecici calisma klasoru."""
+
+    def okuma_olayi(self, okuma):
+        """Kayitli UIA okumasinin tamami ({okuma_no, bas_epoch, bit_epoch, grup, gorunen}); varsayilan: eski `okuma`."""
+        self.okuma(okuma.get("bit_epoch") or okuma.get("bas_epoch") or 0, okuma.get("gorunen") or [])
 
     def okuma(self, an, gorunen):
         """Bir UIA panel okumasi: gorunen = [(konusmaci, metin), ...] (okuma bitisi `an`)."""
@@ -111,8 +122,9 @@ class Hat:
 
 
 class MevcutHat(Hat):
-    """Bugunku hat: Yakalayici._isle -> Motor.altyazi_satiri; klipler SesServisi.adaylar_uret + yayim filtreleri
-    (tekrar/eko) -> Motor.ses_satiri. Parca isleme (LLM) saplanir."""
+    """ESKI (Faz 0) hat: Yakalayici._isle -> Motor.altyazi_satiri (artik yalniz canli iz); klipler SesServisi.adaylar_uret
+    + yayim filtreleri (tekrar/eko) -> Motor.ses_satiri (uyum katmani: bas=bit, eksi klip_no). Parca isleme (LLM) saplanir.
+    Okuma olayi yaymadigi icin konusmaci cizelgesi olusmaz; Faz1Hat yerine gecmez."""
 
     def baslat(self, klasor):
         platform_destegi()
@@ -187,6 +199,194 @@ class MevcutHat(Hat):
             self.motor.kapat()
 
 
+class Faz1Hat(Hat):
+    """Yeni hat (MIMARI_v3 §3): okumalar Motor.okuma_ekle'ye (C2: bas/bit epoch, grup, gorunen), klipler (kayitli ya da
+    --stt ile yeniden cozulmus STT metni) SesServisi.klip_olayi_uret + sirali yayim uzerinden Motor.ses_olayi'na (C1).
+    Konusmaci karari yalniz zamandan gelir; altyazi metni transkripte girmez. Parca isleme (LLM) saplanir.
+    Yeniden kesme (devir): --stt varsa ve klibin wav'i + zarfi kayitliysa gercek (zarfin wav enerjisiyle hizalanmasi, an +- 1 sn
+    icinde en dusuk enerjili 100 ms blok, iki parca STT'ye); aksi halde Motor 'A -> B' kararina duser.
+    bitir(): son satirlar; `speaker` gosterim kurali uygulanmis hali ("Ad?" = spk_guven < 0.7; olcum.py kesin / belirsiz
+    ayrimi bununla yapar), ham ad `speaker_ham`; yeniden kesilen klibin parcalari ust klibin `klip_no`'sunu tasir."""
+
+    COCUK_NO = 10_000_000                      # yeniden kesme parcalarinin klip_no tabani (kayit numaralariyla carpismaz)
+
+    def baslat(self, klasor):
+        platform_destegi()
+        import llm
+        import motor as motor_mod
+        import ses as ses_mod
+        self._modul = (llm, motor_mod, ses_mod)
+        self._eski = (llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA, motor_mod.time)
+        self.saat = SanalSaat()
+        motor_mod.time = SahteZaman(self.saat)
+        self._kayit = {}                                           # klip no -> klipler.jsonl kaydi (yeniden kesme)
+        self._kesilen = set()
+        self._cocuk = {}                                           # parca klip_no -> ust klip_no
+        self._bekleyen = []                                        # kontrol()'de yayilacak parca olaylari
+        self._cocuk_no = self.COCUK_NO
+        self._klasor = self.ayar.get("klasor")
+        sozluk = None
+        try:                                                       # bos sozluk: yerel sozluk.json / sozluk.txt'e dokunulmaz
+            import sozluk as sozluk_mod
+            yol = os.path.join(klasor, "sozluk.json")
+            with open(yol, "w", encoding="utf-8") as f:
+                json.dump({"terimler": [], "aliaslar": {}}, f)
+            sozluk = sozluk_mod.Sozluk(yol)
+        except ImportError:                                        # Faz 2: sozluk.py silinir
+            pass
+        self.motor = motor_mod.Motor(os.path.join(klasor, "toplanti"), "Replay", dt.date.today(), sozluk,
+                                     list(self.ayar.get("katilimcilar") or []), "", duzelt=False, kaynak="ses",
+                                     ben=self.ayar.get("ben"), esikler=self.ayar.get("esikler"))
+        self.motor._isle = lambda veri, duzelt: None               # LLM yok: duzeltme/ozet atlanir
+        self.motor.yeniden_kes_fn = self._yeniden_kes
+        self.servis = ses_mod.SesServisi("", olay_fn=self.motor.ses_olayi)
+        if self.ayar.get("kulaklik") in (True, False):             # pasif tespit kaydedilmedi: elle (--hoparlor)
+            self.motor.ses_olayi({"tur": "kulaklik", "durum": self.ayar["kulaklik"], "guven": 1.0})
+
+    def okuma_olayi(self, okuma):
+        self.saat.t = okuma.get("bit_epoch") or okuma.get("bas_epoch") or self.saat.t
+        gorunen = [[g[0], g[1]] for g in (okuma.get("gorunen") or []) if len(g) >= 2 and isinstance(g[1], str)]
+        self.motor.okuma_ekle({"tur": "okuma", "okuma_no": okuma.get("okuma_no"), "bas_epoch": okuma["bas_epoch"],
+                               "bit_epoch": okuma.get("bit_epoch", okuma["bas_epoch"]),
+                               "grup": okuma.get("grup", True), "gorunen": gorunen})
+
+    def okuma(self, an, gorunen):                                  # eski imza (Hat sozlesmesi)
+        self.okuma_olayi({"bas_epoch": an, "bit_epoch": an, "gorunen": gorunen})
+
+    def _klip_olayi(self, no, kayit, segmentler, ust=None):
+        p = {"kaynak": kayit.get("akis") or "loopback", "klip_no": no, "no": None,
+             "bas_epoch": kayit["bas"], "bit_epoch": kayit.get("bit") or kayit["bas"],
+             "rms": kayit.get("rms") or 0.0, "zarf": kayit.get("zarf") or [], "ust_klip": ust}
+        return self.servis.klip_olayi_uret(p, segmentler)
+
+    def klip(self, an, kayit, segmentler):
+        self.saat.t = an
+        no = kayit["no"]
+        self._kayit[no] = kayit
+        ev = self._klip_olayi(no, kayit, segmentler, kayit.get("ust_klip"))
+        if ev is not None:
+            self.servis._sirali_yay(None, [ev])
+
+    def kontrol(self, an):
+        self.saat.t = an
+        self._cocuklari_yay()
+        self.motor.kontrol()
+
+    def _cocuklari_yay(self):
+        """Yeniden kesme parcalari. SesServisi._olay_yay parcayi (ust_klip) tekrar suzgecinden zaten muaf tutar;
+        ayar['cocuk_tekrar_muaf'] (varsayilan acik) eski kayitlarla karsilastirma icin ayrica _tekrar_mi'yi kapatir."""
+        while self._bekleyen:
+            ev = self._bekleyen.pop(0)
+            gercek = self.servis._tekrar_mi
+            if self.ayar.get("cocuk_tekrar_muaf", True):
+                self.servis._tekrar_mi = lambda *a, **k: False
+            try:
+                self.servis._sirali_yay(None, [ev])
+            finally:
+                self.servis._tekrar_mi = gercek
+
+    # --- yeniden kesme (Motor.yeniden_kes_fn): SesServisi.yeniden_kes sozlesmesi, kayitli wav + zarf uzerinde ---
+    def _yeniden_kes(self, klip_no, an):
+        stt = self.ayar.get("stt")
+        kayit = self._kayit.get(klip_no)
+        if stt is None or kayit is None or klip_no in self._kesilen or not self._klasor:
+            return False
+        zarf = [float(z) for z in (kayit.get("zarf") or [])]
+        yol = os.path.join(self._klasor, "olcum", "klipler", f"{klip_no:04d}.wav")
+        if not zarf or not os.path.exists(yol):
+            return False
+        ses_mod = self._modul[2]
+        try:
+            ses_ = wav_oku(yol)
+            kes = kesim_noktasi(ses_, zarf, an - kayit["bas"], ses_mod.KES_ARALIK_SN, ses_mod.KES_MIN_PARCA_SN)
+            if kes is None:
+                return False
+            (ofs, kk) = kes
+            idx = int((ofs + kk + 0.5) * 0.1 * ses_mod.ORNEK)
+            seg_a, seg_b = stt.coz(ses_[:idx]), stt.coz(ses_[idx:])
+        except Exception:
+            return False
+        kes_an = kayit["bas"] + (kk + 0.5) * 0.1
+        self._kesilen.add(klip_no)
+        for seg, bas, bit in ((seg_a, kayit["bas"], kes_an), (seg_b, kes_an, kayit.get("bit") or kayit["bas"])):
+            self._cocuk_no += 1
+            self._cocuk[self._cocuk_no] = klip_no
+            alt = dict(kayit, bas=bas, bit=bit, zarf=[])
+            ev = self._klip_olayi(self._cocuk_no, alt, seg, ust=klip_no)
+            if ev is not None:
+                self._bekleyen.append(ev)
+        return True
+
+    def bitir(self):
+        self._cocuklari_yay()
+        self.motor.bitir()
+        cikti = []
+        for s in self.motor.tum_satirlar():
+            d = dict(s)
+            d["speaker_ham"] = s.get("speaker")
+            d["speaker"] = olcum_adi(s)
+            if d.get("klip_no") in self._cocuk:                    # parca satiri ust klibin etiketine yazilir
+                d["cocuk_klip_no"] = d["klip_no"]
+                d["klip_no"] = self._cocuk[d["klip_no"]]
+            cikti.append(d)
+        return cikti
+
+    def kapat(self):
+        if getattr(self, "_eski", None):                          # baslat yarida kaldiysa da yamalar geri alinir
+            llm, motor_mod, _ = self._modul
+            llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA, motor_mod.time = self._eski
+            self._eski = None
+        with contextlib.suppress(Exception):
+            self.motor.kapat()
+
+
+def olcum_adi(satir, esik=0.7):
+    """Satirin olcum icin konusmacisi: spk_guven < esik olan kisi adi "Ad?" (metin.gorunen_ad ile ayni kural; "?" ve
+    birlesik adlar ("A -> B", "A / B") oldugu gibi, oda etiketi tavan 0.6 oldugundan "Ad?")."""
+    ad = str(satir.get("speaker") or "?").strip()
+    if ad in ("", "?") or " → " in ad or " / " in ad or ad.endswith("?"):
+        return ad or "?"
+    g = satir.get("spk_guven")
+    return ad + "?" if isinstance(g, (int, float)) and g < esik else ad
+
+
+def kesim_noktasi(ses_, zarf, an_goreli, aralik_sn, min_parca_sn):
+    """Yeniden kesme blogu: zarf (klibin sesli araliginin 100 ms RMS'leri) wav'in 100 ms RMS dizisiyle hizalanir (wav
+    on-yuk + sondaki sessizligi icerir); an_goreli (sesli baslangica gore sn) +- aralik_sn icindeki en dusuk enerjili blok.
+    Dondurur (wav icinde sesli aralik ofseti [blok], kesim blogu [sesli araliga gore]) | None (parca < min_parca_sn ya da
+    blok sessiz degil: ses.kesim_sessiz_mi)."""
+    import numpy as np
+    blok = 1600
+    nb = len(ses_) // blok
+    if nb < len(zarf) or len(zarf) < 2:
+        return None
+    rw = np.sqrt(np.mean(np.square(ses_[:nb * blok]).reshape(nb, blok), axis=1))
+    z = np.asarray(zarf, dtype="float64")
+    en_ofs, en_puan = 0, -2.0
+    for ofs in range(0, nb - len(z) + 1):
+        w = rw[ofs:ofs + len(z)]
+        if np.std(w) < 1e-9 or np.std(z) < 1e-9:
+            puan = -1.0
+        else:
+            puan = float(np.corrcoef(w, z)[0, 1])
+        if puan > en_puan:
+            en_ofs, en_puan = ofs, puan
+    sure = len(z) * 0.1
+    k0 = int(np.ceil(max(0.0, an_goreli - aralik_sn) / 0.1))
+    k1 = int(min(sure, an_goreli + aralik_sn) // 0.1)
+    adaylar = [(round(float(z[k]), 6), abs((k + 0.5) * 0.1 - an_goreli), k) for k in range(max(0, k0), min(len(z), k1))]
+    if not adaylar:
+        return None
+    kk = min(adaylar)[2]
+    c = (kk + 0.5) * 0.1
+    if c < min_parca_sn or sure - c < min_parca_sn:
+        return None
+    import ses as ses_mod
+    if not ses_mod.kesim_sessiz_mi(z[kk], z):
+        return None                                  # sessiz blok yok (SesServisi.yeniden_kes ile ayni kural)
+    return en_ofs, kk
+
+
 # ---------------------------------------------------------------- girdi
 
 def wav_oku(yol):
@@ -217,8 +417,10 @@ def stt_istemci():
 
 
 def hat_sinifi_yukle(ad):
-    """'modul:Sinif' -> sinif (bos: MevcutHat)."""
-    if not ad:
+    """'modul:Sinif' -> sinif. Bos / 'faz1': Faz1Hat (varsayilan); 'eski': MevcutHat."""
+    if not ad or ad == "faz1":
+        return Faz1Hat
+    if ad == "eski":
         return MevcutHat
     modul, _, sinif = ad.partition(":")
     return getattr(importlib.import_module(modul), sinif or "Hat")
@@ -226,7 +428,7 @@ def hat_sinifi_yukle(ad):
 
 def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=None, ben=None, yazdir=print):
     """Kaydi hattan gecirir. hat_sinifi: Hat sozlesmesini uygulayan sinif (kurucu ayar sozlugu alir; varsayilan
-    MevcutHat). Dondurur: (metrikler, cikti klasoru)."""
+    Faz1Hat). Dondurur: (metrikler, cikti klasoru)."""
     klipler = olcum.klipler_oku(klasor)
     okumalar = olcum.jsonl_oku(os.path.join(klasor, "olcum", "okumalar.jsonl"))
     if not klipler and not okumalar:
@@ -243,7 +445,7 @@ def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=
         with open(os.path.join(klasor, "meta.json"), encoding="utf-8") as f:
             meta = json.load(f)
     ayar = dict({"kaynak": meta.get("kaynak") or ("ses" if klipler else "altyazi"), "ben": ben,
-                 "kulaklik": None, "saat_kaymasi": saat_kaymasi(klipler)}, **(ayar or {}))
+                 "kulaklik": None, "saat_kaymasi": saat_kaymasi(klipler), "stt": stt, "klasor": klasor}, **(ayar or {}))
     cikti = cikti or tempfile.mkdtemp(prefix="replay_")
     os.makedirs(cikti, exist_ok=True)
 
@@ -251,12 +453,12 @@ def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=
     olaylar += [((k.get("bit") or 0) + (k.get("stt_sure") or 0), 1, "klip", k) for k in klipler.values()]
     olaylar.sort(key=lambda e: (e[0], e[1], e[3].get("no") or e[3].get("okuma_no") or 0))
 
-    hat = (hat_sinifi or MevcutHat)(ayar)
+    hat = (hat_sinifi or Faz1Hat)(ayar)
     try:
         hat.baslat(cikti)
         for an, _, tur, v in olaylar:
             if tur == "okuma":
-                hat.okuma(an, v.get("gorunen") or [])
+                hat.okuma_olayi(v)
             else:
                 hat.klip(an, v, segmentler_al(v, klasor, stt))
             hat.kontrol(an)
@@ -277,21 +479,24 @@ def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Kaydı mevcut boru hattından çevrimdışı geçir")
+    ap = argparse.ArgumentParser(description="Kaydı boru hattından çevrimdışı geçir (varsayılan: Faz 1 hattı)")
     ap.add_argument("klasor", help="toplantı klasörü (içinde olcum/ var)")
-    ap.add_argument("--stt", action="store_true", help="wav'ları config.json'daki STT ile yeniden çöz")
+    ap.add_argument("--stt", action="store_true", help="wav'ları config.json'daki STT ile yeniden çöz (devirde yeniden kesme de)")
     ap.add_argument("--cikti", help="çıktı klasörü (varsayılan: geçici klasör)")
     ap.add_argument("--bas", help="başlangıç: SS:DD[:SN] ya da ilk kayıttan dakika")
     ap.add_argument("--bit", help="bitiş: SS:DD[:SN] ya da ilk kayıttan dakika")
-    ap.add_argument("--hat", help="modul:Sinif (Hat sözleşmesi); varsayılan mevcut hat")
-    ap.add_argument("--kaynak", choices=("ses", "ikisi", "altyazi"), help="motor kaynağı (varsayılan: kaydın meta.json'u)")
+    ap.add_argument("--hat", help="modul:Sinif (Hat sözleşmesi) | faz1 | eski; varsayılan faz1")
+    ap.add_argument("--eski", action="store_true", help="Faz 0 hattı (MevcutHat); --hat eski ile aynı")
     ap.add_argument("--ben", help="mikrofon sahibinin adı")
-    ap.add_argument("--hoparlor", action="store_true", help="kulaklık yok: eko tekilleştirme açık")
+    ap.add_argument("--katilimcilar", help="virgülle ayrılmış katılımcı adları (Outlook daveti gibi); yoksa ad ≥ 3 ayrı satırda "
+                                           "görülünce kişi sayılır")
+    ap.add_argument("--hoparlor", action="store_true", help="kulaklık yok: yankı kuralı (kulaklik=False)")
     a = ap.parse_args(argv)
     ayar = {"kulaklik": False} if a.hoparlor else {}
-    if a.kaynak:
-        ayar["kaynak"] = a.kaynak
-    kos(a.klasor, hat_sinifi_yukle(a.hat), stt_istemci() if a.stt else None, a.bas, a.bit, a.cikti, ayar, a.ben)
+    if a.katilimcilar:
+        ayar["katilimcilar"] = [k.strip() for k in a.katilimcilar.split(",") if k.strip()]
+    kos(a.klasor, hat_sinifi_yukle("eski" if a.eski else a.hat), stt_istemci() if a.stt else None, a.bas, a.bit, a.cikti,
+        ayar, a.ben)
     return 0
 
 

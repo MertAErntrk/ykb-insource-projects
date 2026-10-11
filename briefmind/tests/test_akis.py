@@ -43,7 +43,7 @@ def yerel(monkeypatch):
     monkeypatch.setattr(llm, "token_say", llm.token_tahmin)
 
 
-def _toplanti(tmp_path, parca=3, ozetli=True, not_md=None, olay=None):
+def _toplanti(tmp_path, parca=3, ozetli=True, not_md=None, olay=None, surum=None):
     k = tmp_path / "toplantilar" / "2026-09-23_strateji"
     (k / "parcalar").mkdir(parents=True)
     (k / "meta.json").write_text(json.dumps({"baslik": "Strateji", "tarih": "2026-09-23", "durum": "devam",
@@ -52,6 +52,8 @@ def _toplanti(tmp_path, parca=3, ozetli=True, not_md=None, olay=None):
     for no in range(1, parca + 1):
         satirlar = [{"id": no, "ts": f"10:0{no}:00", "speaker": "Selin Kara",
                      "text": f"MVP prototipini ben hazırlarım, komplo tit sonrası test ortamı {no}"}]
+        if surum:                                    # Faz 1 satiri: konusmaci zamandan, kesin
+            satirlar[0].update(surum=surum, spk_guven=0.9, durum="karar", kaynak="ses")
         (k / "parcalar" / f"parca_{no:03d}.json").write_text(json.dumps(
             {"sira": no, "neden": "token", "token": 100, "baslangic": satirlar[0]["ts"], "bitis": satirlar[0]["ts"],
              "satirlar": satirlar, "duzeltmeler": [], "ozet": dict(PARCA_OZETI) if ozetli else None},
@@ -91,16 +93,26 @@ def test_kararlari_uygula_adim_olaylari(tmp_path, monkeypatch):
 
 def test_notu_uret_adim_olaylari_ve_sorumlu_dogrulama(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "sor", SahteLLM())
-    m, k, olaylar = _toplanti(tmp_path, parca=2)
+    m, k, olaylar = _toplanti(tmp_path, parca=2, surum=2)
     md = m.notu_uret()
     m.kapat()
     adimlar = [v["metin"] for t, v in olaylar if t == "adim"]
     assert adimlar == ["Kararlar ve aksiyonlar birleştiriliyor", "Özet paragrafı yazılıyor", "Dayanak kontrolü",
                        "Not kaydediliyor"]
     assert all(set(v) == {"metin", "no", "toplam"} for t, v in olaylar if t == "adim")
-    # K8: 'belirsiz' aksiyonun kaynak satirinda Selin 'ben hazirlarim' diyor -> sorumlu Selin Kara
+    # K8: 'belirsiz' aksiyonun kaynak satirinda Selin 'ben hazirlarim' diyor -> sorumlu Selin Kara (kesin satir)
     assert "| MVP prototipini hazırlamak | Selin Kara |" in md
     assert json.loads((k / "meta.json").read_text(encoding="utf-8"))["durum"] == "tamam"
+
+
+def test_eski_kayitta_sorumlu_uretilmez_transkript_ad_soru_isaretli(tmp_path, monkeypatch):
+    """Faz 1 gocu: surumsuz (v2 oncesi) satir spk_guven 0.5 -> 'Selin Kara?'; 'ben hazirlarim' sahip uretmez."""
+    monkeypatch.setattr(llm, "sor", SahteLLM())
+    m, k, _ = _toplanti(tmp_path, parca=2)
+    md = m.notu_uret()
+    assert "| MVP prototipini hazırlamak | belirsiz |" in md
+    assert m.transkript_metni().startswith("Selin Kara?: ")
+    m.kapat()
 
 
 def test_notu_uret_ozetsiz_parca_adimi(tmp_path, monkeypatch):

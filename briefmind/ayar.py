@@ -13,7 +13,10 @@ def ayar_oku():
     # model: config'teki deger (bos: sunucudaki tek model); context: 0 = sunucunun max_model_len'i
     v = {"route": llm.ROUTE, "model": llm.CONFIG_MODEL, "context": 0, "otobitir": 180, "duzelt": True, "outlook": True,
          "otomatik_basla": False,
-         "kaynak": "ses",                  # altyazi | ses | ikisi
+         "kaynak": "ses",                  # yalniz ses (Faz1: 'altyazi'/'ikisi' kaldirildi)
+         "altyazi_yedek": False,           # opt-in: STT yokken altyazi metni yedek olarak (supheli, dusuk guven)
+         "altyazi_goster": False,          # canli ekranda Teams altyazisini da goster (transkripte girmez)
+         "kesinti_kaydi": False,           # STT yokken klipleri diske yaz, STT donunce coz
          "stt_url": "",                        # config.json: STT servisi (OpenAI uyumlu /v1/audio/transcriptions)
          "stt_model": "whisper-large-v3-turbo-prod",     # ARGE GPU servisi (Turkce fine-tune)
          "stt_key": "EMPTY",                              # kendi CPU servisimiz icin: model "whisper", anahtar bos

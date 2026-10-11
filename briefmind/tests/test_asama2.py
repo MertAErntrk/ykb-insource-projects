@@ -1,11 +1,14 @@
-"""Asama 2 (UYGULAMA_PLANI_v2 bolum C): ayni anda konusma (K5), 'ikisi' modu (A6), ses normalizasyonu (A5),
-UIA okuma araligi (A7), TLS dogrulamasi (A8), konusma payi (N7), Jira/Planner CSV (N9). Ag/ses cihazi gerekmez."""
+"""Asama 2 (UYGULAMA_PLANI_v2 bolum C): ayni anda konusma, ses normalizasyonu (A5), UIA okuma araligi (A7), TLS
+dogrulamasi (A8), konusma payi (N7), Jira/Planner CSV (N9). Faz 1: K5 (altyazi satirini transkripte ekleme), 'ikisi'
+(A6) ve 'altyazi' modlari kaldirildi; ayni anda konusma cizelge araliklarinin kesisimiyle 'A / B (aynı anda)'
+olarak isaretlenir, altyazi metni hic eklenmez. Ag/ses cihazi gerekmez."""
 import csv
 import datetime as dt
 import json
 import queue
 
 import numpy as np
+import pytest
 
 import ayar as ayar_mod
 import llm
@@ -13,109 +16,51 @@ import motor as motor_mod
 import not_araclari
 import ses
 import yakalayici
+from metin import gorunen_ad
+from test_motor_faz1 import T0, akit, saat_kur
 
 
-def _motor(tmp_path, kaynak="ses", ben="Deniz"):
-    return motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 29), duzelt=False, kaynak=kaynak, ben=ben)
+@pytest.fixture
+def saat(monkeypatch):
+    return saat_kur(monkeypatch)
 
 
-def _transkript(m):
-    return [(s["speaker"], s["kaynak"], s["text"]) for s in m.mevcut]
+A_, B_ = "Ayşe Demir", "Ahmet Yılmaz"
 
 
-# ---------------------------------------------------------------- K5 ayni anda konusma
+def _motor(tmp_path, ben="Deniz", isle=False):
+    m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date.fromtimestamp(T0), duzelt=False, ben=ben,
+                        katilimcilar=[A_, B_, ben])
+    if not isle:
+        m._isle = lambda veri, duzelt: None
+    return m
 
-def test_cakismada_diger_konusmacinin_altyazisi_eklenir_bir_kez(tmp_path, monkeypatch):
-    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
+
+# ---------------------------------------------------------------- ayni anda konusma (eski K5)
+
+def test_ayni_anda_konusma_a_b_isaretlenir_altyazi_satiri_eklenmez(tmp_path, saat):
     m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Kampanya bütçesini yarın onaylarım"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Ahmet Yılmaz", "text": "Test ortamı perşembe hazır olacak"})
-    # Whisper karisik seste yalnizca baskin sesi (Ahmet) yazdi
-    s = m.ses_satiri("10:00:02", None, "Test ortamı perşembe hazır olacak.", "loopback")
-    assert s["speaker"] == "Ahmet Yılmaz"
-    assert _transkript(m) == [("Ayşe Demir", "altyazi-cakisma", "Kampanya bütçesini yarın onaylarım"),
-                              ("Ahmet Yılmaz", "ses", "Test ortamı perşembe hazır olacak.")]
-    # ikinci bir Whisper satiri ayni pencerede: Ayse'nin satiri tekrar eklenmez
-    m.ses_satiri("10:00:03", None, "Test ortamı perşembe hazır olacak, bekliyoruz", "loopback")
-    assert sum(1 for x in _transkript(m) if x[1] == "altyazi-cakisma") == 1
-    # Ayse'nin sozu sonradan Whisper'dan da gelirse ikinci kez yazilmaz (altyazi satiri onun yerini tutuyor)
-    assert m.ses_satiri("10:00:04", None, "Kampanya bütçesini yarın onaylarım.", "loopback") is None
-    assert len(m.mevcut) == 3
+    # once iki ayri soz (L capalari), sonra Ayse ve Ahmet ayni anda 4 sn konusur; Whisper tek klip yazdi
+    sozler = [(A_, 1, 4), (B_, 6, 9), (A_, 11, 14), (B_, 16, 19), (A_, 21, 26), (B_, 21.2, 26)]
+    klipler = [(1, "loopback", 1, 4, "Bir."), (2, "loopback", 6, 9, "İki."), (3, "loopback", 11, 14, "Üç."),
+               (4, "loopback", 16, 19, "Dört."), (5, "loopback", 21, 26, "Test ortamı perşembe hazır olacak.")]
+    akit(m, saat, sozler, klipler, 30)
+    son = m.mevcut[-1]
+    assert son["cakisma"] and son["speaker"] in (f"{A_} / {B_}", f"{B_} / {A_}")
+    assert gorunen_ad(son).endswith("(aynı anda)")
+    assert [x["kaynak"] for x in m.mevcut] == ["ses"] * 5            # altyazi satiri transkripte girmedi
+    assert son["speaker"] not in m.katilimcilar
     m.kapat()
 
 
-def test_cakisma_yok_whisper_digerinin_sozunu_de_yazmissa(tmp_path):
-    m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Kampanya bütçesini onaylarım"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Ahmet Yılmaz", "text": "Test ortamı hazır olacak"})
-    # Whisper iki sozu birlestirdi: Ayse'nin kokleri Whisper metninde geciyor -> ek satir yok
-    m.ses_satiri("10:00:02", None, "Kampanya bütçesini onaylarım test ortamı hazır olacak", "loopback")
-    assert [x[1] for x in _transkript(m)] == ["ses"]
-    # uzak (> 4 sn) altyazi satiri cakisma sayilmaz
-    m.altyazi_satiri({"ts": "10:00:20", "speaker": "Ayşe Demir", "text": "Raporu cuma günü gönderirim"})
-    m.ses_satiri("10:00:30", None, "Toplantıyı burada bitirelim arkadaşlar", "loopback")
-    assert "altyazi-cakisma" not in [x[1] for x in _transkript(m)]
-    m.kapat()
-
-
-def test_cakisma_kullanicinin_kendi_altyazisini_eklemez(tmp_path):
-    m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Deniz Can Öztürk", "text": "Jira kaydını ben açarım"})
-    m.altyazi_satiri({"ts": "10:00:02", "speaker": "Ahmet Yılmaz", "text": "Test ortamı hazır olacak"})
-    m.ses_satiri("10:00:02", None, "Test ortamı hazır olacak.", "loopback")
-    assert [x[1] for x in _transkript(m)] == ["ses"]        # kullanicinin sozu mikrofon akisindan gelir
-    m.kapat()
-
-
-# ---------------------------------------------------------------- A6 'ikisi' modu
-
-def test_ikisi_eslesen_whisper_varsa_altyazi_dusulur(tmp_path, monkeypatch):
-    saat = [1000.0]
-    monkeypatch.setattr(motor_mod.time, "time", lambda: saat[0])
-    m = _motor(tmp_path, kaynak="ikisi")
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Test ortamı perşembe hazır olacak"})
-    assert m.mevcut == []                                    # altyazi satiri hemen girmez
-    m.ses_satiri("10:00:01", None, "Test ortamı perşembe hazır olacak.", "loopback")
-    saat[0] += 9
+def test_ikisi_ve_altyazi_modlari_yok_kaynak_hep_ses(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)                                      # yerel config.json okunmasin
+    m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 29), duzelt=False)
+    assert m.kaynak == "ses"
+    m.altyazi_satiri({"ts": "10:00:01", "speaker": A_, "text": "Raporu cuma günü gönderirim"})
     m.kontrol()
-    assert _transkript(m) == [("Ayşe Demir", "ses", "Test ortamı perşembe hazır olacak.")]
-    # Whisper once, altyazi sonra geldiyse de tek satir
-    m.ses_satiri("10:00:10", None, "Kampanya görsellerini cuma gönderirim.", "loopback")
-    m.altyazi_satiri({"ts": "10:00:11", "speaker": "Ayşe Demir", "text": "Kampanya görsellerini cuma gönderirim"})
-    saat[0] += 9
-    m.kontrol()
-    assert len(m.mevcut) == 2 and all(s["kaynak"] == "ses" for s in m.mevcut)
-    m.kapat()
-
-
-def test_ikisi_whisper_kacirdiysa_altyazi_satiri_eklenir(tmp_path, monkeypatch):
-    saat = [1000.0]
-    monkeypatch.setattr(motor_mod.time, "time", lambda: saat[0])
-    m = _motor(tmp_path, kaynak="ikisi")
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Raporu cuma günü gönderirim"})
-    saat[0] += 5
-    m.kontrol()
-    assert m.mevcut == []                                    # 8 sn dolmadi
-    saat[0] += 4
-    m.kontrol()
-    assert _transkript(m) == [("Ayşe Demir", "altyazi", "Raporu cuma günü gönderirim")]
-    m.kontrol()
-    assert len(m.mevcut) == 1                                # bir kez
-    # sonradan gelen ayni sozlu Whisper satiri ikinci kez yazilmaz
-    assert m.ses_satiri("10:00:02", None, "Raporu cuma günü gönderirim.", "loopback") is None
-    # bitiste suresi dolmamis altyazi satiri da kaybolmaz
-    m.altyazi_satiri({"ts": "10:00:30", "speaker": "Ahmet Yılmaz", "text": "Toplantıyı burada bitirelim"})
-    monkeypatch.setattr(llm, "bolum_ozetle", lambda *a, **k: None)          # LLM sunucusu yok
-    m.bitir()
-    satirlar = m.tum_satirlar()
-    assert [s["text"] for s in satirlar][-1] == "Toplantıyı burada bitirelim"
-    m.kapat()
-
-
-def test_altyazi_modu_hemen_ekler(tmp_path):
-    m = _motor(tmp_path, kaynak="altyazi")
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Raporu cuma günü gönderirim"})
-    assert _transkript(m) == [("Ayşe Demir", "altyazi", "Raporu cuma günü gönderirim")]
+    assert m.mevcut == []                                            # 'altyazi'/'ikisi' gibi eklenmez
+    assert ayar_mod.ayar_oku()["kaynak"] == "ses" and ayar_mod.ayar_oku()["altyazi_yedek"] is False
     m.kapat()
 
 
@@ -248,7 +193,7 @@ def test_konusma_paylari():
 def test_konusma_paylari_meta_json_a_yazilir(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "bolum_ozetle", lambda *a, **k: {"ozet": "MVP konuşuldu.", "konular": [],
                                                               "kararlar": [], "aksiyonlar": []})
-    m = _motor(tmp_path, kaynak="altyazi")
+    m = _motor(tmp_path, isle=True)
     m.satir_ekle({"ts": "10:00:00", "speaker": "Selin Kara", "text": "MVP prototipini ben hazırlarım"})
     m.satir_ekle({"ts": "10:00:10", "speaker": "Emre Sancak", "text": "Test ortamı hazır olacak"})
     m.parca_kapat("test")

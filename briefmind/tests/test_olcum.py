@@ -326,28 +326,57 @@ def test_etiketle_cakisma_ve_devir(tmp_path):
 
 # ---------------------------------------------------------------- replay
 
+def _buyuyen_okumalar(k):
+    """Faz1Hat konusmaci cizelgesini kelime artisindan cikarir: KIM_A satiri 10-16 sn arasi sozcuk sozcuk buyur."""
+    kel = "Bugün raporu perşembeye yetiştirelim mi acaba".split()
+    okumalar = [{"okuma_no": i + 1, "bas_epoch": T0 + 9.9 + i * 0.6, "bit_epoch": T0 + 10 + i * 0.6,
+                 "gorunen": [[KIM_A, " ".join(kel[:min(len(kel), 1 + i // 2)])]]} for i in range(12)]
+    okumalar.append({"okuma_no": 99, "bas_epoch": T0 + 20, "bit_epoch": T0 + 20.1, "gorunen": [[KIM_B, "x"]]})
+    _jsonl(os.path.join(k, "olcum", "okumalar.jsonl"), okumalar)
+
+
 def test_replay_sentetik_kayit(tmp_path):
+    """Varsayilan hat Faz1Hat: okuma olaylari -> konusmaci cizelgesi, klip -> Motor.ses_olayi, olcum klip_no ile esler."""
     k = _kayit_klasoru(tmp_path)
+    _buyuyen_okumalar(k)
     _jsonl(os.path.join(k, "olcum", "gercek.jsonl"), [
         {"klip_no": 1, "speaker": KIM_A, "cakisma": False, "halusinasyon": False,
          "text": "Bugün raporu perşembeye yetiştirelim mi acaba"},
         {"klip_no": 2, "speaker": "sessizlik", "cakisma": False, "halusinasyon": True, "text": ""}])
     cikti = str(tmp_path / "cikti")
-    m, yol = replay.kos(k, cikti=cikti, yazdir=lambda *a: None)
+    m, yol = replay.kos(k, cikti=cikti, ayar={"katilimcilar": [KIM_A, KIM_B]}, yazdir=lambda *a: None)
     assert yol == cikti
     satirlar = _oku_jsonl(os.path.join(cikti, "satirlar.jsonl"))
     ses_satirlari = [s for s in satirlar if s.get("klip_no") == 1]
-    assert len(ses_satirlari) == 1 and ses_satirlari[0]["speaker"] == KIM_A
+    # ilk 3 L capasina kadar spk_guven tavani 0.6: ad dogru ama gosterim "Ad?" (kesin degil)
+    assert len(ses_satirlari) == 1 and ses_satirlari[0]["speaker_ham"] == KIM_A
+    assert ses_satirlari[0]["speaker"] == KIM_A + "?" and ses_satirlari[0]["spk_guven"] < 0.7
     assert ses_satirlari[0]["kaynak"] == "ses" and ses_satirlari[0]["ts"] == olcum.jsonl_oku(
         os.path.join(k, "olcum", "klipler.jsonl"))[0]["ts"]
     assert m["wer"]["hata"] == 0 and m["wer"]["klip"] == 1
-    assert m["ser_kesin"]["yanlis"] == 0 and m["ser_kesin"]["kesin_satir"] == 1
-    assert m["halusinasyon"]["klip"] == 1
-    assert m["replay"] == {"okuma": 13, "klip": 2, "stt": False, "hat": "MevcutHat"}
+    assert m["ser_kesin"]["yanlis"] == 0 and m["ser_kesin"]["kesin_satir"] == 0
+    assert m["halusinasyon"]["klip"] == 1 and m["halusinasyon"]["kesin_satir_cikaran"] == 0
+    assert m["replay"] == {"okuma": 13, "klip": 2, "stt": False, "hat": "Faz1Hat"}
     assert os.path.exists(os.path.join(cikti, "olcum.json"))
-    # replay sonrasi motor/yakalayici gercek saate doner
+    # davetli listesi yok ve ad tek satirda goruldu: sezgisel ad henuz kisi sayilmaz (hayalet ad kurali) -> '?'
+    cikti2 = str(tmp_path / "cikti2")
+    replay.kos(k, cikti=cikti2, yazdir=lambda *a: None)
+    s2 = [s for s in _oku_jsonl(os.path.join(cikti2, "satirlar.jsonl")) if s.get("klip_no") == 1]
+    assert len(s2) == 1 and s2[0]["speaker"] == "?"
+    # replay sonrasi motor gercek saate doner
     import motor
     assert abs(motor.time.time() - time.time()) < 5
+
+
+def test_replay_eski_hat_secilebilir(tmp_path):
+    """Faz 0 hatti (MevcutHat) --hat eski ile secilebilir ve calisir; gercek saat geri yuklenir."""
+    k = _kayit_klasoru(tmp_path)
+    assert replay.hat_sinifi_yukle("eski") is replay.MevcutHat and replay.hat_sinifi_yukle("") is replay.Faz1Hat
+    m, _ = replay.kos(k, hat_sinifi=replay.hat_sinifi_yukle("eski"), cikti=str(tmp_path / "eski"), yazdir=lambda *a: None)
+    assert m["replay"]["hat"] == "MevcutHat" and m["replay"]["klip"] == 2
+    import motor
+    import yakalayici as yak
+    assert abs(motor.time.time() - time.time()) < 5 and abs(yak.time.time() - time.time()) < 5
 
 
 def test_replay_hat_dikisi(tmp_path):

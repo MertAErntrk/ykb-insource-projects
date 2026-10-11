@@ -30,6 +30,7 @@ import outlook
 from ayar import ayar_oku, ayar_yaz
 from gorunum import QSS, RENKLER, kart, md_to_html, svg_ikon  # noqa: F401  (md_to_html: app.md_to_html uyumu)
 from isler import LlmTaniIsi, ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi, hata_logla
+from metin import gorunen_ad
 from motor import Motor
 from sozluk import Sozluk
 
@@ -184,6 +185,16 @@ class Pencere(QtWidgets.QMainWindow):
         h = QtWidgets.QHBoxLayout()
         sol = QtWidgets.QVBoxLayout()
         sol.addWidget(QtWidgets.QLabel("Konuşmalar"))
+        # durum seritleri: STT kesintisi (transkript eksik) ve konusmaci bilgisi yok (altyazi okunamiyor)
+        self.stt_serit = QtWidgets.QLabel("", objectName="uyari")
+        self.stt_serit.setWordWrap(True)
+        self.stt_serit.hide()
+        sol.addWidget(self.stt_serit)
+        self.kapsama_serit = QtWidgets.QLabel("Konuşmacı bilgisi yok — Teams altyazısı kapalı ya da okunamıyor; "
+                                              "konuşmacılar 'Bilinmeyen' yazılıyor.", objectName="uyari")
+        self.kapsama_serit.setWordWrap(True)
+        self.kapsama_serit.hide()
+        sol.addWidget(self.kapsama_serit)
         self.akis = QtWidgets.QTextBrowser()
         self.akis.setOpenExternalLinks(False)
         sol.addWidget(self.akis, 1)
@@ -430,12 +441,18 @@ class Pencere(QtWidgets.QMainWindow):
                                        "'Uygula ve notu üret' ile notu yeniden üretebilirsin.")
         self.a_otomatik_not.setChecked(bool(self.ayar.get("otomatik_not", True)))
         self.a_kaynak = QtWidgets.QComboBox()
-        for etiket, deger in (("Ses (Whisper) — metin sesten, konuşmacı altyazıdan", "ses"),
-                              ("Ses + Altyazı (ikisini de nota al)", "ikisi"),
-                              ("Yalnızca altyazı", "altyazi")):
-            self.a_kaynak.addItem(etiket, deger)
-        i = self.a_kaynak.findData(self.ayar.get("kaynak", "ses"))
-        self.a_kaynak.setCurrentIndex(max(0, i))
+        # metin hep sesten (Whisper), konusmaci Teams altyazisinin ZAMANINDAN; altyazi metni transkripte girmez
+        self.a_kaynak.addItem("Ses (Whisper) — metin sesten, konuşmacı altyazı zamanından", "ses")
+        self.a_kaynak.setCurrentIndex(0)
+        self.a_kaynak.setEnabled(False)
+        self.a_altyazi_yedek = QtWidgets.QCheckBox("STT yokken Teams altyazı metnini yedek olarak nota al "
+                                                   "(düşük güven, şüpheli işaretli)")
+        self.a_altyazi_yedek.setToolTip("Kapalıyken (önerilen) STT kesintisinde transkriptte boşluk kalır ve nota "
+                                        "'STT yok — transkript eksik' yazılır. Açıkken o aralıkta altyazı satırları "
+                                        "'altyazıdan, düşük güven' olarak girer; sahip/aksiyon üretmez.")
+        self.a_altyazi_yedek.setChecked(bool(self.ayar.get("altyazi_yedek", False)))
+        self.a_altyazi_goster = QtWidgets.QCheckBox("Teams altyazısını canlı ekranda da göster (transkripte girmez)")
+        self.a_altyazi_goster.setChecked(bool(self.ayar.get("altyazi_goster", False)))
         self.a_stt = QtWidgets.QLineEdit(self.ayar.get("stt_url", ""))
         self.a_mik = QtWidgets.QComboBox()
         self.a_mik.addItem("Otomatik (kulaklık/hoparlör her başlatmada algılanır)", "otomatik")
@@ -473,6 +490,8 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow("Ben", self.a_ben)
         f.addRow(self.a_altyazi_oto)
         f.addRow(self.a_altyazi_tr)
+        f.addRow(self.a_altyazi_goster)
+        f.addRow(self.a_altyazi_yedek)
         f.addRow(self.a_olcum)
         f.addRow(b_test)
         f.addRow(QtWidgets.QLabel("— LLM —", objectName="alt_bilgi"))
@@ -728,7 +747,8 @@ class Pencere(QtWidgets.QMainWindow):
             self.alt_bilgi.setText("Takvim bilgisi yok; katılımcılar altyazıdan öğrenilecek.")
         self.akis.clear()
         self._akis_satirlari = []
-        self._uyum_uyari = False
+        self.stt_serit.hide()
+        self.kapsama_serit.hide()
         self.canli_not.clear()
         self._canli_sifirla()
         self.tablo.setRowCount(0)
@@ -737,7 +757,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.b_uygula.setEnabled(False)
         self.nav.item(1).setText(self.SAYFALAR[1])
         self.k_oneri.deger.setText("0")
-        self.ayar["kaynak"] = self.a_kaynak.currentData()
+        self.ayar["kaynak"] = "ses"
         self.ayar["stt_url"] = self.a_stt.text().strip()
         self.ayar["stt_model"] = self.a_stt_model.text().strip()
         self.ayar["stt_key"] = self.a_stt_key.text().strip()
@@ -746,8 +766,9 @@ class Pencere(QtWidgets.QMainWindow):
         self.ayar["altyazi_otomatik"] = self.a_altyazi_oto.isChecked()
         self.ayar["altyazi_turkce"] = self.a_altyazi_tr.isChecked()
         self.ayar["olcum_kaydi"] = self.a_olcum.isChecked()
-        self.k_kaynak.deger.setText({"altyazi": "Altyazı", "ses": "Ses (Whisper)",
-                                     "ikisi": "Ses + Altyazı"}[self.ayar["kaynak"]])
+        self.ayar["altyazi_yedek"] = self.a_altyazi_yedek.isChecked()
+        self.ayar["altyazi_goster"] = self.a_altyazi_goster.isChecked()
+        self.k_kaynak.deger.setText("Ses (Whisper)")
         self.baslangic = None            # altyazi/ses bulununca baslar
         self.bitis = None
         self.sayac.setText("00:00")
@@ -778,16 +799,25 @@ class Pencere(QtWidgets.QMainWindow):
             self, "Yakalama hatası", mesaj[-800:] + "\n\nToplantı kaydı diskte kaldı; sürüyorsa not üretilecek."))
 
     def _satir_html(self, v):
-        r = self._renk(v["speaker"])
-        # 'altyazi' / 'altyazi-cakisma' (K5): ses modunda metni Whisper degil Teams altyazisi verdi
-        if (v.get("kaynak") or "").startswith("altyazi") and self.ayar.get("kaynak") != "altyazi":
-            return (f'<span style="color:#CBD5E1;font-size:11px">{v["ts"]}</span> '
-                    f'<span style="color:{r};opacity:0.55">{v["speaker"]}</span> '
+        import html as _h
+        ts = _h.escape(str(v.get("ts") or ""))
+        metin = _h.escape(str(v.get("text") or ""))
+        if v.get("kaynak") == "altyazi":            # canli altyazi gorunumu (altyazi_goster): transkript degil
+            return (f'<span style="color:#CBD5E1;font-size:11px">{ts}</span> '
+                    f'<span style="color:#94A3B8">{_h.escape(str(v.get("speaker") or "?"))}</span> '
                     f'<span style="color:#94A3B8;font-size:10px">[altyazı]</span>'
-                    f'<span style="color:#94A3B8"> {v["text"]}</span>')
-        kim = v["speaker"]
-        kim_html = (f'<span style="color:#94A3B8">?</span>' if kim == "?" else f'<b style="color:{r}">{kim}</b>')
-        return f'<span style="color:#94A3B8;font-size:11px">{v["ts"]}</span> {kim_html}: {v["text"]}'
+                    f'<span style="color:#94A3B8"> {metin}</span>')
+        kim = gorunen_ad(v)                          # tek gosterim kurali: 'Ad?', 'Bilinmeyen', 'beklemede…'
+        if v.get("durum") == "beklemede" or kim == "Bilinmeyen":
+            kim_html = f'<span style="color:#94A3B8">{_h.escape(kim)}</span>'
+        else:
+            kim_html = f'<b style="color:{self._renk(v.get("speaker") or kim)}">{_h.escape(kim)}</b>'
+        ek = ""
+        if v.get("kaynak") == "altyazi-yedek":
+            ek = ' <span style="color:#94A3B8;font-size:10px">[altyazıdan, düşük güven]</span>'
+        elif v.get("supheli"):
+            ek = ' <span style="color:#94A3B8;font-size:10px">[şüpheli]</span>'
+        return f'<span style="color:#94A3B8;font-size:11px">{ts}</span> {kim_html}{ek}: {metin}'
 
     def _akis_ekle(self, v):
         self.akis.append(self._satir_html(v))
@@ -801,33 +831,49 @@ class Pencere(QtWidgets.QMainWindow):
         if sonda:
             kaydirici.setValue(kaydirici.maximum())
 
-    def _uyum_guncelle(self):
-        """Kaynak karti: Whisper cumleleri altyaziyla ne kadar ortusuyor? Dusukse uyar."""
-        m = getattr(self, "motor", None) or (self.is_.motor if self.is_ else None)
-        if not m or m.kaynak == "altyazi":
+    def _stt_serit_guncelle(self, v):
+        """SesServisi.stt_durumu (ya da isler'in 'STT yok' durumu): kesinti suruyorsa ya da cozulemeyen aralik
+        varsa serit 'STT yok — transkript eksik (hh:mm–hh:mm)'."""
+        if not isinstance(v, dict):
             return
-        u = m.uyum_orani()
-        if u is None:
+        araliklar = [list(a)[:2] for a in (v.get("eksik") or []) if len(a) >= 2]
+        if v.get("durum") == "kesinti":
+            araliklar.append([v.get("bas") or time.time(), None])
+            self.k_kaynak.deger.setText("STT yok")
+        else:
             self.k_kaynak.deger.setText("Ses (Whisper)")
-            return
-        self.k_kaynak.deger.setText(f"Ses ✓ uyum %{int(u * 100)}")
-        if len(m.uyum) >= 6 and u < 0.15 and not getattr(self, "_uyum_uyari", False):
-            self._uyum_uyari = True
-            self.log("! Whisper metni altyazıyla hiç örtüşmüyor: ses yanlış cihazdan geliyor olabilir "
-                     "(Windows ses çıkışı Teams'in kullandığı cihaz mı?) ya da altyazı başka dilde.")
+        if araliklar:
+            ek = (" — klipler diske yazılıyor, STT dönünce çözülecek" if v.get("kayit") and v.get("durum") == "kesinti"
+                  else "")
+            self.stt_serit.setText(motor_mod.stt_eksik_metni(araliklar) + ek)
+            self.stt_serit.show()
+        else:
+            self.stt_serit.hide()
 
     def olay(self, tip, v):
-        if tip == "satir":
+        if tip == "satir":                            # yeni satir: konusmaci 'beklemede…'
             self._akis_satirlari.append(dict(v))
             self._akis_satirlari = self._akis_satirlari[-400:]
             self._akis_ekle(v)
-        elif tip == "satir_guncelle":                 # konusmaci atandi ya da altyazi satiri buyudu/duzeltildi
+        elif tip == "satir_guncelle":                 # konusmaci karari geldi (satirin tamami)
             for x in self._akis_satirlari:
-                if x.get("id") == v["id"]:
-                    for alan in ("speaker", "text"):
-                        if alan in v:
-                            x[alan] = v[alan]
+                if x.get("id") == v.get("id") and x.get("kaynak") != "altyazi":
+                    x.update(v)
             self._akis_ciz()
+        elif tip == "satir_sil":                      # yanki klibi atildi
+            self._akis_satirlari = [x for x in self._akis_satirlari
+                                    if not (x.get("id") == v.get("id") and x.get("kaynak") != "altyazi")]
+            self._akis_ciz()
+        elif tip == "satir_degistir":                 # yeniden kesilen klip: satir parcalariyla degisti
+            for i, x in enumerate(self._akis_satirlari):
+                if x.get("id") == v.get("eski_id") and x.get("kaynak") != "altyazi":
+                    self._akis_satirlari[i:i + 1] = [dict(y) for y in v.get("yeni") or []]
+                    break
+            self._akis_ciz()
+        elif tip == "stt_durum":
+            self._stt_serit_guncelle(v)
+        elif tip == "kapsama":                        # konusmaci bilgisi 60 sn'den uzun yok / geri geldi
+            self.kapsama_serit.setVisible(not (v or {}).get("var", True))
         elif tip == "log":
             self.log(v)
             if "yakalama başladı" in str(v) and self.baslangic is None:
@@ -855,15 +901,14 @@ class Pencere(QtWidgets.QMainWindow):
             self._altyazi_iste_popup()
         elif tip == "sure_dondur":
             self.bitis = self.bitis or dt.datetime.now()
-        elif tip == "altyazi_izi":
-            if self.ayar.get("altyazi_goster", False):
+        elif tip == "altyazi_izi":                    # canli altyazi: yalniz gorunum, transkripte girmez
+            if self.ayar.get("altyazi_goster", False) and not v.get("guncelle"):
                 self._akis_satirlari.append({"ts": v["ts"], "speaker": v["speaker"], "text": v["text"],
                                              "kaynak": "altyazi", "id": None})
                 self._akis_satirlari = self._akis_satirlari[-400:]
                 self._akis_ekle(self._akis_satirlari[-1])
             self.k_katilimci.deger.setText(str(len(self.motor.katilimcilar)) if self.motor else
                                            self.k_katilimci.deger.text())
-            self._uyum_guncelle()
         elif tip == "ses_parca":
             self.log(f"♪ {v['kaynak']} {v['sn']} sn gönderildi (kuyruk {v['kuyruk']})")
         elif tip == "ses_metin":
@@ -871,11 +916,6 @@ class Pencere(QtWidgets.QMainWindow):
             self.log(f"✔ {v['kaynak']} {v['sn']} sn → {v['segment']} cümle ({v['islem']} sn{g})")
             if self.baslangic is None:
                 self.baslangic = dt.datetime.now()
-            self._uyum_guncelle()
-        elif tip == "kaynak_degisti":
-            self.k_kaynak.deger.setText({"altyazi": "Altyazı (yedek)", "ses": "Ses (Whisper)",
-                                         "ikisi": "Ses + Altyazı"}.get(v, str(v)))
-            self.log(f"kaynak değişti: {v}")
         elif tip == "stt_gecikme":
             if isinstance(v, dict) and not v.get("atlandi"):
                 self.log(f"! STT yavaş, {v['kuyruk']} parça sırada bekliyor (atlanmıyor)")
@@ -1259,7 +1299,13 @@ class Pencere(QtWidgets.QMainWindow):
             md.append("## Uygulanan düzeltmeler")
             md += [f"- {a} → {b}" for a, b in p_["duzeltmeler"]]
         md.append("## Konuşmalar")
-        md += [f"- {s_['ts']} **{s_['speaker']}**: {s_['text']}" for s_ in p_["satirlar"]]
+        try:
+            with open(os.path.join(k, "meta.json"), encoding="utf-8") as f:
+                tarih_ = dt.date.fromisoformat(json.load(f).get("tarih", ""))
+        except Exception:
+            tarih_ = dt.date.today()
+        motor_mod.satirlari_goc(p_["satirlar"], tarih_)          # v2 oncesi kayit: 'Ad?' (gosterim kurali)
+        md += [f"- {s_['ts']} **{motor_mod._konusan(s_)}**: {s_['text']}" for s_ in p_["satirlar"]]
         self.g_detay.setHtml(md_to_html("\n".join(md)))
 
     def gecmis_not(self):
@@ -1404,12 +1450,14 @@ class Pencere(QtWidgets.QMainWindow):
                           "context": self.a_context.value(),
                           "otobitir": self.a_otobitir.value(), "duzelt": self.a_duzelt.isChecked(),
                           "outlook": self.a_outlook.isChecked(), "otomatik_basla": self.a_oto.isChecked(),
-                          "kaynak": self.a_kaynak.currentData(), "stt_url": self.a_stt.text().strip(),
+                          "kaynak": "ses", "stt_url": self.a_stt.text().strip(),
                           "stt_model": self.a_stt_model.text().strip(), "stt_key": self.a_stt_key.text().strip(),
                           "mikrofon_modu": "otomatik", "ben": self.a_ben.text().strip(),
                           "altyazi_otomatik": self.a_altyazi_oto.isChecked(),
                           "altyazi_turkce": self.a_altyazi_tr.isChecked(),
                           "olcum_kaydi": self.a_olcum.isChecked(),
+                          "altyazi_yedek": self.a_altyazi_yedek.isChecked(),
+                          "altyazi_goster": self.a_altyazi_goster.isChecked(),
                           "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value(),
                           "otomatik_not": self.a_otomatik_not.isChecked()})
         ayar_yaz(self.ayar)
@@ -1466,17 +1514,17 @@ class Pencere(QtWidgets.QMainWindow):
             self.tepsi.showMessage("BriefMind", "Teams'te altyazıyı aç: Alt+Shift+C", QtWidgets.QSystemTrayIcon.Information, 8000)
 
     def stt_test(self):
-        """Servis ayakta mi, kulaklik var mi — ayarlar sayfasindan tek tikla."""
+        """Servis ayakta mi — ayarlar sayfasindan tek tikla."""
         try:
             import ses as ses_mod
             ist = ses_mod.SttIstemci(self.a_stt.text().strip(), model=self.a_stt_model.text().strip(),
                                      api_key=self.a_stt_key.text().strip(),
                                      verify=ayar_mod.tls_dogrulama(self.ayar))
             saglik = "ulaşılabilir" if ist.saglik() else "ULAŞILAMIYOR"
-            kul = ses_mod.kulaklik_var_mi()
+            # kulaklik/hoparlor artik toplanti sirasinda pasif korelasyonla (ton calmadan) algilanir
             QtWidgets.QMessageBox.information(
-                self, "STT testi",
-                f"Servis: {saglik}\nKulaklık testi: {'kulaklık var (çift akış)' if kul else 'hoparlör (tek akış)'}")
+                self, "STT testi", f"Servis: {saglik}\nKulaklık/hoparlör: toplantı sırasında otomatik algılanır "
+                                   "(mikrofon ve hoparlör sesi karşılaştırılır, ton çalınmaz).")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "STT testi", f"Test yapılamadı: {e!r}\n\n"
                                           f"Gerekli paketler: pip install sounddevice soundcard numpy requests")

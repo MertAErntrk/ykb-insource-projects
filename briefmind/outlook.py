@@ -178,3 +178,16 @@ def kullanici_adi():
         return os.getlogin()
     except Exception:
         return ""
+
+
+def ben_adi(ayar=None):
+    """Mikrofon akisinin sahibi (konusmaci.py 'ben'): ayardaki 'ben'; yoksa kullanici_adi() yalniz tam ad gibiyse
+    (en az iki kelime; 'dkaya' gibi oturum adi Teams gorunen adiyla eslesmez). Bulunamazsa None."""
+    ad = ((ayar or {}).get("ben") or "").strip()
+    if ad:
+        return ad
+    try:
+        ad = (kullanici_adi() or "").strip()
+    except Exception:
+        return None
+    return ad if len(ad.replace(",", " ").split()) >= 2 else None
