@@ -42,12 +42,17 @@ class SahteYakalayici:
 
 
 class SahteMotor:
-    def __init__(self, klasor, baslik, tarih, sozluk, katilimcilar, gundem, **kw):
+    def __init__(self, klasor, baslik, tarih, terimler, katilimcilar, gundem, **kw):
         self.klasor, self.kaynak, self.parca_no, self.mevcut_tok = klasor, kw.get("kaynak"), 0, 0
+        self.terimler = SahteTerimler()
         self.seri, self.katilimcilar, self.kulaklik = "x", [], None
         self.ben, self.sablon = "Deneme Kisi", "genel"
         self.ses_olay_sayisi, self.yeniden_kes_fn, self.stt = 0, None, []
         SahteMotor.son = self
+
+    def terimleri_hazirla(self):
+        self.hazirlandi = getattr(self, "hazirlandi", 0) + 1
+        return 0
 
     def altyazi_satiri(self, s):
         pass
@@ -95,9 +100,9 @@ class SahteSes:
         pass
 
 
-class _Sozluk:
-    def metin(self, seri):
-        return ""
+class SahteTerimler:
+    def prompt(self, seri, adlar=(), onceki=""):
+        return f"prompt:{seri}:{','.join(adlar)}"
 
 
 @pytest.fixture
@@ -115,7 +120,7 @@ def _calistir(qapp, tmp_path, monkeypatch, ayar):
     monkeypatch.setattr(isler, "ekran_okuyucu", lambda acik: None)
     monkeypatch.setattr(isler.motor_mod, "yeni_klasor", lambda baslik, tarih: str(tmp_path / "kayit"))
     monkeypatch.setattr(ses, "SesServisi", SahteSes)
-    isi = isler.YakalamaIsi("Deneme", {}, _Sozluk(), False, 30, ayar)
+    isi = isler.YakalamaIsi("Deneme", {}, SahteTerimler(), False, 30, ayar)
     SahteYakalayici.isi = isi
     loglar = []
     isi.olay.connect(lambda t, v: loglar.append((t, v)))
@@ -150,3 +155,22 @@ def test_faz1_olay_baglantilari(qapp, tmp_path, monkeypatch):
     assert m.yeniden_kes_fn is None                                  # bitiste koparilir (ses durdu)
     assert SahteSes.kesinti == [str(tmp_path / "kayit")]            # olcum kapali, kesinti_kaydi acik
     assert m.stt and m.stt[0]["durum"] == "ok"                      # her turda stt_durumu motora
+
+
+def test_faz2_ipucu_terim_prompt_ve_stt_ayarlari_baglanir(qapp, tmp_path, monkeypatch):
+    """ipucu_fn = motor.terimler.prompt(seri, katilimci adlari) (eski sozluk metni gitmez); stt_ipucu / esikler /
+    stt_repetition_penalty config'ten SesServisi'ne; cizelge_fn verilmez (altyazi STT aninda henuz gelmemistir)."""
+    _calistir(qapp, tmp_path, monkeypatch, {"kaynak": "ses", "stt_ipucu": False, "stt_repetition_penalty": 1.1,
+                                            "esikler": {"hal_supheli": 0.4}})
+    m = SahteMotor.son
+    m.katilimcilar.extend(["Ayşe Demir", "Burak Şahin"])
+    assert SahteSes.kw["ipucu_fn"]("loopback") == "prompt:x:Ayşe Demir,Burak Şahin"
+    assert SahteSes.kw["ipucu_fn"]() == "prompt:x:Ayşe Demir,Burak Şahin"               # sifir argumanli cagri da calisir
+    assert SahteSes.kw["stt_ipucu"] is False and SahteSes.kw["stt_repetition_penalty"] == 1.1
+    assert SahteSes.kw["esikler"] == {"hal_supheli": 0.4} and "cizelge_fn" not in SahteSes.kw
+
+
+def test_faz2_ipucu_varsayilan_acik_ve_davet_terimleri_hazirlanir(qapp, tmp_path, monkeypatch):
+    _calistir(qapp, tmp_path, monkeypatch, {"kaynak": "ses"})
+    assert SahteSes.kw["stt_ipucu"] is True and SahteSes.kw["stt_repetition_penalty"] is None
+    assert SahteMotor.son.hazirlandi == 1                       # davet / onceki not terimleri toplanti basinda havuza

@@ -1,4 +1,4 @@
-"""BriefMind uctan uca sentetik duzenek, Faz 1 hatti (MIMARI_v3 §8 "Duzenek", §9 Faz 1 kabulu).
+"""BriefMind uctan uca sentetik duzenek, Faz 1 + Faz 2 hatti (MIMARI_v3 §8 "Duzenek", §9 Faz 1 ve Faz 2 kabulu).
 
 Gercek Motor + gercek Konusmaci + gercek SesServisi (klip olayi uretimi, STT metin suzgecleri, sirali yayim) +
 gercek Yakalayici okuma olayi; sahte olanlar: STT (zemin gercegi metni), Teams paneli (zemin gercegindan uretilir),
@@ -15,6 +15,16 @@ Akis (hepsi sanal saatte, olay yiginiyla):
 Olcum klip_no ile yapilir (metin esleme yok): her son satirin klibi zemin gercegine bilinir.
 Altyazi metni sentetik izlerle (capNNNkNN) isaretlidir: hicbir cikti dosyasinda gorunmemelidir.
 
+Faz 2 (terim + duzeltme + halusinasyon filtresi): Motor gercek terim havuzu (terim.TerimHavuzu: davet + elle terimler) ve
+gercek duzelt.duzelt kapisiyla kosar; SAHTE LLM (SahteLLM) gercekci bir karisim onerir: dogru terim duzeltmeleri, yaygin
+kelimede yanlis duzeltmeler (komite -> commit), eki bozan duzeltmeler, tum satiri yeniden yazma, 'yazim' tahminleri,
+satir/sema disi oneriler. Kapi onlari tutmali: bozulan (dogru kelimenin yanlis olmasi) 0. STT sahte (SahteStt) ama SesServisi._coz
+gercek: Whisper prompt'u (terim.prompt) dusuk RMS klibe gitmez, sessiz klipte prompt metni cikiyorsa (sizinti) yine de kesin satir
+olmaz. Halusinasyon klipleri (kara liste, dongu, kr/sn ucu, akici cumle) SesServisi'nin gercek stt.halusinasyon_puani +
+Motor cizelge kuraliyla supheli ya da atilir. Ogrenme acik / kapali: ayni seri, 4 toplanti, son kelime hatasi acik <= kapali.
+Faz 2 kapi senaryolari SENARYOLAR_EK'te (terim_duzeltme, halusinasyon_cesit, prompt_sizintisi); 14 Faz 1 senaryosu ayni
+sahte LLM'in hafif haliyle kosar (kapilar degismez).
+
 Kullanim (repo kokunden):  python tests/e2e/duzenek.py [senaryo ...] [--seed 7,11 | --tara 20] [--ayrinti]
 """
 import bisect
@@ -26,6 +36,7 @@ import itertools
 import json
 import math
 import os
+import queue
 import random
 import re
 import shutil
@@ -37,6 +48,9 @@ import types
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
+_ARAC = os.path.join(REPO, "tools")
+if _ARAC not in sys.path:
+    sys.path.insert(0, _ARAC)
 
 
 def _platform_destegi():
@@ -52,9 +66,14 @@ def _platform_destegi():
 
 _platform_destegi()
 
+import duzelt as duzelt_mod   # noqa: E402
+import kelime         # noqa: E402
 import llm            # noqa: E402
 import motor as M     # noqa: E402
+import olcum          # noqa: E402  (tools/olcum.py: kelime_etkisi)
+import saat as saat_mod   # noqa: E402
 import ses            # noqa: E402
+import terim as terim_mod   # noqa: E402
 import yakalayici     # noqa: E402
 from konusmaci import Konusmaci   # noqa: E402
 from metin import gorunen_ad      # noqa: E402
@@ -115,21 +134,92 @@ SENARYOLAR = {
     "okuyucu_takilmasi": dict(tur="karisik", takilma=((150.0, 175.0), (380.0, 400.0))),
     "stt_kesintisi": dict(tur="karisik", stt_kesinti=((120.0, 170.0, "kayip"), (300.0, 340.0, "diskte"))),
 }
+# Saat adimi (NTP/w32time, elle degisiklik): duvar saati toplanti ortasinda +-3 sn sicrar (goreli sn, fark). Zaman
+# kaynagi saat.simdi() monotonik tabanli oldugundan zaman cizelgeleri etkilenmez: kapi 'kesin yanlis 0' ve sonuc adimsiz
+# kosumla ayni. Bkz. test_saat_adimi.py. 'saat_eski': eski davranis (simdi = duvar saati) -- negatif kontrol.
+SENARYOLAR_EK = {
+    "saat_adimi": dict(tur="karisik", gecikme=2.0, saat_adimlari=((200.0, 3.0), (400.0, -6.0), (650.0, 3.0))),
+}
+# Faz 2 kapi senaryolari (MIMARI_v3 §9 Faz 2 kabulu); SENARYOLAR'a girmez (Faz 1 tablosu 14 senaryo kalir).
+SENARYOLAR_FAZ2 = {
+    # gercek terim kapisi: yogun sahte LLM (komite -> commit, eki bozan, satir yeniden yazma, 'yazim' tahmini), Faz 2 cumleleri
+    "terim_duzeltme": dict(tur="karisik", cumleler="faz2", yogun=True, sure=600.0, ipucu=True),
+    # halusinasyon cesitleri: sessiz bosluk (uzak) ve konusma ardi (yakin), loopback + mikrofon
+    "halusinasyon_cesit": dict(tur="karisik", halusinasyon="cesit", sure=700.0, ipucu=True),
+    # Whisper prompt'u: sessiz klipte prompt metni cikarsa (sizinti) kesin satir olmamali
+    "prompt_sizintisi": dict(tur="karisik", halusinasyon="sessiz", sure=600.0, ipucu=True),
+}
+SEDLER_FAZ2 = SEDLER + SEDLER_GENIS[:2]
 SURELER = {"karisik": 900.0, "hizli_devir": 420.0, "klip_ici_devir": 420.0, "araya_girme": 420.0, "ayni_anda": 320.0,
            "ben_uzak": 480.0, "yanki": 480.0}
+
+# ---------------- Faz 2: terim havuzu, davet, Whisper hatalari, halusinasyon cesitleri ----------------
+TERIM_VARSAYILAN = ("Kubernetes", "commit", "pipeline", "Mikroservisler", "Jenkins", "Jira", "Kampanya Modülü")   # elle / davet
+DAVET_GOVDE = ("Gündem: Kubernetes geçişi, Jenkins hattı ve Jira kayıtları. Mikroservisler için yeni plan görüşülecek. "
+               "Kampanya Modülü ele alınacak.")
+DAVET = {"govde": DAVET_GOVDE, "ekler": []}
+# Faz 2 senaryosu (terim_duzeltme) cumleleri: gercek kelime tuzaklari (komite, kampanyacı, teminat...), ekli terimler
+# (Jenkins'e, Jira'ya, Kubernetes'in), sayi/tarih. {z}: zaman ifadesi (cumle cesitliligi: tekrar suzgeci az dusurur).
+FAZ2_SABLON = [
+    "Jenkins'e bağlanan işi {z} yeniden çalıştıralım.",
+    "Jira'ya açtığımız kayıtlar {z} kapanacak.",
+    "Kubernetes'in yeni sürümü {z} test ortamında denenecek.",
+    "Komite toplantısı {z} saat 14:30'da yapılacak.",
+    "Kampanyacı arkadaşlar raporu {z} gönderecek.",
+    "Terminal ekranında gelen hatayı {z} birlikte inceleyelim.",
+    "Taslak'ın hazırladığı rapor {z} 15 Ocak'ta paylaşılacak.",
+    "Son commit'i {z} geri alıp pipeline yeniden çalıştıralım.",
+    "Teminatlar için {z} yeni bir kampanya açacağız.",
+    "Müşterinin talebi {z} kredi komitesine iletildi.",
+    "Kubernetes kümesine {z} 3 yeni düğüm ekleyeceğiz.",
+    "Bütçe {z} 2 milyon lira olarak onaylandı.",
+    "Mikroservisler arasındaki gecikme {z} kabul edilebilir seviyede.",
+    "Kredisi olan müşterilere {z} ayrı bir teklif hazırlayalım.",
+    "Raporu {z} Jira'ya yükleyelim.",
+    "Jenkins'e erişim izni için {z} talep açıldı.",
+    "Komitede alınan karar {z} herkese duyurulacak.",
+    "Kampanya modülünü {z} yayına alacağız.",
+    "Pipeline sonucu başarısız olunca {z} ekibe haber gitsin.",
+    "Teminat oranlarını {z} yeniden hesaplamamız gerekiyor.",
+]
+FAZ2_ZAMAN = ["bu akşam", "yarın sabah", "cuma günü", "pazartesi", "gelecek hafta", "öğleden sonra", "bu hafta", "ay sonunda"]
+# Whisper'in Faz 2 cumlelerinde bozdugu ekli biçimler (anahtar: dogru biçimin kucuk harfi) -> duyulan
+WHISPER_HATA_FAZ2 = dict(WHISPER_HATA, **{"jenkins'e": "cenkinse", "jira'ya": "ciraya", "kubernetes'in": "kubernetisin",
+                                          "taslak'ın": "taşlakın", "commit'i": "komiti"})
+# Halusinasyon cesitleri: (ad, metin, sesli sure sn, akis, icerik_yeterli). icerik_yeterli: metin kendi basina ayirt edilir
+# (SesServisi suzgeci metni atar / kr-sn puani supheli yapar); False: akici kisa cumle ('Evet.' dongusu de suzgeçte tek
+# 'Evet.'a iner) -- yalniz sessiz bosluktaki cizelge kurali yakalar, konusma hemen ardindan ayirt edilemez (izlenir).
+HAL_CESIT = (
+    ("akici", "Bu konuyu daha sonra tekrar konuşuruz.", 2.4, "loopback", False),
+    ("kara_liste", "İzlediğiniz için teşekkürler.", 2.4, "loopback", True),
+    ("altyazi_mk", "Altyazı M.K.", 2.0, "loopback", True),
+    ("dongu", "Evet. Evet. Evet. Evet. Evet. Evet. Evet. Evet.", 2.4, "loopback", False),
+    ("krsn_ust", "Bu konuyla ilgili daha önce konuştuğumuz bütün maddeleri tekrar gözden geçirip sonuçları herkese iletelim.",
+     2.0, "loopback", True),
+    ("krsn_alt", "Sağ olun.", 6.0, "loopback", True),
+    ("akici_mikrofon", "Tamam, o zaman bir sonraki konuya geçelim.", 2.4, "mikrofon", False),
+)
+# Prompt sizintisi: sessiz klip (STT prompt verilmezse bos, verilirse prompt metnini soyler). (ad, sure, akis, zarf araligi)
+HAL_SESSIZ = (
+    ("sessiz_dusuk", 2.4, "loopback", (0.003, 0.009)),
+    ("sessiz_sinir", 2.4, "loopback", (0.017, 0.030)),          # IPUCU_RMS (0.015) uzerinde ama konusma yok
+    ("sessiz_dusuk_mikrofon", 2.4, "mikrofon", (0.003, 0.009)),
+    ("sessiz_sinir_mikrofon", 2.4, "mikrofon", (0.017, 0.030)),
+)
 
 
 # ======================================================================================================
 # zemin gercegi
 # ======================================================================================================
 
-def _slotlar(metin):
+def _slotlar(metin, hata=None):
     """Cumle -> [(dogru kelime, whisper kelimesi)]; Whisper'in yanlis duydugu kelimeler eslenir."""
     out = []
+    hata = WHISPER_HATA if hata is None else hata
     for w in metin.split():
         kok = w.strip(".,?!")
         son = w[len(kok):]
-        y = WHISPER_HATA.get(kok.lower())
+        y = hata.get(kok.lower())
         out.append((w, (y + son) if y else w))
     return out
 
@@ -137,13 +227,15 @@ def _slotlar(metin):
 class _Uretici:
     """Konusma listesi kurucu: id'ler ve slotlar otomatik."""
 
-    def __init__(self, r):
+    def __init__(self, r, havuz=None, hata=None):
         self.r = r
         self.ut = []
+        self.havuz = havuz                   # Faz 2: sablon cumleleri ({z} zaman); None: Faz 1 cumle uretimi
+        self.hata = hata
 
     def ekle(self, kim, bas, sure, metin, sessiz=False):
         u = {"id": len(self.ut), "kim": kim, "bas": bas, "bit": bas + sure, "metin": metin,
-             "slot": _slotlar(metin), "sessiz": sessiz}
+             "slot": _slotlar(metin, self.hata), "sessiz": sessiz}
         self.ut.append(u)
         return u
 
@@ -151,6 +243,9 @@ class _Uretici:
         """Benzersiz cumle (SesServisi tekrar suzgeci gercek: ayni cumle 90 sn icinde ya da 3. kez dusurulur); bazilarinda
         Whisper'in bozdugu bir terim. tekrar: %35 sabit havuzdan (tekrarlanan cumle senaryosu)."""
         r = self.r
+        if self.havuz:
+            m = r.choice(self.havuz).format(z=r.choice(FAZ2_ZAMAN))
+            return r.choice(KISA_YANIT) if r.random() < kisa else m
         if tekrar and r.random() < 0.35:
             m = CUMLELER[r.randrange(len(CUMLELER))]
         else:
@@ -168,10 +263,10 @@ class _Uretici:
 
 
 def uret_karisik(r, sure, kisiler, cakisma=0.05, hizli=0.12, tekrar=False, devam=0.12, uzun_sessizlik=0,
-                 hizli_aralik=(0.15, 0.5), taban=1.6, kisa=0.12):
+                 hizli_aralik=(0.15, 0.5), taban=1.6, kisa=0.12, havuz=None, hata=None, sessizlik=(9.0, 12.0)):
     """Genel toplanti: kisiler sirayla konusur; gecis: cakisma (kismi ust uste), hizli devir (<0.55 sn bosluk: VAD ayni
     klibe koyar), normal bosluk; ayni kisi duraklayip surdurebilir; uzun_sessizlik: her N sozde 9-12 sn sessizlik."""
-    g = _Uretici(r)
+    g = _Uretici(r, havuz, hata)
     t, son, sayac = 2.0, None, 0
     while t < sure:
         kim = son if (son and r.random() < devam) else r.choice([k for k in kisiler if k != son])
@@ -193,7 +288,7 @@ def uret_karisik(r, sure, kisiler, cakisma=0.05, hizli=0.12, tekrar=False, devam
                 else:
                     bas = onceki["bit"] + r.uniform(0.8, 3.0)
             if uzun_sessizlik and sayac and sayac % uzun_sessizlik == 0:
-                bas = onceki["bit"] + r.uniform(9.0, 12.0)
+                bas = onceki["bit"] + r.uniform(*sessizlik)
         u = g.ekle(kim, bas, d, metin)
         t, son, sayac = u["bit"], kim, sayac + 1
     return g.ut
@@ -284,9 +379,13 @@ def uret_yanki(r, sure):
 def uret(tur, r, sec):
     sure = sec.get("sure", SURELER[tur])
     if tur == "karisik":
+        hal = sec.get("halusinasyon")
+        faz2 = sec.get("cumleler") == "faz2"
         return uret_karisik(r, sure, [A, B, C, BEN], cakisma=sec.get("cakisma", 0.05), hizli=sec.get("hizli", 0.12),
                             kisa=sec.get("kisa", 0.12), tekrar=sec.get("tekrar", False),
-                            uzun_sessizlik=18 if sec.get("halusinasyon") else 0)
+                            uzun_sessizlik=(6 if hal in ("cesit", "sessiz") else 18) if hal else 0,
+                            havuz=FAZ2_SABLON if faz2 else None, hata=WHISPER_HATA_FAZ2 if faz2 else None,
+                            sessizlik=(4.5, 12.0) if hal in ("cesit", "sessiz") else (9.0, 12.0))
     return {"hizli_devir": uret_hizli_devir, "klip_ici_devir": uret_klip_ici_devir, "araya_girme": uret_araya_girme,
             "ayni_anda": uret_ayni_anda, "ben_uzak": uret_ben_uzak, "yanki": uret_yanki}[tur](r, sure)
 
@@ -303,6 +402,7 @@ class Panel:
 
     def __init__(self, ut, lag, kapali, r):
         self.kapali = sorted(kapali)
+        self._onbellek = {}
         for u in ut:
             n = len(u["slot"])
             s = u["bas"] + max(0.0, lag + r.uniform(-0.4, 0.4))
@@ -345,16 +445,19 @@ class Panel:
         if n <= 0:
             return []
         a = u["alt"]
-        tok = []
-        for i in range(n):
-            yaz = a["rev2"] and a["rev2"][0] <= t and i in a["rev2"][1]
-            tok.append(f"cap{u['id']:03d}{'r' if yaz else 'k'}{i:02d}")
         # kapali pencere bitince panel bostan baslar: pencere sonrasi yalniz sonradan uretilen kelimeler gorunur
         taban = 0
         for w0, w1 in self.kapali:
             if w1 <= t and a["s"] < w1:
                 taban = max(taban, self._n(u, w1) if a["e"] > w1 else a["n"])
-        return tok[taban:]
+        r2 = a["rev2"]
+        yazildi = bool(r2) and r2[0] <= t
+        anahtar = (u["id"], n, yazildi, taban)               # ayni durum ayni jetonlari verir (duzenek hizi)
+        tok = self._onbellek.get(anahtar)
+        if tok is None:
+            tok = [f"cap{u['id']:03d}{'r' if yazildi and i in r2[1] else 'k'}{i:02d}" for i in range(taban, n)]
+            self._onbellek[anahtar] = tok
+        return tok
 
     def kapali_mi(self, t):
         return any(w0 <= t < w1 for w0, w1 in self.kapali)
@@ -474,6 +577,26 @@ def klip_metni(c):
 # kosum: olay yigini
 # ======================================================================================================
 
+class SahteStt:
+    """SttIstemci yerine: coz(klip_kaydi, ipucu) -> segmentler. Klibin zemin gercegi metni (Whisper hatalari dahil) doner.
+    Sessiz klipte ('sizinti' isaretli) Whisper'in davranisi modellenir (plan §10 deneme sonuclari): prompt verilmezse bos,
+    verilirse prompt metnini soyler. Gonderilen prompt'lar `cagrilar`da (rms, uzunluk, sizinti) tutulur."""
+
+    def __init__(self):
+        self.cagrilar = []
+        self.ornek_ipucu = ""                # gorulen ilk prompt (icerik / uzunluk kapilari)
+
+    def coz(self, ses_, ipucu=""):
+        c = ses_
+        if ipucu and not self.ornek_ipucu and not c.get("sizinti"):
+            self.ornek_ipucu = ipucu
+        rms = sum(c["zarf"]) / max(1, len(c["zarf"]))
+        self.cagrilar.append({"rms": rms, "ipucu_kr": len(ipucu or ""), "sizinti": bool(c.get("sizinti")),
+                              "hayalet": bool(c["hayalet"])})
+        metin = (ipucu or "") if c.get("sizinti") else klip_metni(c)
+        return [{"id": 0, "text": metin, "tokens": [], "temperature": 0.0}]
+
+
 class Kosum:
     """Tek senaryo kosumu. `alici`: zaman(an), okuma(ev), klip(ev), kontrol(), stt_durum(d) metotlari olan nesne.
     yeniden_kes(klip_no, an_epoch) -> bool bu nesnede (SesServisi.yeniden_kes sozlesmesi)."""
@@ -499,7 +622,11 @@ class Kosum:
         self.kesinti = list(sec.get("stt_kesinti", ()))
         self.panel = Panel(ut, self.lag, self.kapali, self.r)
         self.yakalayici = yakalayici.Yakalayici()
-        self.servis = ses.SesServisi("", olay_fn=self._servis_olayi)
+        self.adim = bool(sec.get("saat_adimlari"))             # saat adimi modu: damgalar gercek kod yollarindan
+        self._akislar = {}
+        self.servis = ses.SesServisi("", olay_fn=self._servis_olayi, esikler=sec.get("esikler"))
+        self.stt = SahteStt()                                        # SesServisi._coz gercek: prompt korumalari dahil
+        self.servis.stt = self.stt
         if os.environ.get("BM_E2E_TEKRAR") == "kapali":              # tani: tekrar suzgecini kapat (varsayilan: gercek)
             self.servis._tekrar_mi = lambda *a, **k: False
         self._yayim_giris = {}                                       # klip_no -> suzgecten once metin
@@ -507,6 +634,8 @@ class Kosum:
         self.servis._olay_yay = self._olay_yay_izle
         self._kesinti_kuyrugu = {}           # pencere indeksi -> [klip]
         self._kur()
+        if self.adim:
+            self._adim_kur()
 
     # --- kurulum ---
     def at(self, t, tur, veri=None):
@@ -545,9 +674,42 @@ class Kosum:
             self.at(float(i), "tik")
         self.bitis = son
 
+    def _halusinasyon_cesit(self, sozler, mod):
+        """Faz 2 halusinasyon cesitleri. mod 'cesit': HAL_CESIT turleri dairesel; >= 8 sn bosluk -> ortada ('uzak'), 4-8 sn
+        bosluk -> sozun 1.2 sn ardinda ('yakin', <= 3 sn'lik turler). Metni kendi basina ayirt edilemeyen turler (icerik_yeterli
+        False) 'yakin'da izlenir ('hal_belirsiz'), digerleri kapidir. mod 'sessiz': HAL_SESSIZ turleri (STT prompt'u soyler)."""
+        r = self.r
+        liste = sorted(sozler, key=lambda x: x["bas"])
+        cikti, uid, i_tur = [], -1, 0
+        for i in range(len(liste) - 1):
+            bosluk = liste[i + 1]["bas"] - liste[i]["bit"]
+            uzak = bosluk >= 8.0
+            if not uzak and not (mod == "cesit" and bosluk >= 4.0):
+                continue
+            if mod == "cesit":
+                ad, metin, sure, akis, yeterli = HAL_CESIT[i_tur % len(HAL_CESIT)]
+                if not uzak and sure > 3.0:
+                    i_tur += 1
+                    ad, metin, sure, akis, yeterli = HAL_CESIT[i_tur % len(HAL_CESIT)]
+                zarf_ara = None
+            else:
+                ad, sure, akis, zarf_ara = HAL_SESSIZ[i_tur % len(HAL_SESSIZ)]
+                metin, yeterli = "ee", True
+            i_tur += 1
+            bas = liste[i]["bit"] + (bosluk / 2 - sure / 2 if uzak else 1.2)
+            c = klip_kur(None, None, akis, r, hayalet=(bas, bas + sure, metin, uid))
+            c.update(yakin=not uzak, hal_tur=ad, hal_belirsiz=(not uzak) and not yeterli, sizinti=mod == "sessiz")
+            if zarf_ara:
+                c["zarf"] = [round(r.uniform(*zarf_ara), 5) for _ in c["zarf"]]
+            uid -= 1
+            cikti.append(c)
+        return cikti
+
     def _halusinasyon(self, sozler):
         """Sessizlikte uydurulan klipler: >= 8 sn sessiz bosluklarin ortasinda ('uzak'; kesin ad verilmemeli) ve en
         fazla iki tane sozun hemen ardinda ('yakin'; yalniz izlenir, zaman tek basina ayiramaz)."""
+        if self.sec.get("halusinasyon") in ("cesit", "sessiz"):
+            return self._halusinasyon_cesit(sozler, self.sec["halusinasyon"])
         r = self.r
         liste = sorted(sozler, key=lambda x: x["bas"])
         cikti, yakin, uid = [], 0, -1
@@ -557,10 +719,12 @@ class Kosum:
                 bas = liste[i]["bit"] + bosluk / 2 - 1.2
                 c = klip_kur(None, None, "loopback", r, hayalet=(bas, bas + 2.4, r.choice(HALUSINASYON_METNI), uid))
                 c["yakin"] = False
+                c["hal_belirsiz"] = False
             elif bosluk >= 4.0 and yakin < 2 and liste[i]["kim"] != self.ben and r.random() < 0.5:
                 bas = liste[i]["bit"] + 1.2
                 c = klip_kur(None, None, "loopback", r, hayalet=(bas, bas + 2.0, r.choice(HALUSINASYON_METNI), uid))
                 c["yakin"] = True
+                c["hal_belirsiz"] = True
                 yakin += 1
             else:
                 continue
@@ -575,11 +739,39 @@ class Kosum:
             s += self.r.uniform(2.0, 5.0)                     # arada yavas istek (sira takilmasi)
         return s
 
-    @staticmethod
-    def _p(c):
-        return {"kaynak": c["akis"], "klip_no": c["klip_no"], "no": c["no"], "bas_epoch": T0 + c["bas"],
-                "bit_epoch": T0 + c["bit"], "rms": sum(c["zarf"]) / max(1, len(c["zarf"])), "zarf": list(c["zarf"]),
-                "ust_klip": c["ust"]}
+    # --- saat adimi modu: ses sayaci ankrajlari ve altyazi okumasi GERCEK kod yollarindan (ses.AkisYakalayici,
+    #     yakalayici.Yakalayici.oku), sanal zaman saat.simdi() uzerinden; duvar saati adimli ---
+    def _adim_kur(self):
+        """Her akis icin gercek AkisYakalayici zaman tabani: ilk blok t=BLOK'ta gelir, sifirinci ornek T0'dadir."""
+        self.alici.zaman(T0 + BLOK)
+        for ad in ("loopback", "mikrofon"):
+            ak = ses.AkisYakalayici(ad, queue.Queue(), loopback=(ad == "loopback"), olay=self.servis._akis_olayi)
+            ak._capa_kur(int(round(BLOK * ses.ORNEK)))
+            ak.toplam_ornek = int(round(BLOK * ses.ORNEK))
+            self._akislar[ad] = ak
+        self.alici.zaman(T0)
+        self.yakalayici.okuma_fn = self.alici.okuma
+        yakalayici._grup_bul = self._grup_bul_taslagi
+
+    def _grup_bul_taslagi(self):
+        self.alici.zaman(self._okuma_bit)                    # panel okumasi d sn surer
+        return (object() if self._grup_var else None), ""
+
+    def _akis_esitle(self, t):
+        """Akis sayaclari sanal zamana yetisir (blok dongusu: her blokta toplam_ornek + _capa_kontrol)."""
+        for ak in self._akislar.values():
+            ak.toplam_ornek = int(round(t * ses.ORNEK))
+            ak._capa_kontrol()
+
+    def _p(self, c):
+        bas_e, bit_e = T0 + c["bas"], T0 + c["bit"]
+        if self.adim:                                        # epoch = akisin ornek sayaci + o anki ankraj
+            ak = self._akislar[c["akis"]]
+            bas_e = ak.ornek_epoch(int(round(c["bas"] * ses.ORNEK)))
+            bit_e = ak.ornek_epoch(int(round(c["bit"] * ses.ORNEK)))
+        return {"kaynak": c["akis"], "klip_no": c["klip_no"], "no": c["no"], "bas_epoch": bas_e,
+                "bit_epoch": bit_e, "rms": sum(c["zarf"]) / max(1, len(c["zarf"])), "zarf": list(c["zarf"]),
+                "ust_klip": c["ust"], "ses": c}                      # 'ses': SahteStt klip kaydini alir
 
     def _olay_yay_izle(self, ev):
         """SesServisi._olay_yay'i izler. Yeniden kesme parcalari (ust_klip) ses.py'de zaten tekrar suzgecinden muaf
@@ -644,6 +836,8 @@ class Kosum:
                 break
             self.saat = t
             self.alici.zaman(T0 + t)
+            if self.adim:
+                self._akis_esitle(t)
             getattr(self, "_o_" + tur)(t, v)
             if self.kesinti and tur in ("tik", "kapandi"):
                 self.alici.stt_durum(self._stt_durumu(t))
@@ -662,6 +856,15 @@ class Kosum:
         self.okuma_ornekleri.append(orta)
         grup = not self.panel.kapali_mi(orta)
         gorunen = self.panel.gorunen(orta) if grup else []
+        if self.adim:                                        # gercek Yakalayici.oku(): bas/bit saat.simdi() ile damgalanir
+            y = self.yakalayici
+            y.grup = object() if grup else None
+            self._grup_var, self._okuma_bit = grup, T0 + bas + d
+            y._ciftler = lambda: (self.alici.zaman(self._okuma_bit), list(gorunen))[1]
+            self.alici.zaman(T0 + bas)
+            y.oku()                                          # okuma_fn -> alici.okuma
+            self.alici.zaman(T0 + t)
+            return
         self.alici.okuma(self.yakalayici._okuma_yayinla(T0 + bas, T0 + bas + d, grup, gorunen))
 
     def _yeni_klip_no(self, c):
@@ -692,14 +895,16 @@ class Kosum:
             return
         c = kuyruk.pop(0)
         c["stt_yok"] = False
-        ev = self.servis.klip_olayi_uret(self._p(c), [{"id": 0, "text": klip_metni(c), "tokens": [], "temperature": 0.0}])
+        p = self._p(c)
+        ev = self.servis.klip_olayi_uret(p, self.servis._coz(p))
         with self.servis._kilit:
             self.servis._yay([ev] if ev else [])
         if kuyruk:
             self.at(t + 0.5 + 0.1 * (c["bit"] - c["bas"]), "gec", i)
 
     def _o_stt(self, t, c):
-        ev = self.servis.klip_olayi_uret(self._p(c), [{"id": 0, "text": klip_metni(c), "tokens": [], "temperature": 0.0}])
+        p = self._p(c)
+        ev = self.servis.klip_olayi_uret(p, self.servis._coz(p))   # gercek _coz: Whisper prompt'u (korumali) -> SahteStt
         self.servis._sirali_yay(c["no"], [ev] if ev else [])
 
     # --- yeniden kesme (SesServisi.yeniden_kes sozlesmesi) ---
@@ -712,6 +917,8 @@ class Kosum:
         if c is None or c.get("kesildi"):
             return False
         an_g = an - T0
+        if self.adim:                                        # epoch -> akis zamani (ankraj gecmisiyle)
+            an_g = self._akislar[c["akis"]].epoch_ornek(an) / ses.ORNEK
         n = len(c["zarf"])
         k0 = int(math.ceil((max(c["bas"], an_g - ses.KES_ARALIK_SN) - c["bas"]) / BLOK))
         k1 = int((min(c["bit"], an_g + ses.KES_ARALIK_SN) - c["bas"]) // BLOK)
@@ -771,7 +978,7 @@ class Kosum:
 # ======================================================================================================
 
 class SahteSaat:
-    """motor.time yerine: time() sanal saat, gerisi gercek modul."""
+    """saat.simdi yerine: time() sanal saat, gerisi gercek modul."""
 
     def __init__(self):
         self.t = T0
@@ -783,10 +990,38 @@ class SahteSaat:
         return getattr(gercek_time, ad)
 
 
+class AdimliSaat:
+    """Saat adimi duzenegi: sanal zaman (SahteSaat.t) 'monotonik' saattir; duvar saati ayrica adimlarla sicrar
+    (adimlar: [(goreli sn, fark)]). saat.py'nin kendi `time` basvurusu bu ikisiyle degistirilir, saat.simdi()
+    gercek koddur. time.time global olarak duvar saatine baglanir: dogrudan time.time() kullanan kod adimi gorur
+    (gerileme yakalanir). eski: simdi() = duvar saati (adim oncesi davranis, negatif kontrol)."""
+
+    def __init__(self, saat, adimlar, eski=False):
+        self.saat, self.adimlar, self.eski = saat, sorted(adimlar), eski
+
+    def ofset(self, goreli):
+        return sum(f for a, f in self.adimlar if goreli >= a)
+
+    def duvar(self):
+        return self.saat.t + self.ofset(self.saat.t - T0)
+
+    def mono(self):
+        return self.saat.t - T0 + 1000.0
+
+    def kur(self):
+        self.saat.t = T0
+        gercek_time.time = self.duvar
+        saat_mod.time = types.SimpleNamespace(time=self.duvar, monotonic=self.mono)
+        saat_mod.sifirla()
+        if self.eski:
+            saat_mod.simdi = self.duvar
+
+
 class MotorAlici:
     def __init__(self, saat):
         self.m, self.saat = None, saat
         self.olaylar = []                    # (an, tip, id, durum)
+        self.silinme = collections.Counter()  # satir_sil olaylarinin nedeni (yanki / halusinasyon ...)
 
     def zaman(self, an):
         self.saat.t = an
@@ -806,6 +1041,8 @@ class MotorAlici:
     def olay(self, tip, veri):
         if tip in ("satir", "satir_guncelle", "satir_sil", "satir_degistir"):
             self.olaylar.append((self.saat.t, tip, veri.get("id", veri.get("eski_id")), veri.get("durum")))
+        if tip == "satir_sil":
+            self.silinme[veri.get("neden")] += 1
 
 
 class KonusmaciAlici:
@@ -988,18 +1225,103 @@ def _yuzde(a, b):
 # sahte LLM + motor kosumu
 # ======================================================================================================
 
+# Sahte LLM'in dogru duzeltmeleri: Whisper'in duydugu biçim -> (dogru biçim, neden). Kapi bunlardan bazilarini KABUL EDER
+# (kubernetis, komit, cenkinse...), bazilarini bilerek reddeder (payplayn: edit uzakligi, mikro servisler: yaygin kelime).
+DOGRU_ONERI = {                               # duyulan: (dogru biçim, neden, hedef terim / ad)
+    "kubernetis": ("Kubernetes", "terim", "Kubernetes"), "komit": ("commit", "terim", "commit"),
+    "payplayn": ("pipeline", "terim", "pipeline"), "cenkinse": ("Jenkins'e", "terim", "Jenkins"),
+    "ciraya": ("Jira'ya", "terim", "Jira"), "kubernetisin": ("Kubernetes'in", "terim", "Kubernetes"),
+    "taşlakın": ("Taslak'ın", "ad", "Taslak"), "komiti": ("commiti", "terim", "commit"),
+    "mikro servisler": ("Mikroservisler", "terim", "Mikroservisler"),
+}
+ZOR_ONERI = {"payplayn", "mikro servisler"}   # kapi reddeder (edit uzakligi 0.4 asti / yaygin kelimeler): geri kazanim kaybi
+# Ayni hatalarin EKI BOZAN / yanlis ekli biçimleri (model bazen boyle yazar); kapi hicbirini kabul etmemeli.
+BOZUK_ONERI = {
+    "kubernetis": "Kubernetesin", "komit": "commit'i", "cenkinse": "Jenkins'a", "ciraya": "Jira", "kubernetisin": "Kubernetesin",
+    "taşlakın": "Taslak", "komiti": "commit",
+}
+# Yaygin Turkce kelimeyi terime ceviren yanlis duzeltmeler (komite != commit): eski -> yeni
+YANLIS_YAYGIN = {"komite": "commit", "Komite": "commit", "komitesine": "commite", "komitede": "committe",
+                 "Komitede": "commit'te", "kampanyacı": "Kampanya", "terminal": "Jenkins"}
+
+
+def mesaj_coz(mesajlar):
+    """duzelt.mesajlar() kullanici mesaji -> (terimler, adlar, [(satir id, metin)])."""
+    icerik = mesajlar[-1]["content"]
+    terim = re.search(r"^TERİMLER:\s*(.*)$", icerik, re.M)
+    ad = re.search(r"^ADLAR:\s*(.*)$", icerik, re.M)
+
+    def liste(m):
+        return [x.strip() for x in m.group(1).split(";") if x.strip() and x.strip() != "-"] if m else []
+    return liste(terim), liste(ad), re.findall(r"^\[(-?\d+)\]\s(.*)$", icerik.split("SATIRLAR:", 1)[-1], re.M)
+
+
+def oneri_uret(terimler, adlar, satirlar, yogun=False):
+    """Gercekci karisik oneri listesi (sema: satir/eski/yeni/neden). Dogru duzeltmeler yalniz TERIMLER/ADLAR listesindeki
+    hedefe yapilir (model listeyi okur); her dogrunun onune (hafif: cagri basina bir tane, yogun: hepsi) eki bozan / yanlis
+    ekli bir esi konur -- kapi onu reddedip dogruyu kabul etmeli (sira etkisi sinanir). Gurultu en sonda (EN_FAZLA_ONERI
+    siniri gurultuyu keser, dogru duzeltmeleri degil): tum satir yeniden yazma, 'yazim' tahmini; yogun: yaygin kelime
+    duzeltmeleri (komite -> commit), terim listesine benzeyen kelimeleri acgozlu terime cevirme, satir / sema disi oneriler."""
+    tn = {kelime.normalize(t) for t in terimler}
+    an = {kelime.normalize(x) for a in adlar for x in a.split()}
+    dogru, gurultu, bozuk_hafif, ilk = [], [], 1, True
+    for sid, metin in satirlar:
+        i = int(sid)
+        for eski, (yeni, neden, hedef) in DOGRU_ONERI.items():
+            if not duzelt_mod.gecisler(metin, eski):
+                continue
+            if kelime.normalize(hedef) not in (an if neden == "ad" else tn):
+                continue
+            if eski in ZOR_ONERI and not yogun:                  # kapinin zaten reddettigi dogru duzeltmeler: yalniz yogun modda
+                continue
+            if eski in BOZUK_ONERI and (yogun or bozuk_hafif > 0):
+                bozuk_hafif -= 1
+                dogru.append({"satir": i, "eski": eski, "yeni": BOZUK_ONERI[eski], "neden": neden})
+            dogru.append({"satir": i, "eski": eski, "yeni": yeni, "neden": neden})
+        if ilk:                                              # bir tum satir yeniden yazma ('terim' diye)
+            ilk = False
+            govde = metin.rstrip(".?! ")
+            gurultu.append({"satir": i, "eski": govde, "yeni": govde[:1].upper() + govde[1:] + " olarak", "neden": "terim"})
+            uzun = max(re.findall(r"[^\W\d_]{6,}", metin) or [""], key=len)
+            if uzun:                                         # 'yazim' tahmini: uygulanmaz, belirsiz isaretlenir
+                gurultu.append({"satir": i, "eski": uzun, "yeni": uzun[:-1] + "ı", "neden": "yazim"})
+        if not yogun:
+            continue
+        for eski, yeni in YANLIS_YAYGIN.items():
+            if duzelt_mod.gecisler(metin, eski):
+                gurultu.append({"satir": i, "eski": eski, "yeni": yeni, "neden": "terim"})
+        for w in re.findall(r"[^\W\d_]{5,}(?:['’][^\W\d_]+)?", metin):    # acgozlu: en yakin terime (eksiz / eki koruyarak)
+            if w in DOGRU_ONERI or w in YANLIS_YAYGIN:
+                continue
+            en = min(((duzelt_mod.uzaklik(w, t), t) for t in terimler if " " not in t), default=None)
+            if en and 0 < en[0] <= 0.55:
+                t = en[1]
+                gurultu.append({"satir": i, "eski": w, "yeni": t, "neden": "terim"})
+                if w.lower().startswith(t.lower()) and len(w) > len(t):
+                    gurultu.append({"satir": i, "eski": w, "yeni": t + "'" + w[len(t):], "neden": "terim"})
+    if yogun and satirlar:
+        gurultu.append({"satir": 10 ** 6, "eski": "kubernetis", "yeni": "Kubernetes", "neden": "terim"})   # satir yok
+        gurultu.append({"satir": int(satirlar[0][0]), "eski": "x"})                                        # sema disi
+    return (dogru + gurultu)[:duzelt_mod.EN_FAZLA_ONERI]
+
+
+def sahte_sor_fn(yogun=True):
+    """duzelt.duzelt(sor_fn=): (mesajlar, sema) -> {"oneriler": [...]}"""
+    return lambda mesajlar, sema: {"oneriler": oneri_uret(*mesaj_coz(mesajlar), yogun=yogun)}
+
+
 class SahteLLM:
-    def __init__(self):
+    def __init__(self, yogun=False):
         self.gorevler = []
+        self.yogun = yogun
+        self.mesajlar = []                   # duzeltme cagrilarinin kullanici mesajlari (sizinti taramasi icin)
 
     def __call__(self, mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
         g = llm._gorev_adi(mesajlar)
         self.gorevler.append(g)
+        self.mesajlar.append(" ".join(m.get("content", "") for m in mesajlar))
         if g == "duzeltme":
-            # biri dogru (kubernetis), biri zararli (genel regex ile her satira uygulanir; Faz 2 kapisi kapatir)
-            return json.dumps({"duzeltmeler": [{"orijinal": "kubernetis", "duzeltilmis": "Kubernetes"},
-                                                {"orijinal": "test ortamı", "duzeltilmis": "test ortamı (UAT)"}]},
-                              ensure_ascii=False), "stop"
+            return json.dumps({"oneriler": oneri_uret(*mesaj_coz(mesajlar), yogun=self.yogun)}, ensure_ascii=False), "stop"
         if g == "bolum":
             return json.dumps({"ozet": "Kubernetes sürümü ve test ortamı konuşuldu.", "konular": ["test ortamı"],
                                "kararlar": ["Pilot çağrı merkeziyle başlayacak"],
@@ -1014,13 +1336,18 @@ class SahteLLM:
 
 
 def _ortam_kaydet():
-    return {"time": M.time, "PARCA_TOKEN": M.PARCA_TOKEN, "DUZELT_MIN_TOKEN": M.DUZELT_MIN_TOKEN,
+    return {"saat": (saat_mod.simdi, saat_mod.duvar, saat_mod.duvardan, saat_mod.time), "gercek_time": gercek_time.time,
+            "grup_bul": yakalayici._grup_bul, "PARCA_TOKEN": M.PARCA_TOKEN, "DUZELT_MIN_TOKEN": M.DUZELT_MIN_TOKEN,
             "sor": llm.sor, "token_say": llm.token_say, "BAGLAM_PENCERESI": llm.BAGLAM_PENCERESI,
             "BUTCE_AYAR": llm.BUTCE_AYAR}
 
 
 def _ortam_geri_yukle(e):
-    M.time = e["time"]
+    gercek_time.time = e["gercek_time"]
+    yakalayici._grup_bul = e["grup_bul"]
+    saat_mod.time = e["saat"][3]
+    saat_mod.sifirla()                                       # ankrajlar gercek saate (adim modu sanal ankraj birakir)
+    saat_mod.simdi, saat_mod.duvar, saat_mod.duvardan = e["saat"][:3]
     M.PARCA_TOKEN = e["PARCA_TOKEN"]
     M.DUZELT_MIN_TOKEN = e["DUZELT_MIN_TOKEN"]
     llm.sor = e["sor"]
@@ -1046,18 +1373,31 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
         llm.BAGLAM_PENCERESI = llm.VARSAYILAN_PENCERE         # yerel config.json makineye bagli olmasin
         llm.BUTCE_AYAR = {}
         saat = SahteSaat()
-        M.time = saat
+        if sec.get("saat_adimlari"):
+            AdimliSaat(saat, sec["saat_adimlari"], sec.get("saat_eski", False)).kur()
+        else:
+            saat_mod.sanal_kur(lambda: saat.t)               # simdi() sanal saat (duvar ofseti 0)
         llm.token_say = llm.token_tahmin
-        sahte = SahteLLM()
+        sahte = SahteLLM(yogun=bool(sec.get("yogun")))
         llm.sor = sahte
         M.PARCA_TOKEN, M.DUZELT_MIN_TOKEN = 500, 200
         ut = uret(tur, random.Random(seed), sec)
         liste = list(katilimcilar) if katilimcilar is not None else [A, B, C, BEN]
         kl_dir = M.yeni_klasor(f"e2e {tur} {seed}", BAS.date())
         alici = MotorAlici(saat)
-        m = M.Motor(kl_dir, "E2E", BAS.date(), None, liste, duzelt=True, ben=BEN, olay=alici.olay)
+        havuz = terim_mod.TerimHavuzu(sec["terim_yol"]) if sec.get("terim_yol") else None     # None: toplantiya ozel havuz
+        m = M.Motor(kl_dir, "E2E", BAS.date(), havuz, liste, duzelt=True, ben=BEN, olay=alici.olay,
+                    esikler=sec.get("esikler"), davet=sec.get("davet", DAVET))
         alici.m = m
+        m.terimleri_hazirla()                                # davet metninden terimler
+        if sec.get("terimler", TERIM_VARSAYILAN):            # elle terimler (davetin cikaramadigi kucuk harfli teknik terimler)
+            m.terimler.ekle(m.seri, list(sec.get("terimler", TERIM_VARSAYILAN)), "elle")
+        if sec.get("ogrenme", True) is False:                # ogrenme kapali: gozlem de ogrenme de yok
+            m._ogren = lambda: None
+            m.terimler.gozlem_ekle = lambda *a, **kw: False
         k = Kosum(ut, sec, seed, alici)
+        if sec.get("ipucu"):                                 # isler.py ile ayni: terim.prompt(seri, katilimcilar)
+            k.servis._ipucu_fn = _ipucu_onbellekli(m)
         m.yeniden_kes_fn = k.yeniden_kes
         k.calistir()
         saat.t = T0 + k.bitis + 30
@@ -1068,15 +1408,12 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
         not_md = m.notu_uret()
         satirlar = m.tum_satirlar()
         jsonl = M.altyazi_kayitlari(m.klasor)
-        ham_cikti = ""
-        for ad in os.listdir(m.parca_klasor):
-            with open(os.path.join(m.parca_klasor, ad), encoding="utf-8") as f:
-                ham_cikti += f.read()
-        with open(os.path.join(m.klasor, "altyazi.jsonl"), encoding="utf-8") as f:
-            ham_cikti += f.read()
+        ham_cikti = _klasor_metni(m.klasor)                  # toplanti klasorundeki TUM dosyalar (sizinti taramasi)
+        ek = {"terim_ogrenilen": sorted(v for e in m.terimler.terimler for v in e.get("ogrenilen", [])),
+              "terim_gozlem": len(m.terimler.gozlemler), "duzelt_log": _duzelt_gunlugu_ozeti(m.klasor)}
         m.kapat()
         m = None
-        return _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik, sahte, sec, seed)
+        return _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik, sahte, sec, seed, ek)
     finally:
         if m is not None:
             try:
@@ -1088,13 +1425,104 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
         shutil.rmtree(gecici, ignore_errors=True)
 
 
-def _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik, sahte, sec, seed):
+def _ipucu_onbellekli(m):
+    """isler.py'deki ipucu_fn (terim.prompt(seri, katilimcilar)) -- havuz ve katilimci listesi degismedikce ayni metin
+    yeniden uretilmez (duzenek hizi; prompt yine gercek terim.prompt'tan gelir)."""
+    onbellek = {}
+
+    def fn(akis):
+        h = m.terimler
+        anahtar = (tuple(m.katilimcilar), len(h.terimler), sum(sum(e["seriler"].values()) for e in h.terimler),
+                   round(sum(e["guven"] for e in h.terimler), 3), sum(bool(e["genel"]) for e in h.terimler))
+        if anahtar not in onbellek:
+            onbellek[anahtar] = h.prompt(m.seri, list(m.katilimcilar))
+        return onbellek[anahtar]
+    return fn
+
+
+def _klasor_metni(klasor):
+    """Klasordeki (alt klasorler dahil) tum dosyalarin metni, tek dize. ikili / okunamayan dosyalar atlanir."""
+    parca = []
+    for kok, _, adlar in os.walk(klasor):
+        for ad in adlar:
+            try:
+                with open(os.path.join(kok, ad), encoding="utf-8") as f:
+                    parca.append(f.read())
+            except (OSError, UnicodeDecodeError):
+                continue
+    return "\n".join(parca)
+
+
+def _duzelt_gunlugu_ozeti(klasor):
+    """duzelt_log.jsonl (parca basina kabul / red kaydi) -> {"oneri", "kabul", "red": {sebep: n}, "neden": {neden: n}}."""
+    o = {"oneri": 0, "kabul": 0, "red": collections.Counter(), "neden": collections.Counter()}
+    try:
+        with open(os.path.join(klasor, "duzelt_log.jsonl"), encoding="utf-8") as f:
+            for ham in f:
+                kayit = json.loads(ham)
+                o["oneri"] += kayit.get("oneri", 0)
+                o["kabul"] += len(kayit.get("kabul") or [])
+                for d in kayit.get("kabul") or []:
+                    o["neden"][d.get("neden")] += 1
+                for d in kayit.get("red") or []:
+                    o["red"][d.get("sebep", "?")] += 1
+    except (OSError, ValueError):
+        pass
+    o["red"], o["neden"] = dict(o["red"]), dict(o["neden"])
+    return o
+
+
+def _toplu_is(is_):
+    """is_ = (anahtar, kwargs[, islev adi]); islev varsayilan 'calistir' (ogrenme_kos gibi modul islevleri de olur)."""
+    anahtar, kw = is_[0], is_[1]
+    try:
+        return anahtar, globals()[is_[2] if len(is_) > 2 else "calistir"](**kw), None
+    except Exception:
+        import traceback
+        return anahtar, None, traceback.format_exc()
+
+
+def paralel_sayisi():
+    """Toplu kosumda ayni anda kosan surec sayisi (en cok 4). BM_E2E_PARALEL=0 ya da fork olmayan platformda 1 (seri)."""
+    if os.environ.get("BM_E2E_PARALEL") == "0" or not hasattr(os, "fork"):
+        return 1
+    try:
+        return max(1, min(4, len(os.sched_getaffinity(0))))
+    except AttributeError:
+        return max(1, min(4, os.cpu_count() or 1))
+
+
+def toplu(isler):
+    """isler: [(anahtar, kwargs[, islev adi])] -> {anahtar: (sonuc, hata_metni)}. Her kosum bagimsizdir (kendi gecici klasoru,
+    modul durumu fork'lanan surecte kalir): `paralel_sayisi()` > 1 ise fork ile paralel, degilse seri. Sonuclar seri
+    kosumla ayni (tohumlu). Hata tek kosumu etkiler: (None, izleme)."""
+    isler = list(isler)
+    n = min(paralel_sayisi(), len(isler))
+    out = {}
+    if n > 1:
+        try:
+            import multiprocessing
+            with multiprocessing.get_context("fork").Pool(n) as havuz:
+                for anahtar, sonuc, hata in havuz.imap_unordered(_toplu_is, isler, chunksize=1):
+                    out[anahtar] = (sonuc, hata)
+            return out
+        except Exception:                                    # havuz kurulamadi: kalanlar seri kosulur
+            pass
+    for is_ in isler:
+        if is_[0] not in out:
+            anahtar, sonuc, hata = _toplu_is(is_)
+            out[anahtar] = (sonuc, hata)
+    return out
+
+
+def _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik, sahte, sec, seed, ek=None):
     karar = {s["klip_no"]: s for s in satirlar if s.get("klip_no") is not None}
     sayac, ayr, cift_ut, eksik = degerlendir(k, karar)
     sonuc = dict(sayac)
     sonuc["satir"] = len(satirlar)
     sonuc["altyazi_metni"] = sum(1 for s in satirlar if str(s.get("kaynak", "")).startswith("altyazi"))
-    sonuc["sizinti"] = len(_SIZINTI.findall(ham_cikti)) + len(_SIZINTI.findall(not_md))
+    sonuc["sizinti"] = (len(_SIZINTI.findall(ham_cikti)) + len(_SIZINTI.findall(not_md))
+                        + sum(len(_SIZINTI.findall(m_)) for m_ in sahte.mesajlar))      # LLM'e giden mesajlar dahil
     # oda etiketi: gosterim 'Ad (oda)'
     sonuc["oda_gorunen_hatali"] = sum(1 for s in satirlar if s.get("speaker") == ODA and s.get("durum") == "karar"
                                       and _sinif(s) != "soru" and not gorunen_ad(s).startswith(ODA + " (oda)"))
@@ -1126,13 +1554,125 @@ def _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik,
         1 for a_, b_ in k.bosluklar_birlesik() if not any(e[0] - 2 <= T0 + a_ and e[1] + 2 >= T0 + b_ for e in stt_eksik))
     sonuc["stt_eksik_notta"] = ("STT yok — transkript eksik" in not_md) if k.bosluklar else None
     sonuc["bozulan"] = _bozulan(k, satirlar)
+    sonuc.update(_duzeltme_olcum(k, satirlar))
+    sonuc.update(_hayalet_olcum(k, karar, ayr, "\n".join(sahte.mesajlar)))
+    sonuc["satir_sil"] = dict(alici.silinme)
+    sonuc.update(_ipucu_olcum(k, satirlar))
+    sonuc.update(ek or {})
     sonuc["llm_gorevleri"] = {g: sahte.gorevler.count(g) for g in set(sahte.gorevler)}
     sonuc["not_uzunluk"] = len(not_md)
+    if sec.get("saat_adimlari"):
+        sonuc.update(_adim_olcum(k, satirlar, sec["saat_adimlari"]))
     sonuc["ayrinti"] = ayr
     sonuc["cift_ut_liste"] = cift_ut
     sonuc["eksik_liste"] = eksik
     sonuc["ayar"] = dict(sec, seed=seed)
     return sonuc
+
+
+def _duzeltme_olcum(k, satirlar):
+    """LLM duzeltmesinin zemin gercegine gore kelime duzeyi etkisi (olcum.kelime_etkisi): duzeltilen (yanlis -> dogru),
+    bozulan_kelime (dogru -> yanlis; Faz 2 kapisi 0), son kelime hatasi ve ham (duzeltmesiz) hata. Ayrica eki kisalan
+    kabul (ek_kaybi), 'komite' sozunun korunmasi (komite_commit) ve belirsiz isaretli kelimeler."""
+    s = collections.Counter(dict.fromkeys(
+        ("duz_kabul", "belirsiz_kelime", "duz_degisen_satir", "ek_kaybi", "duzeltilen", "bozulan_kelime", "kelime_ref",
+         "kelime_hata_ham", "kelime_hata", "komite_say", "komite_commit"), 0))
+    for sat in satirlar:
+        s["duz_kabul"] += len(sat.get("duzeltmeler") or [])
+        s["belirsiz_kelime"] += len(sat.get("belirsiz") or [])
+        s["duz_degisen_satir"] += sat.get("raw") != sat.get("text")
+        for d in sat.get("duzeltmeler") or []:
+            if len(kelime._sade(d["yeni"])) < len(kelime._sade(d["eski"])):
+                s["ek_kaybi"] += 1
+        c = k.klipler.get(sat.get("klip_no"))
+        if c is None or c["hayalet"] or c["yanki"] or not isinstance(sat.get("raw"), str):
+            continue
+        gt = " ".join(x[2] for x in c["kelimeler"])
+        ref, raw_k = olcum.kelimeler(gt), olcum.kelimeler(sat["raw"])
+        metin = sat.get("text") or ""
+        s["kelime_ref"] += len(ref)
+        hata_ham = olcum.duzenleme_mesafesi(ref, raw_k)
+        s["kelime_hata_ham"] += hata_ham
+        if metin == sat["raw"]:                              # degismeyen satir: etki yok, hata ayni
+            s["kelime_hata"] += hata_ham
+            text_k = raw_k
+        else:
+            text_k = olcum.kelimeler(metin)
+            iyi, kotu = olcum.kelime_etkisi_kelimeden(ref, raw_k, text_k)
+            s["duzeltilen"] += iyi
+            s["bozulan_kelime"] += kotu
+            s["kelime_hata"] += olcum.duzenleme_mesafesi(ref, text_k)
+        n_gt = sum(1 for w in ref if w.startswith("komite"))
+        if n_gt:
+            s["komite_say"] += n_gt
+            s["komite_commit"] += max(0, n_gt - sum(1 for w in text_k if w.startswith("komite")))
+    return dict(s)
+
+
+def _hayalet_olcum(k, karar, ayr, llm_metni=""):
+    """Halusinasyon klipleri (Faz 2 kapisi): satiri olmayan = dusen (filtre / at / tekrar / satir_sil); satir var ve supheli
+    (nota girmez) = hal_supheli; satir var ve supheli degil = hal_kesin (KAPI: 0). Konusma ardinda ayirt edilemeyen
+    turler (hal_belirsiz: akici cumle) hal_belirsiz_kesin olarak yalniz izlenir."""
+    s = collections.Counter(dict.fromkeys(
+        ("hal_toplam", "hal_dusen", "hal_supheli", "hal_belirsiz_kesin", "hal_kesin", "hal_llm_girdi"), 0))
+    dagilim = collections.Counter()              # "konum:tur:sonuc" -> n (kapsam gorunurlugu)
+    for no, c in sorted(k.klipler.items()):
+        if not c["hayalet"]:
+            continue
+        s["hal_toplam"] += 1
+        sat = karar.get(no)
+        if sat is None:
+            sonuc = "dusen"
+        elif sat.get("supheli"):
+            sonuc = "supheli"
+        elif c.get("hal_belirsiz"):
+            sonuc = "belirsiz_kesin"
+        else:
+            sonuc = "kesin"
+            ayr.append(("HALUSINASYON_KESIN", _ozet_klip(c), c.get("hal_tur"), sat.get("hal_puani"), sat.get("speaker")))
+        s["hal_" + sonuc] += 1
+        if sat is not None and len(sat.get("text") or "") >= 20 and sat["text"] in llm_metni:
+            s["hal_llm_girdi"] += 1                   # supheli satir LLM'e (duzeltme / ozet) gitmemeli
+        dagilim[f"{'yakin' if c.get('yakin') else 'uzak'}:{c.get('hal_tur', 'eski')}:{sonuc}"] += 1
+    out = dict(s)
+    out["hal_dagilim"] = dict(dagilim)
+    return out
+
+
+def _ipucu_olcum(k, satirlar):
+    """Whisper prompt'u: giden / promptsuz tekrarlanan klip sayisi, dusuk RMS klibe giden prompt (KAPI: 0), en uzun prompt,
+    prompt metninin transkripte sizmasi (sizinti_satir; KAPI: 0), atilan halusinasyon."""
+    cagri = k.stt.cagrilar
+    return {"ipucu_gonderilen": k.servis.ipucu_gonderilen, "ipucu_yeniden": k.servis.ipucu_yeniden,
+            "ipucu_dusuk_rms": sum(1 for c in cagri if c["ipucu_kr"] and c["rms"] < ses.IPUCU_RMS),
+            "ipucu_azami_kr": max([c["ipucu_kr"] for c in cagri] or [0]),
+            "ipucu_sizinti_cagri": sum(1 for c in cagri if c["ipucu_kr"] and c["sizinti"]),
+            "ipucu_sizinti_satir": sum(1 for sat in satirlar
+                                       if "Terimler:" in (sat.get("raw") or "") + (sat.get("text") or "")
+                                       or "Katılımcılar:" in (sat.get("raw") or "") + (sat.get("text") or "")),
+            "hal_atilan": k.servis.atilan_halusinasyon, "ipucu_ornek": k.stt.ornek_ipucu}
+
+
+def _adim_olcum(k, satirlar, adimlar):
+    """Saat adimi: algilanan adim sayisi (saat.adim_sayisi) ve satir ts'i = yerel duvar saati mi? Adimlardan >= 30 sn
+    uzakta baslayan klibin ts'i o anki duvar saatinin HH:MM:SS'i (+-1.5 sn); adim yakininda gosterim ofseti bir adim
+    kadar (en cok 6.5 sn) farkli olabilir (ts, satir olusurken gecerli duvar ofsetiyle yazilir)."""
+    def ofset(g):
+        return sum(f for a, f in adimlar if g >= a)
+    hatali = yakin_hatali = olculen = 0
+    for s in satirlar:
+        c = k.klipler.get(s.get("klip_no"))
+        if c is None or not s.get("ts"):
+            continue
+        beklenen = dt.datetime.fromtimestamp(T0 + c["bas"] + ofset(c["bas"])).strftime("%H:%M:%S")
+        sapma = abs(M._sn_fark(s["ts"], beklenen))
+        if min(abs(c["bas"] - a) for a, _ in adimlar) >= 30.0:
+            olculen += 1
+            hatali += sapma > 1.5
+        else:
+            yakin_hatali += sapma > 6.5
+    return {"saat_adim_algilanan": saat_mod.adim_sayisi(), "ts_olculen": olculen, "ts_hatali": hatali,
+            "ts_yakin_hatali": yakin_hatali}
 
 
 def _gosterim_dogru(s):
@@ -1204,32 +1744,135 @@ def konusmaci_kos(ut, seed=1, katilimcilar=None, ben=BEN, esikler=None, **sec):
 
 
 # ======================================================================================================
-# sozluk mikro olcumu (Faz 2 kapisi; sozluk.py silinince terim kapisina cevrilir)
+# terim mikro olcumu (Faz 2 kapisi: duzelt.kapi + terim havuzu, sozluk.py yerine)
 # ======================================================================================================
 
+MIKRO_TERIMLER = ("teminat", "kampanya", "mikroservis", "Kubernetes", "pipeline", "Kredi", "müşteri", "rapor", "Jenkins",
+                  "SQL", "commit", "Jira")           # eski sozluk terimleri + komit takma adinin hedefi + ekli terim (Jira'ya)
+# 18 ornek satir. Adlar (SOZLUK_MIKRO_*) tests/test_duzelt.py ayni listeyi AST ile okudugu icin korunur (duz sabit olmali).
 SOZLUK_MIKRO_ORNEK = ["Teminatı hesapla", "kampanyayı duyur", "kampanyalar", "mikroservisler yavaş", "müşteriler geldi",
                       "müşterinin talebi", "raporu gönder", "Krediyi onayla", "kredisi var", "Jenkinse bak", "kubernetis kümesi",
                       "komit attım", "komite toplandı", "pipelinelar", "teminatlar", "terminal açık", "kampanyacı", "Kubernetesi"]
 # Bilinen zarar: bu sozcukler degismemeli (komite != commit, kampanyacı != kampanya)
 SOZLUK_MIKRO_ZARAR = {"komite", "kampanyacı"}
+# Kapinin KABUL etmesi gereken 4 dogru duzeltme (Whisper'in bozdugu terimler); kalan 14 satir degismemeli (yaygin kelime,
+# ek tasiyan gercek kelime: komite, kampanyacı, terminal...)
+MIKRO_BEKLENEN = {"Jenkinse bak": "Jenkins'e bak", "kubernetis kümesi": "Kubernetes kümesi", "komit attım": "commit attım",
+                  "Kubernetesi": "Kubernetes'i"}
+MIKRO_ORNEK = [(g, MIKRO_BEKLENEN.get(g)) for g in SOZLUK_MIKRO_ORNEK]
+MIKRO_KORUNAN = SOZLUK_MIKRO_ZARAR
+# Ek uyumu vakalari (duzelt.kapi): (satir, eski, yeni, neden, kabul beklenir)
+EK_UYUM_VAKALARI = [
+    ("cenkinse bak", "cenkinse", "Jenkins'e", "terim", True), ("cenkinse bak", "cenkinse", "Jenkins'a", "terim", False),
+    ("cenkinse bak", "cenkinse", "Jenkins", "terim", False), ("ciraya kayıt aç", "ciraya", "Jira'ya", "terim", True),
+    ("ciraya kayıt aç", "ciraya", "Jira'e", "terim", False), ("ciraya kayıt aç", "ciraya", "Jira", "terim", False),
+    ("kubernetisin ayarı", "kubernetisin", "Kubernetes'in", "terim", True),
+    ("kubernetisin ayarı", "kubernetisin", "Kubernetesin", "terim", False),
+    ("kubernetis düştü", "kubernetis", "Kubernetes", "terim", True), ("kubernetis düştü", "kubernetis", "Kubernetesin", "terim", False),
+    ("komit attım", "komit", "commit", "terim", True), ("komit attım", "komit", "commit'i", "terim", False),
+    ("komite toplandı", "komite", "commit", "terim", False), ("komitede konuştuk", "komitede", "commit'te", "terim", False),
+    ("kampanyacı geldi", "kampanyacı", "kampanya", "terim", False), ("raporu gönder", "raporu", "rapor", "terim", False),
+    ("komit attım", "komit", "commit", "yazim", False), ("komit attım", "komit", "commit", "yok", False),
+    ("komit attım bugün", "komit attım", "commit attım", "terim", False),
+]
 
 
-def sozluk_mikro():
-    """18 ornek cumlede sozluk uygulamasi. Dondurur: {'toplam', 'degisen', 'zarar': [(eski, yeni), ...]}."""
-    from sozluk import Sozluk
+def _mikro_sor_fn(terimler):
+    """Acgozlu sahte LLM: satirdaki her kelimeyi her terime (eksiz / eki koruyarak / eki bitisik) cevirmeyi dener +
+    bilinen dogru duzeltmeler. Kapi yalnizca dogru olanlari gecirmeli."""
+    def fn(mesajlar, sema):
+        _t, adlar, satirlar = mesaj_coz(mesajlar)
+        cikti = []
+        for sid, metin in satirlar:
+            i = int(sid)
+            for eski, (yeni, neden, hedef) in DOGRU_ONERI.items():
+                if duzelt_mod.gecisler(metin, eski):
+                    cikti.append({"satir": i, "eski": eski, "yeni": yeni, "neden": neden})
+            for w in re.findall(r"[^\W\d_]+", metin):
+                for t in terimler:
+                    if duzelt_mod.uzaklik(w, t) > 0.7:
+                        continue
+                    ek = w[len(t):] if w.lower().startswith(t.lower()) and len(w) > len(t) else ""
+                    for yeni in {t, t + ek, t + "'" + ek if ek else t}:
+                        cikti.append({"satir": i, "eski": w, "yeni": yeni, "neden": "terim"})
+            for eski, yeni in YANLIS_YAYGIN.items():
+                if duzelt_mod.gecisler(metin, eski):
+                    cikti.append({"satir": i, "eski": eski, "yeni": yeni, "neden": "terim"})
+        return {"oneriler": cikti[:duzelt_mod.EN_FAZLA_ONERI]}
+    return fn
+
+
+def terim_mikro():
+    """18 ornek satirda terim havuzu + sahte (acgozlu) LLM + gercek duzelt.duzelt kapisi. Her satir ayri cagri (<= 25 oneri).
+    Dondurur: {'toplam', 'degisen' (kabul edilen satir), 'yanlis': [(girdi, cikti, beklenen)], 'zarar': [(eski, yeni)]
+    (korunan kelime degisti), 'ek_kaybi' (kabul edilen duzeltme eki kisaltti), 'oneri', 'kabul'}."""
     gecici = tempfile.mkdtemp(prefix="bm_mikro_")
     try:
-        s = Sozluk(os.path.join(gecici, "s.json"))
-        for t in ("teminat", "kampanya", "mikroservis", "Kubernetes", "pipeline", "Kredi", "müşteri", "rapor", "Jenkins", "SQL"):
-            s.terim_ekle(t)
-        s.alias_ekle("komit", "commit")
-        degisen, zarar = 0, []
-        for o in SOZLUK_MIKRO_ORNEK:
-            _y, d = s.uygula(o)
-            if d:
-                degisen += 1
-            zarar.extend((eski, yeni) for eski, yeni in d if eski.lower() in SOZLUK_MIKRO_ZARAR)
-        return {"toplam": len(SOZLUK_MIKRO_ORNEK), "degisen": degisen, "zarar": zarar}
+        havuz = terim_mod.TerimHavuzu(os.path.join(gecici, "t.json"))
+        havuz.ekle("mikro", list(MIKRO_TERIMLER), "elle")
+        adaylar = havuz.adaylar("mikro")
+        sor = _mikro_sor_fn(adaylar)
+        sonuc = {"toplam": len(MIKRO_ORNEK), "degisen": 0, "yanlis": [], "zarar": [], "ek_kaybi": 0, "oneri": 0, "kabul": 0}
+        for girdi, beklenen in MIKRO_ORNEK:
+            yeni, rapor = duzelt_mod.duzelt([{"id": 1, "raw": girdi}], adaylar, [], sor_fn=sor)
+            cikti = yeni[0]["text"]
+            sonuc["oneri"] += rapor["oneri"]
+            sonuc["kabul"] += rapor["kabul"]
+            sonuc["degisen"] += cikti != girdi
+            if cikti != (beklenen or girdi):
+                sonuc["yanlis"].append((girdi, cikti, beklenen or girdi))
+            for d in rapor["satirlar"]["1"]["kabul"]:
+                if d["eski"].lower() in MIKRO_KORUNAN:
+                    sonuc["zarar"].append((d["eski"], d["yeni"]))
+                if len(kelime._sade(d["yeni"])) < len(kelime._sade(d["eski"])):
+                    sonuc["ek_kaybi"] += 1
+        return sonuc
+    finally:
+        shutil.rmtree(gecici, ignore_errors=True)
+
+
+def ek_uyum_mikro():
+    """EK_UYUM_VAKALARI: kapinin karari beklenenle ayni mi? Dondurur uyusmayanlar [(satir, eski, yeni, neden, beklenen, gercek)]."""
+    gecici = tempfile.mkdtemp(prefix="bm_ek_")
+    try:
+        havuz = terim_mod.TerimHavuzu(os.path.join(gecici, "t.json"))
+        havuz.ekle("mikro", list(MIKRO_TERIMLER), "elle")
+        adaylar = havuz.adaylar("mikro")
+        kotu = []
+        for satir, eski, yeni, neden, beklenen in EK_UYUM_VAKALARI:
+            kabul, _ = duzelt_mod.kapi(satir, {"satir": 1, "eski": eski, "yeni": yeni, "neden": neden}, adaylar, [])
+            if kabul != beklenen:
+                kotu.append((satir, eski, yeni, neden, beklenen, kabul))
+        return kotu
+    finally:
+        shutil.rmtree(gecici, ignore_errors=True)
+
+
+# ======================================================================================================
+# ogrenme acik / kapali (Faz 2 kapisi: son kelime hatasi acik <= kapali)
+# ======================================================================================================
+
+SEDLER_OGRENME = (7, 11, 23, 100)                      # ayni seride 4 ardisik toplanti
+
+
+def ogrenme_kos(ogrenme, seedler=SEDLER_OGRENME, sure=420.0):
+    """Ayni seri (ortak terim havuzu dosyasi), `seedler` kadar ardisik toplanti; her biri Faz 2 cumleleri + yogun sahte LLM.
+    ogrenme False: gozlem ve ogrenme yok (davet ve elle terimler yine var). Dondurur toplam sayaclar:
+    kelime_hata, kelime_hata_ham, bozulan_kelime, duzeltilen, hal_kesin, ogrenilen (varyant listesi), gozlem."""
+    gecici = tempfile.mkdtemp(prefix="bm_ogr_")
+    try:
+        yol = os.path.join(gecici, "terimler", "terimler.json")
+        toplam = collections.Counter()
+        ogrenilen, gozlem = [], 0
+        for sd in seedler:
+            r = calistir(seed=sd, tur="karisik", cumleler="faz2", yogun=True, sure=sure, terim_yol=yol, ogrenme=ogrenme)
+            for a in ("kelime_hata", "kelime_hata_ham", "bozulan_kelime", "duzeltilen", "kelime_ref", "bozulan", "duz_kabul"):
+                toplam[a] += r.get(a, 0)
+            ogrenilen = r["terim_ogrenilen"]
+            gozlem = r["terim_gozlem"]
+        sonuc = dict(toplam)
+        sonuc.update(ogrenilen=ogrenilen, gozlem=gozlem)
+        return sonuc
     finally:
         shutil.rmtree(gecici, ignore_errors=True)
 
@@ -1251,7 +1894,10 @@ def satir_ozeti(ad, seed, s):
             f"cift={s.get('cift_ut', 0)} yAA={s.get('yanlis_ayni_anda_sirali', 0)}+{s.get('yanlis_ayni_anda_dayanaksiz', 0)} "
             f"yanki_kalan={s.get('yanki_kalan', 0)} yanlis_atilan={s.get('yanlis_atilan', 0)} "
             f"L={s.get('L')}/{s.get('L_gercek')} kes={s.get('kes_tamam', 0)}/{s.get('kes_istek', 0)} "
-            f"eksik={s.get('eksik', 0)} bekl_p95={s.get('karar_gecikme_p95')}s")
+            f"eksik={s.get('eksik', 0)} bekl_p95={s.get('karar_gecikme_p95')}s "
+            f"| F2 bozulan={s.get('bozulan_kelime', 0)} duzeltilen={s.get('duzeltilen', 0)} kabul={s.get('duz_kabul', 0)} "
+            f"kelime_hata={s.get('kelime_hata', 0)}/{s.get('kelime_hata_ham', 0)} hal_kesin={s.get('hal_kesin', 0) + s.get('hal_belirsiz_kesin', 0)}"
+            f"/{s.get('hal_toplam', 0)}")
 
 
 def main(argv=None):
@@ -1269,7 +1915,8 @@ def main(argv=None):
         else:
             adlar.append(argv[i])
         i += 1
-    for ad, sc in SENARYOLAR.items():
+    tum = dict(SENARYOLAR, **SENARYOLAR_FAZ2)
+    for ad, sc in tum.items():
         if adlar and ad not in adlar:
             continue
         for seed in seedler:
@@ -1280,7 +1927,12 @@ def main(argv=None):
                 for a in s["ayrinti"][:12]:
                     print("    ", a)
     if not adlar:
-        print("sozluk_mikro", sozluk_mikro())
+        m = terim_mikro()
+        print("terim_mikro", {k: v for k, v in m.items() if k != "yanlis"}, "yanlis", m["yanlis"])
+        print("ek_uyum_mikro uyusmayan", ek_uyum_mikro())
+        a, b = ogrenme_kos(True), ogrenme_kos(False)
+        print("ogrenme acik ", {k: v for k, v in a.items() if k != "ogrenilen"}, a["ogrenilen"])
+        print("ogrenme kapali", {k: v for k, v in b.items() if k != "ogrenilen"})
 
 
 if __name__ == "__main__":

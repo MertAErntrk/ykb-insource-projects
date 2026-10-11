@@ -201,7 +201,7 @@ def test_altyazi_tasmasi_transkripti_etkilemez(tmp_path, saat):
 
 def _tasmis_kayit(kok, tekrar=40):
     """Gercek hatanin deseni (uydurma icerikle): her satir yeniden yayilip K5 ile tekrar tekrar eklenmis,
-    araya yarim (onek) halleri girmis; parcalar ve oneriler bu bozuk transkriptten."""
+    araya yarim (onek) halleri girmis; parcalar bu bozuk transkriptten."""
     k = kok / "2026-09-30_ornek"
     (k / "parcalar").mkdir(parents=True)
     temiz = [("10:%02d:%02d" % (i // 6, (i * 10) % 60), KISILER[i % 14],
@@ -226,7 +226,6 @@ def _tasmis_kayit(kok, tekrar=40):
         (k / "parcalar" / f"parca_{n:03d}.json").write_text(json.dumps(
             {"sira": n, "satirlar": satirlar[:3], "ozet": {"ozet": "bozuk"}, "duzeltmeler": [], "token": 3000,
              "baslangic": "10:00:00", "bitis": "10:00:20", "neden": "token"}), encoding="utf-8")
-    (k / "oneriler.json").write_text(json.dumps([{"id": 1, "yanlis": "x"}]), encoding="utf-8")
     (k / "meta.json").write_text(json.dumps({"baslik": "Örnek", "tarih": "2026-09-30", "durum": "tamam",
                                              "katilimcilar": [], "parca": 12, "kaynak": "ses"}), encoding="utf-8")
     return k, temiz
@@ -251,15 +250,15 @@ def test_tasma_var_mi_ve_transkript_temizle(tmp_path):
     assert v["ozet"] is None and v["satirlar"][0]["ts"] == "10:00:00"
     assert sum(len(json.loads(open(p, encoding="utf-8").read())["satirlar"]) for p in parcalar) == 60
     assert json.loads((k / "meta.json").read_text(encoding="utf-8"))["parca"] == t["parca_sonra"]
-    assert json.loads((k / "oneriler.json").read_text(encoding="utf-8")) == []
+    assert not (k / "oneriler.json").exists()                  # onay akisi yok: eski dosya olusmaz / dokunulmaz
     yedek_p = glob.glob(str(k / "parcalar.yedek-*"))
     assert len(yedek_p) == 1 and len(os.listdir(yedek_p[0])) == 12
-    assert glob.glob(str(k / "altyazi.jsonl.yedek-*")) and glob.glob(str(k / "oneriler.json.yedek-*"))
+    assert glob.glob(str(k / "altyazi.jsonl.yedek-*")) and not glob.glob(str(k / "oneriler.json.yedek-*"))
     assert sum(1 for _ in open(glob.glob(str(k / "altyazi.jsonl.yedek-*"))[0], encoding="utf-8")) == 1260
     assert not motor_mod.tasma_var_mi(str(k))
     # Motor temiz kayitla acilir: parca sayisi yeni parcalardan
     m = motor_mod.Motor.yukle(str(k))
-    assert m.parca_no == t["parca_sonra"] and m.oneriler == []
+    assert m.parca_no == t["parca_sonra"]
     m.kapat()
 
 
@@ -291,7 +290,7 @@ def test_saklama_temizlik_yedeklerini_de_siler(tmp_path):
 
 def test_yeniden_ozetle_tasmayi_once_temizler(tmp_path, monkeypatch):
     import isler
-    from sozluk import Sozluk
+    import terim
     monkeypatch.chdir(tmp_path)
     k, _ = _tasmis_kayit(tmp_path)
     ozetlenen = []
@@ -303,7 +302,8 @@ def test_yeniden_ozetle_tasmayi_once_temizler(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "bolum_ozetle", bolum_ozetle)
     monkeypatch.setattr(llm, "birlestir", lambda *a, **kw: "## Özet\nRapor ekranı ve test ortamı konuşuldu.\n")
     loglar = []
-    is_ = isler.YenidenOzetlemeIsi(str(k), Sozluk(), otomatik_not=True, duzelt=False)
+    is_ = isler.YenidenOzetlemeIsi(str(k), terim.TerimHavuzu(str(tmp_path / "terimler" / "terimler.json")),
+                                   duzelt=False)
     is_.olay.connect(lambda t, v: loglar.append(v) if t == "log" else None)
     bitti = []
     is_.bitti.connect(bitti.append)

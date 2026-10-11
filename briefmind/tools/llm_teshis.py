@@ -781,18 +781,24 @@ def boru_hatti(R, llm_mod=None, olay=None):
         llm.GUNLUK_FN = olay.append
     ilerleme = []
     tarih = dt.date(2026, 10, 8)
-    sozluk = "Jira; commit; sprint; indeks; kampanya modülü"
+    terimler = "Jira; commit; sprint; indeks; kampanya modülü"
     bolumler, ozetler, n0 = sentetik_transkript(), [], len(olay)
     for i, (aralik, satirlar) in enumerate(bolumler, 1):
         metin_satirlari = [f"{kim}: {m}" for _, kim, m in satirlar]
-        baglam = llm.baglam_metni("Sentetik ekip toplantısı", tarih, KATILIMCILAR, sozluk)
+        baglam = llm.baglam_metni("Sentetik ekip toplantısı", tarih, KATILIMCILAR, terimler)
         t0 = time.time()
-        try:
-            duzeltilmis, duzeltmeler = llm.satirlari_duzelt(metin_satirlari, baglam)
-            R.yaz(f"  bölüm {i} düzeltme: {time.time() - t0:.1f}s, {len(duzeltmeler)} düzeltme "
-                  f"{[f'{o} → {d}' for o, d in duzeltmeler][:4]}")
+        duzeltilmis = metin_satirlari
+        try:                                                    # duzelt.py: LLM onerir, deterministik kapi karar verir
+            import duzelt as duzelt_mod
+            girdi = [{"id": n, "raw": m} for n, (_, _, m) in enumerate(satirlar, 1)]
+            yeni, rapor = duzelt_mod.duzelt(girdi, [t.strip() for t in terimler.split(";")], KATILIMCILAR)
+            if rapor["hata"]:
+                R.bulgu("YUKSEK", f"bölüm {i} düzeltme HATASI: {rapor['hata']}")
+            else:
+                duzeltilmis = [f"{kim}: {y['text']}" for (_, kim, _), y in zip(satirlar, yeni)]
+                R.yaz(f"  bölüm {i} düzeltme: {time.time() - t0:.1f}s, {rapor['oneri']} öneri, {rapor['kabul']} kabul, "
+                      f"{rapor['red']} red")
         except Exception as e:
-            duzeltilmis = metin_satirlari
             R.bulgu("YUKSEK", f"bölüm {i} düzeltme HATASI: {llm.hata_metni(e)}")
         t0 = time.time()
         try:
@@ -815,7 +821,7 @@ def boru_hatti(R, llm_mod=None, olay=None):
     not_md = ""
     try:
         not_md = llm.birlestir([o for o in ozetler if o], llm.baglam_metni("Sentetik ekip toplantısı", tarih,
-                                                                         KATILIMCILAR, sozluk),
+                                                                         KATILIMCILAR, terimler),
                                ilerleme=ilerleme.append, katilimcilar=KATILIMCILAR)
         R.yaz(f"  birleştirme (liste + özet paragrafı): {time.time() - t0:.1f}s")
     except Exception as e:

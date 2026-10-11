@@ -15,6 +15,9 @@ satirin `son`u yalniz kelime sayisi (gorulen en yuksek) arttiginda ilerler, yeni
 Duraklamis satirin yeniden buyumesi yeni aralik acar ("devam"). Aralik konusma zamanina L ile kaydirilir,
 iki uca simetrik R/2 gozlem bandi eklenir: [ilk - L - R/2, son - L + R/2].
 
+Zaman: tum epoch'lar (okuma bas/bit, klip bas/bit, kontrol(an)) saat.simdi() tabanlidir; duvar saati adimlarindan
+etkilenmez (konusmaci.py kendisi zaman kaynagi cagirmaz).
+
 Saf Python: Qt / ses / ag yok. Deterministik; klip basina O(kisi * log n).
 """
 import bisect
@@ -504,7 +507,8 @@ class Konusmaci:
 
     def saat_capasi(self, akis, fark):
         """Ses servisi saat capasini yeniledi (C1 'capa' olayi): o akisin klip epoch'lari fark kadar ileri sicradi
-        (Windows saati adim atti: okumalar hemen kaydi, ses en gec CAPA_ARALIK_SN sonra). Loopback icin aradaki L
+        (eskiden Windows saati adim atti: okumalar hemen kaydi, ses en gec CAPA_ARALIK_SN sonra; artik zaman kaynagi
+        saat.simdi() adimdan etkilenmez, bu yol ses cihazi saati kaymasi icin kalir). Loopback icin aradaki L
         capalari fark kadar sapmistir: L basamagi bu adimdan algilanmissa pencere fark kadar geri kaydirilir, degilse
         sapan capalar atilir; bekleyen capa adaylari (eski saat) dusurulur. Her durumda basamak_tavan_capa capa
         boyunca tavan."""

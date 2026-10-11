@@ -197,11 +197,18 @@ class SahteMotor:
     """isler.Motor yerine: disk/LLM yok; bitir cagrilarini sayar."""
     bitir_hatasi = None
 
-    def __init__(self, klasor, baslik, tarih, sozluk, katilimcilar, gundem, **kw):
+    def __init__(self, klasor, baslik, tarih, terimler, katilimcilar, gundem, **kw):
         self.klasor, self.kaynak, self.parca_no, self.mevcut_tok = klasor, kw.get("kaynak"), 0, 0
         self.seri, self.katilimcilar, self.bitir_sayisi, self.kulaklik = "x", [], 0, None
         self.ben, self.sablon = "Deneme Kisi", "genel"
         self.ses_olay_sayisi, self.yeniden_kes_fn, self.stt = 0, None, []
+        self.terimler = SahteTerimler()
+
+    def terimleri_hazirla(self):
+        return 0
+
+    def belirsizler(self):
+        return []
 
     def altyazi_satiri(self, s):
         pass
@@ -225,8 +232,8 @@ class SahteMotor:
         return [{"id": 1}]
 
 
-class _Sozluk:
-    def metin(self, seri):
+class SahteTerimler:
+    def prompt(self, seri, adlar=(), onceki=""):
         return ""
 
 
@@ -245,10 +252,10 @@ def yakalama(ortam, monkeypatch):
     monkeypatch.setattr(ses, "SesServisi", ses_yok)                 # ses kurulamaz: STT yok durumu, altyazi moduna dusmez
 
     def yap():
-        isi = isler.YakalamaIsi("Deneme", {}, _Sozluk(), False, 30, {"kaynak": "altyazi"})
+        isi = isler.YakalamaIsi("Deneme", {}, SahteTerimler(), False, 30, {"kaynak": "altyazi"})
         SahteYakalayici.isi = isi
         olaylar = {"hazir": [], "hata": [], "log": []}
-        isi.inceleme_hazir.connect(lambda o: olaylar["hazir"].append(o))
+        isi.toplanti_bitti.connect(lambda o: olaylar["hazir"].append(o))
         isi.hata.connect(lambda m: olaylar["hata"].append(m))
         isi.olay.connect(lambda t, v: olaylar["log"].append((t, v)))
         return isi, olaylar
@@ -261,7 +268,7 @@ def _calistir(qapp, isi, olaylar):
     _bekle(qapp, lambda: bool(olaylar["hazir"]))
 
 
-def test_yakalama_normal_yolda_bitir_bir_kez_ve_inceleme_hazir(yakalama, qapp):
+def test_yakalama_normal_yolda_bitir_bir_kez_ve_toplanti_bitti(yakalama, qapp):
     isi, olaylar = yakalama()
     _calistir(qapp, isi, olaylar)
     assert isi.motor.bitir_sayisi == 1
@@ -334,7 +341,7 @@ class SahteTamamlama(QtCore.QThread):
     birakildi = threading.Event()
     basarisiz = False
 
-    def __init__(self, m, kararlar):
+    def __init__(self, m):
         super().__init__()
 
     def run(self):
@@ -348,7 +355,7 @@ class SahteTamamlama(QtCore.QThread):
 class SahteYakalamaIsi(QtCore.QThread):
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
-    inceleme_hazir = QtCore.pyqtSignal(list)
+    toplanti_bitti = QtCore.pyqtSignal(list)
     hata = QtCore.pyqtSignal(str)
     olusturulan = []
 
@@ -367,6 +374,7 @@ class SahteYakalamaIsi(QtCore.QThread):
 @pytest.fixture
 def pencere(ortam, monkeypatch, qapp):
     import app
+    monkeypatch.setattr(app.terim_mod, "uygulama_klasoru", lambda: str(ortam))      # terimler/ repoya yazilmaz
     monkeypatch.setattr(app.Pencere, "toplantilari_yenile", lambda self, elle=False: None)
     monkeypatch.setattr(app.Pencere, "saklama_uygula", lambda self: None)
     monkeypatch.setattr(app.Pencere, "llm_tani", lambda self, test=False: None)
@@ -379,7 +387,6 @@ def pencere(ortam, monkeypatch, qapp):
     SahteTamamlama.basarisiz = False
     SahteYakalamaIsi.olusturulan = []
     p = app.Pencere()
-    p.a_otomatik_not.setChecked(True)
     p.a_outlook.setChecked(False)
     p.uyarilar = uyarilar
     p.motor = SahteMotor(str(ortam / "kayit"), "Deneme", None, None, None, "")
@@ -394,10 +401,10 @@ def pencere(ortam, monkeypatch, qapp):
 
 def test_not_uretilirken_baslat_kapali_ve_cift_baslat_engellenir(pencere, qapp):
     p = pencere
-    # gercek akis: yakalama bitti -> inceleme_hazir (Baslat'i acar) -> otomatik not baslar -> Baslat yine kapanmali
+    # gercek akis: yakalama bitti -> toplanti_bitti (Baslat'i acar) -> not baslar -> Baslat yine kapanmali
     p.is_ = SahteYakalamaIsi()
     p.is_.motor = p.motor
-    p.inceleme_hazir([])
+    p.toplanti_bitti([])
     assert p.tamamla is not None and p.tamamla.isRunning()
     assert p.b_ana.isEnabled() is False
     assert p.b_ana.text() == "Başlat"
@@ -420,7 +427,7 @@ def test_not_uretilirken_baslat_kapali_ve_cift_baslat_engellenir(pencere, qapp):
 def test_not_hatasinda_baslat_yeniden_acilir(pencere, qapp):
     p = pencere
     SahteTamamlama.basarisiz = True
-    p._not_uret({})
+    p._not_uret()
     assert p.b_ana.isEnabled() is False and p._not_kilit is True
     SahteTamamlama.birakildi.set()
     assert _bekle(qapp, lambda: p.b_ana.isEnabled())
@@ -435,7 +442,7 @@ def test_not_isi_sinyal_vermeden_olurse_kilit_yine_acilir(pencere, qapp, monkeyp
             pass                                                     # ne bitti ne hata
     import app
     monkeypatch.setattr(app, "TamamlamaIsi", SessizOlen)
-    p._not_uret({})
+    p._not_uret()
     assert _bekle(qapp, lambda: p.b_ana.isEnabled())
     assert p._not_kilit is False
 
@@ -445,7 +452,7 @@ def test_yakalama_motorsuz_biterse_arayuz_sifirlanir(pencere, qapp):
     p.motor = None
     p.is_ = SahteYakalamaIsi()                                       # motor=None: Motor kurulamadi
     p.b_ana.setEnabled(False)
-    p.inceleme_hazir([])
+    p.toplanti_bitti([])
     assert p.b_ana.isEnabled() and p.tamamla is None
 
 

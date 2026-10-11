@@ -4,11 +4,12 @@ app.py — Toplanti Notu masaustu uygulamasi (PyQt5).
   pip install -r requirements.txt PyQt5
   python app.py
 
-Sekmeler: Canli | Inceleme | Not | Sozluk | Gecmis | Ayarlar. Tepside kucuk ikon.
+Sekmeler: Canli | Not | Gecmis | Ayarlar. Tepside kucuk ikon.
 Akis: Baslat -> Teams'te altyazi gorunene kadar bekler -> yakalar, parcalari arka planda isler
-      -> Bitir (ya da altyazi kaybolunca otomatik) -> otomatik_not (varsayilan): not dogrudan uretilir,
-      Not sekmesinde ilerleme seridi; kapaliysa Inceleme sekmesi: supheli terimler
-      -> "Uygula ve notu uret" -> Not sekmesi (+ Outlook taslagi)
+      -> Bitir (ya da altyazi kaybolunca otomatik) -> toplanti_bitti sinyali: not dogrudan uretilir (kullanici onayi
+      YOK), Not sekmesinde ilerleme seridi ve salt-okunur "Belirsizler" paneli (+ Outlook taslagi)
+Terimler: terimler/terimler.json (terim.py) davetten / onceki notlardan / dogrulanmis duzeltmelerden kendiliginden
+      birikir; elle eklemek icin terimler/elle.txt. Metne kor degisiklik yoktur (duzelt.py kapisi).
 Modul yapisi: isler.py (QThread'ler), gorunum.py (tema, md_to_html), ayar.py (config.json).
 """
 import datetime as dt
@@ -32,11 +33,14 @@ from gorunum import QSS, RENKLER, kart, md_to_html, svg_ikon  # noqa: F401  (md_
 from isler import LlmTaniIsi, ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi, hata_logla
 from metin import gorunen_ad
 from motor import Motor
-from sozluk import Sozluk
+import terim as terim_mod
+
 
 class Pencere(QtWidgets.QMainWindow):
-    SAYFALAR = ["Canlı", "İnceleme", "Not", "Sözlük", "Geçmiş", "Ayarlar"]
-    IKON_AD = ["canli", "inceleme", "not", "sozluk", "gecmis", "ayarlar"]
+    SAYFALAR = ["Canlı", "Not", "Geçmiş", "Ayarlar"]
+    IKON_AD = ["canli", "not", "gecmis", "ayarlar"]
+    SAYFA_CANLI, SAYFA_NOT, SAYFA_GECMIS, SAYFA_AYARLAR = 0, 1, 2, 3
+    BELIRSIZ_TAVAN = 300                  # Belirsizler panelinde en fazla bu kadar satir (kalani sayi olarak)
 
     def __init__(self):
         super().__init__()
@@ -46,7 +50,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.ayar = ayar_oku()
         llm.ayarla(self.ayar)                # uygulama klasorundeki config.json (LLM adresi, ca_bundle) gecerli
         rag.ayarla(self.ayar)                # embedding (toplantiya soru icin anlamsal arama)
-        self.sozluk = Sozluk()
+        self.terimler = terim_mod.TerimHavuzu()       # terimler/terimler.json (uygulama klasoru); toplantilar paylasir
         self.is_ = None
         self.motor = None
         self.not_md = ""
@@ -61,14 +65,16 @@ class Pencere(QtWidgets.QMainWindow):
         self.yeniden = None
         self._not_kilit = False              # onceki toplantinin notu uretilirken Baslat kapali (yeni toplanti eski nota baglanmasin)
         self._kur()
+        if self.terimler.yukleme_hatasi:
+            self.log(f"! terimler/terimler.json okunamadı, boş havuzla başlandı: {self.terimler.yukleme_hatasi}")
         self._tls_bildir()
         self._llm_tani_isi = None
         self.llm_tani()                      # model adi / baglam penceresi sunucudan (arka planda)
         self._tepsi()
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, self.ana_dugme)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+1"), self, lambda: self.nav.setCurrentRow(0))
-        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+2"), self, lambda: self.nav.setCurrentRow(1))
-        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+3"), self, lambda: self.nav.setCurrentRow(2))
+        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+2"), self, lambda: self.nav.setCurrentRow(self.SAYFA_NOT))
+        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+3"), self, lambda: self.nav.setCurrentRow(self.SAYFA_GECMIS))
         self.zamanlayici = QtCore.QTimer(self)
         self.zamanlayici.timeout.connect(self._sayac_guncelle)
         self._takvim_zamanlayici = QtCore.QTimer(self)                 # bostayken takvim listesi tazelenir
@@ -93,7 +99,7 @@ class Pencere(QtWidgets.QMainWindow):
         sag.setSpacing(0)
         sag.addWidget(self._baslik_bar())
         self.sayfalar = QtWidgets.QStackedWidget()
-        for s in (self._canli(), self._inceleme(), self._not(), self._sozluk(), self._gecmis(), self._ayarlar()):
+        for s in (self._canli(), self._not(), self._gecmis(), self._ayarlar()):
             self.sayfalar.addWidget(s)
         sag.addWidget(self.sayfalar, 1)
         h.addLayout(sag, 1)
@@ -176,10 +182,10 @@ class Pencere(QtWidgets.QMainWindow):
         kartlar = QtWidgets.QHBoxLayout()
         self.k_durum = kart("Durum", "Beklemede")
         self.k_parca = kart("Parça", "0 / 0")
-        self.k_oneri = kart("Şüpheli terim", "0")
+        self.k_belirsiz = kart("Belirsiz", "0")
         self.k_katilimci = kart("Konuşan", "0")
         self.k_kaynak = kart("Kaynak", "—")
-        for k in (self.k_durum, self.k_parca, self.k_oneri, self.k_katilimci, self.k_kaynak):
+        for k in (self.k_durum, self.k_parca, self.k_belirsiz, self.k_katilimci, self.k_kaynak):
             kartlar.addWidget(k)
         v.addLayout(kartlar)
         h = QtWidgets.QHBoxLayout()
@@ -221,40 +227,6 @@ class Pencere(QtWidgets.QMainWindow):
         v.addLayout(h, 1)
         return w
 
-    def _inceleme(self):
-        w, v = self._sayfa()
-        self.inc_bilgi = QtWidgets.QLabel("Altyazıda bozuk duyulmuş olabilecek terimler toplantı sürerken burada birikir. "
-                                          "Toplantı bitince doğrusunu yazıp Onayla/Yoksay seç; onaylananlar sözlüğe girer, "
-                                          "yalnızca etkilenen parçalar yeniden özetlenir.", objectName="bilgi")
-        self.inc_bilgi.setWordWrap(True)
-        v.addWidget(self.inc_bilgi)
-        self.tablo = QtWidgets.QTableWidget(0, 7)
-        self.tablo.setHorizontalHeaderLabels(["#", "Parça", "Tür", "Altyazıda", "Doğrusu (çift tıkla düzenle)", "Bağlam", "Karar"])
-        hb = self.tablo.horizontalHeader()
-        hb.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        hb.setSectionResizeMode(4, QtWidgets.QHeaderView.Interactive)
-        hb.setSectionResizeMode(5, QtWidgets.QHeaderView.Stretch)
-        self.tablo.setColumnWidth(4, 220)
-        self.tablo.itemChanged.connect(self._dogrusu_degisti)
-        self.tablo.verticalHeader().setVisible(False)
-        self.tablo.setAlternatingRowColors(True)
-        self.tablo.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.SelectedClicked)
-        v.addWidget(self.tablo, 1)
-        h = QtWidgets.QHBoxLayout()
-        b1 = QtWidgets.QPushButton("Hepsini onayla")
-        b1.clicked.connect(lambda: self._toplu_karar("Onayla"))
-        b2 = QtWidgets.QPushButton("Hepsini yoksay")
-        b2.clicked.connect(lambda: self._toplu_karar("Yoksay"))
-        self.b_uygula = QtWidgets.QPushButton("Uygula ve notu üret", objectName="vurgu")
-        self.b_uygula.setEnabled(False)
-        self.b_uygula.clicked.connect(lambda: self.uygula())
-        h.addWidget(b1)
-        h.addWidget(b2)
-        h.addStretch(1)
-        h.addWidget(self.b_uygula)
-        v.addLayout(h)
-        return w
-
     def _not(self):
         w, v = self._sayfa()
         # durum seridi: not uretilirken uygulama donmus gibi gorunmesin (asama + gecen sure)
@@ -282,6 +254,20 @@ class Pencere(QtWidgets.QMainWindow):
         self.not_duzen = QtWidgets.QPlainTextEdit()
         self.not_duzen.hide()
         v.addWidget(self.not_duzen, 1)
+        # salt-okunur "Belirsizler": belirsiz kelimeler / emin olunmayan konusmacilar / supheli klipler + kaynak baglantisi
+        # (onay dugmesi YOK; hicbir sey buradan metne uygulanmaz)
+        self.belirsiz_kutu = QtWidgets.QGroupBox("Belirsizler (salt okunur)")
+        self.belirsiz_kutu.setCheckable(True)
+        self.belirsiz_kutu.setChecked(False)
+        bk = QtWidgets.QVBoxLayout(self.belirsiz_kutu)
+        self.belirsiz_goster = QtWidgets.QTextBrowser()
+        self.belirsiz_goster.setOpenLinks(False)
+        self.belirsiz_goster.setMaximumHeight(180)
+        self.belirsiz_goster.anchorClicked.connect(lambda u: self._baglanti(u, self.motor.klasor if self.motor else None))
+        bk.addWidget(self.belirsiz_goster)
+        self.belirsiz_kutu.toggled.connect(self.belirsiz_goster.setVisible)
+        self.belirsiz_goster.hide()
+        v.addWidget(self.belirsiz_kutu)
         # toplantiya soru
         hs = QtWidgets.QHBoxLayout()
         self.soru = QtWidgets.QLineEdit()
@@ -317,42 +303,14 @@ class Pencere(QtWidgets.QMainWindow):
         b_jira.clicked.connect(self.jira_disa_aktar)
         b3 = QtWidgets.QPushButton("Klasörü aç")
         b3.clicked.connect(self.klasor_ac)
-        for b in (self.b_outlook, b_kisi, b2, self.b_duzenle, b_word, b_pdf, b_jira, b3):
+        self.b_not_uret = QtWidgets.QPushButton("Notu yeniden üret")
+        self.b_not_uret.setToolTip("Bu toplantının notunu mevcut parça özetlerinden yeniden üretir (LLM hatasından sonra)")
+        self.b_not_uret.setEnabled(False)
+        self.b_not_uret.clicked.connect(lambda: self._not_uret())
+        for b in (self.b_outlook, b_kisi, b2, self.b_duzenle, b_word, b_pdf, b_jira, b3, self.b_not_uret):
             h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
-        return w
-
-    def _sozluk(self):
-        w, v = self._sayfa()
-        v.addWidget(QtWidgets.QLabel("Altyazının bozduğu terimleri ve doğru yazımları buraya ekle. 'Altyazıda' boşsa sadece "
-                                     "terim olarak modele tanıtılır; doluysa yakalama anında otomatik düzeltilir.",
-                                     objectName="bilgi"))
-        h = QtWidgets.QHBoxLayout()
-        self.s_yanlis = QtWidgets.QLineEdit()
-        self.s_yanlis.setPlaceholderText("altyazıda görünen (örn. komplo tit)")
-        self.s_dogru = QtWidgets.QLineEdit()
-        self.s_dogru.setPlaceholderText("doğrusu (örn. commit)")
-        self.s_dogru.returnPressed.connect(self.sozluk_ekle)
-        b = QtWidgets.QPushButton("Ekle", objectName="birincil")
-        b.clicked.connect(self.sozluk_ekle)
-        h.addWidget(self.s_yanlis, 1)
-        h.addWidget(QtWidgets.QLabel("→"))
-        h.addWidget(self.s_dogru, 1)
-        h.addWidget(b)
-        v.addLayout(h)
-        self.s_tablo = QtWidgets.QTableWidget(0, 2)
-        self.s_tablo.setHorizontalHeaderLabels(["Altyazıda", "Doğrusu / Terim"])
-        self.s_tablo.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        self.s_tablo.verticalHeader().setVisible(False)
-        self.s_tablo.setAlternatingRowColors(True)
-        self.s_tablo.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.s_tablo.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        v.addWidget(self.s_tablo, 1)
-        b2 = QtWidgets.QPushButton("Seçili satırı sil")
-        b2.clicked.connect(self.sozluk_sil)
-        v.addWidget(b2, 0, QtCore.Qt.AlignLeft)
-        self.sozluk_yenile()
         return w
 
     def _gecmis(self):
@@ -436,10 +394,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.a_outlook.setChecked(bool(self.ayar["outlook"]))
         self.a_oto = QtWidgets.QCheckBox("Uygulama açılınca beklemede başla (altyazı görünce yakala)")
         self.a_oto.setChecked(bool(self.ayar["otomatik_basla"]))
-        self.a_otomatik_not = QtWidgets.QCheckBox("Toplantı bitince incelemeyi atla, notu doğrudan üret")
-        self.a_otomatik_not.setToolTip("Şüpheli terimler yine İnceleme sekmesine yazılır; sonradan onaylayıp "
-                                       "'Uygula ve notu üret' ile notu yeniden üretebilirsin.")
-        self.a_otomatik_not.setChecked(bool(self.ayar.get("otomatik_not", True)))
+        self.a_stt_ipucu = QtWidgets.QCheckBox("Whisper'a katılımcı adlarını ve serinin terimlerini ipucu olarak ver")
+        self.a_stt_ipucu.setToolTip("Terimler davetten ve önceki notlardan kendiliğinden birikir (terimler/terimler.json; "
+                                    "elle eklemek için terimler/elle.txt). Sessiz kliplere ipucu gönderilmez.")
+        self.a_stt_ipucu.setChecked(bool(self.ayar.get("stt_ipucu", True)))
         self.a_kaynak = QtWidgets.QComboBox()
         # metin hep sesten (Whisper), konusmaci Teams altyazisinin ZAMANINDAN; altyazi metni transkripte girmez
         self.a_kaynak.addItem("Ses (Whisper) — metin sesten, konuşmacı altyazı zamanından", "ses")
@@ -506,7 +464,7 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow(self.a_outlook)
         f.addRow(self.a_oto)
         f.addRow(QtWidgets.QLabel("— Not —", objectName="alt_bilgi"))
-        f.addRow(self.a_otomatik_not)
+        f.addRow(self.a_stt_ipucu)
         f.addRow("Not şablonu", self.a_sablon)
         f.addRow("Transkript saklama süresi", self.a_saklama)
         b = QtWidgets.QPushButton("Kaydet", objectName="birincil")
@@ -751,12 +709,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.kapsama_serit.hide()
         self.canli_not.clear()
         self._canli_sifirla()
-        self.tablo.setRowCount(0)
         self.renkler = {}
         self.not_md = ""
-        self.b_uygula.setEnabled(False)
-        self.nav.item(1).setText(self.SAYFALAR[1])
-        self.k_oneri.deger.setText("0")
+        self.b_not_uret.setEnabled(False)
+        self._belirsizler_goster([])
         self.ayar["kaynak"] = "ses"
         self.ayar["stt_url"] = self.a_stt.text().strip()
         self.ayar["stt_model"] = self.a_stt_model.text().strip()
@@ -768,20 +724,21 @@ class Pencere(QtWidgets.QMainWindow):
         self.ayar["olcum_kaydi"] = self.a_olcum.isChecked()
         self.ayar["altyazi_yedek"] = self.a_altyazi_yedek.isChecked()
         self.ayar["altyazi_goster"] = self.a_altyazi_goster.isChecked()
+        self.ayar["stt_ipucu"] = self.a_stt_ipucu.isChecked()
         self.k_kaynak.deger.setText("Ses (Whisper)")
         self.baslangic = None            # altyazi/ses bulununca baslar
         self.bitis = None
         self.sayac.setText("00:00")
-        self.is_ = YakalamaIsi(baslik, ctx, self.sozluk, self.a_duzelt.isChecked(),
+        self.is_ = YakalamaIsi(baslik, ctx, self.terimler, self.a_duzelt.isChecked(),
                                self.a_otobitir.value(), self.ayar)
         self.is_.olay.connect(self.olay)
         self.is_.durum.connect(lambda m: self._durum_ayarla(m, "#EA580C" if "bekleniyor" in m.lower() or "görünmüyor" in m.lower() else "#14B8A6"))
-        self.is_.inceleme_hazir.connect(self.inceleme_hazir)
+        self.is_.toplanti_bitti.connect(self.toplanti_bitti)
         self.is_.hata.connect(self.yakalama_hatasi)
         self.is_.start()
         QtCore.QTimer.singleShot(1500, lambda: setattr(self, "motor", getattr(self.is_, "motor", None)))
         self._ana_stil("Bitir", "tehlike")
-        self.nav.setCurrentRow(0)
+        self.nav.setCurrentRow(self.SAYFA_CANLI)
 
     def bitir(self):
         if self.is_ and self.is_.isRunning():
@@ -792,7 +749,7 @@ class Pencere(QtWidgets.QMainWindow):
             self.ilerleme.show()
 
     def yakalama_hatasi(self, mesaj):
-        """YakalamaIsi hata sinyali (ana thread). Motor.bitir + inceleme_hazir ayrica her yolda gelir."""
+        """YakalamaIsi hata sinyali (ana thread). Motor.bitir + toplanti_bitti ayrica her yolda gelir."""
         self.log(f"✖ {mesaj}")
         self._durum_ayarla("Yakalama hatası", "#DC2626")
         QtCore.QTimer.singleShot(0, lambda: QtWidgets.QMessageBox.warning(
@@ -815,8 +772,9 @@ class Pencere(QtWidgets.QMainWindow):
         ek = ""
         if v.get("kaynak") == "altyazi-yedek":
             ek = ' <span style="color:#94A3B8;font-size:10px">[altyazıdan, düşük güven]</span>'
-        elif v.get("supheli"):
-            ek = ' <span style="color:#94A3B8;font-size:10px">[şüpheli]</span>'
+        elif v.get("supheli"):                      # halusinasyon supheli: soluk, nota girmez
+            ek = ' <span style="color:#94A3B8;font-size:10px">[şüpheli — nota girmez]</span>'
+            metin = f'<span style="color:#94A3B8">{metin}</span>'
         return f'<span style="color:#94A3B8;font-size:11px">{ts}</span> {kim_html}{ek}: {metin}'
 
     def _akis_ekle(self, v):
@@ -921,16 +879,10 @@ class Pencere(QtWidgets.QMainWindow):
                 self.log(f"! STT yavaş, {v['kuyruk']} parça sırada bekliyor (atlanmıyor)")
             else:
                 self.log(f"! STT yanıt vermiyor, {v['kuyruk'] if isinstance(v, dict) else v} parça bekliyor — bir parça atlandı")
-        elif tip == "oneri":
-            self.oneri_satiri(v)
-            self.nav.item(1).setText(f"{self.SAYFALAR[1]}  ({self.tablo.rowCount()})")
-            self.k_oneri.deger.setText(str(self.tablo.rowCount()))
 
-    def inceleme_hazir(self, oneriler, kaynak="canli", otomatik=None):
-        """Toplanti bitti (ya da Gecmis'ten kayit hazirlandi). otomatik_not acikken inceleme beklenmez:
-        oneriler bilgi icin tabloya yazilir, not bos kararlarla hemen uretilir."""
-        if otomatik is None:
-            otomatik = self.a_otomatik_not.isChecked()
+    def toplanti_bitti(self, belirsizler, kaynak="canli"):
+        """Toplanti bitti (YakalamaIsi.toplanti_bitti; Motor.bitir bu yolda her zaman cagrilmistir). Motoru baglar,
+        Baslat'i acar ve notu kullanici onayi beklemeden uretir. belirsizler: salt-okunur panele (Motor.belirsizler)."""
         if kaynak == "canli":
             self.motor = self.is_.motor if self.is_ else self.motor
             if self.motor is None:                    # yakalama motor kurulamadan coktu: sifirla, tekrar denenebilsin
@@ -939,119 +891,64 @@ class Pencere(QtWidgets.QMainWindow):
                 self._ana_stil("Başlat", "birincil")
                 self._durum_ayarla("Yakalama başlatılamadı", "#DC2626")
                 return
-        mevcut = {int(self.tablo.item(r, 0).text()) for r in range(self.tablo.rowCount())}
-        for o in oneriler:
-            if o["id"] not in mevcut:
-                self.oneri_satiri(o)
         self.ilerleme.hide()
-        self.b_uygula.setEnabled(True)
         self.b_ana.setEnabled(True)
         self._ana_stil("Başlat", "birincil")
-        n = self.tablo.rowCount()
-        onerili = sum(1 for r in range(n) if self.tablo.item(r, 4).text().strip())
-        self._durum_ayarla(f"İnceleme bekliyor — {n} şüpheli terim", "#EA580C")
-        self.k_oneri.deger.setText(str(n))
-        baslik = "Toplantı bitti." if kaynak == "canli" else "Kayıt yüklendi, parçalar işlendi."
-        if otomatik:
-            self.inc_bilgi.setText(f"{baslik} Not inceleme beklemeden üretildi. {n} şüpheli terim bilgi için burada: "
-                                   "istersen doğrusunu yazıp onayla, 'Uygula ve notu üret' ile sözlüğe al ve notu "
-                                   "yeniden üret.")
-            if self.tepsi and kaynak == "canli":
-                self.tepsi.showMessage("BriefMind", "Toplantı bitti — not üretiliyor.")
-            self._not_uret({})
-            return
-        self.inc_bilgi.setText(f"{baslik} {n} şüpheli terim: {onerili} tanesinde öneri hazır (Onayla seçili), "
-                               f"{n - onerili} tanesinde doğrusunu senin yazman gerekiyor (yazınca otomatik onaylanır). "
-                               "Onaylananlar sözlüğe girer ve yalnızca etkilenen parçalar yeniden özetlenir. "
-                               "Hiç şüpheli yoksa doğrudan 'Uygula ve notu üret'.")
-        self.nav.setCurrentRow(1)
-        self.showNormal()
-        self.activateWindow()
+        self._belirsizler_goster(belirsizler)
+        self._durum_ayarla("Toplantı bitti — not üretiliyor", "#EA580C")
         if self.tepsi and kaynak == "canli":
-            self.tepsi.showMessage("BriefMind", f"Toplantı bitti — {n} şüpheli terim inceleme bekliyor.")
+            self.tepsi.showMessage("BriefMind", "Toplantı bitti — not üretiliyor.")
+        self._not_uret()
 
-    # ================================================================== inceleme
-    def oneri_satiri(self, o):
+    # ================================================================== belirsizler (salt okunur)
+    _BELIRSIZ_ETIKET = {"kelime": "belirsiz kelime", "konusmaci": "emin olunmayan konuşmacı",
+                        "supheli": "şüpheli klip (nota girmez)", "terim": "özetleyicinin bozuk dediği terim"}
+
+    def _belirsizler_goster(self, liste=None):
+        """Not sayfasindaki salt-okunur panel. liste None: acik motordan hesaplanir. Kaynak baglantisi 'ts:HH:MM:SS'
+        (tiklaninca transkript o ani gosterir). Onay/duzeltme dugmesi yoktur."""
         import html as _h
-        self.tablo.blockSignals(True)
-        r = self.tablo.rowCount()
-        self.tablo.insertRow(r)
-        tur = "düzeltme önerisi" if o.get("tur") == "duzeltme" else "belirsiz terim"
-        for c, deger in enumerate([str(o["id"]), str(o["parca"]), tur, o["yanlis"], o.get("oneri", "")]):
-            it = QtWidgets.QTableWidgetItem(deger)
-            if c != 4:
-                it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
-            if c == 3:
-                it.setForeground(QtGui.QColor("#B91C1C"))
-            if c == 4 and not deger:
-                it.setBackground(QtGui.QColor("#FFEDD5"))
-                it.setToolTip("Öneri yok — doğrusunu sen yaz; yazınca karar otomatik 'Onayla' olur")
-            if c == 2:
-                it.setForeground(QtGui.QColor("#475569"))
-            self.tablo.setItem(r, c, it)
-        baglam = o.get("baglam", "") or ""
-        vurgulu = _h.escape(baglam)
-        if o["yanlis"]:
-            import re as _re
-            vurgulu = _re.sub(_re.escape(_h.escape(o["yanlis"])), lambda m: f"<b style='color:#B91C1C'>{m.group(0)}</b>",
-                              vurgulu, flags=_re.IGNORECASE)
-        et = QtWidgets.QLabel(vurgulu)
-        et.setWordWrap(True)
-        et.setToolTip(baglam)
-        et.setStyleSheet("padding:2px 6px;")
-        self.tablo.setCellWidget(r, 5, et)
-        kutu = QtWidgets.QComboBox()
-        kutu.addItems(["Onayla", "Yoksay"])
-        kutu.setCurrentIndex(0 if o.get("oneri") else 1)
-        self.tablo.setCellWidget(r, 6, kutu)
-        self.tablo.resizeRowToContents(r)
-        self.tablo.blockSignals(False)
-
-    def _dogrusu_degisti(self, it):
-        """'Doğrusu' hücresine bir şey yazıldıysa kararı otomatik Onayla yap (yazılan kaybolmasın)."""
-        if it.column() != 4:
+        if liste is None:
+            try:
+                liste = self.motor.belirsizler() if self.motor else []
+            except Exception as e:
+                self.log(f"! belirsizler listesi okunamadı: {e!r}")
+                liste = []
+        liste = [x for x in liste if isinstance(x, dict)]
+        self.k_belirsiz.deger.setText(str(len(liste)))
+        self.belirsiz_kutu.setTitle(f"Belirsizler (salt okunur) — {len(liste)}")
+        if not liste:
+            self.belirsiz_goster.setHtml("<p>Belirsiz kelime ya da konuşmacı yok.</p>")
             return
-        kutu = self.tablo.cellWidget(it.row(), 6)
-        if kutu:
-            kutu.setCurrentText("Onayla" if it.text().strip() else "Yoksay")
-        if it.text().strip():
-            it.setBackground(QtGui.QColor("#FFFFFF"))
+        satirlar = []
+        for x in liste[:self.BELIRSIZ_TAVAN]:
+            bag = f" <a href='ts:{_h.escape(str(x['ts']))}'>⏱{_h.escape(str(x['ts']))}</a>" if x.get("ts") else ""
+            etiket = self._BELIRSIZ_ETIKET.get(x.get("tur"), str(x.get("tur") or ""))
+            adet = f" <span style='color:#64748B'>({x['satir_sayisi']} satır)</span>" if x.get("satir_sayisi", 1) > 1 else ""
+            satirlar.append(f"<p><span style='color:#64748B'>{_h.escape(etiket)}</span> "
+                            f"<b>{_h.escape(str(x.get('metin') or ''))}</b>{adet}{bag}<br>"
+                            f"<span style='color:#64748B'>{_h.escape(str(x.get('baglam') or ''))}</span></p>")
+        if len(liste) > self.BELIRSIZ_TAVAN:
+            satirlar.append(f"<p>… {len(liste) - self.BELIRSIZ_TAVAN} kayıt daha (Geçmiş → transkript).</p>")
+        self.belirsiz_goster.setHtml("".join(satirlar))
 
-    def _toplu_karar(self, k):
-        for r in range(self.tablo.rowCount()):
-            if k == "Onayla" and not self.tablo.item(r, 4).text().strip():
-                continue                                   # doğrusu boşsa onaylanacak bir şey yok
-            self.tablo.cellWidget(r, 6).setCurrentText(k)
-
-    def kararlar(self):
-        k = {}
-        for r in range(self.tablo.rowCount()):
-            oid = int(self.tablo.item(r, 0).text())
-            dogru = self.tablo.item(r, 4).text().strip()
-            onay = self.tablo.cellWidget(r, 6).currentText() == "Onayla"
-            k[oid] = dogru if (onay and dogru) else None
-        return k
-
-    def uygula(self):
-        self._not_uret(self.kararlar())
-
-    def _not_uret(self, kararlar):
-        """Inceleme kararlarini (otomatik_not: bos) uygulayip notu arka planda uretir."""
+    def _not_uret(self):
+        """Notu arka planda uretir (kullanici onayi yok)."""
         if not self.motor or (self.tamamla and self.tamamla.isRunning()):
             return
-        self.b_uygula.setEnabled(False)
+        self.b_not_uret.setEnabled(False)
         self.ilerleme.show()
         self._durum_ayarla("Not üretiliyor…", "#EA580C")
-        self.not_bilgi.setText("Not üretiliyor — düzeltmeler uygulanıyor, parçalar birleştiriliyor…")
+        self.not_bilgi.setText("Not üretiliyor — parçalar birleştiriliyor…")
         self._serit_baslat("Not üretiliyor")
-        self.nav.setCurrentRow(2)
+        self.nav.setCurrentRow(self.SAYFA_NOT)
         self.motor.sablon = self.ayar.get("not_sablonu", "genel")
         if not self.motor.ben:
             self.motor.ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
         self._not_kilit = True                        # not hazir/hata/thread sonu gelene kadar Baslat kapali
         if not self._yakalama_suruyor():              # canli toplantida 'Bitir' acik kalir
             self.b_ana.setEnabled(False)
-        self.tamamla = TamamlamaIsi(self.motor, kararlar)
+        self.tamamla = TamamlamaIsi(self.motor)
         self.tamamla.olay.connect(self.olay)
         self.tamamla.bitti.connect(self.not_hazir)
         self.tamamla.hata.connect(self.not_hata)
@@ -1071,16 +968,16 @@ class Pencere(QtWidgets.QMainWindow):
             self._not_kilidi_ac()
             self.ilerleme.hide()
             self._serit_bitir()
-            self.b_uygula.setEnabled(self.motor is not None)    # not yeniden denenebilsin
+            self.b_not_uret.setEnabled(self.motor is not None)    # not yeniden denenebilsin
             self._durum_ayarla("Not üretilemedi", "#DC2626")
 
     def not_hata(self, mesaj):
         self._not_kilidi_ac()
         self.ilerleme.hide()
         self._serit_bitir()
-        self.b_uygula.setEnabled(self.motor is not None)
+        self.b_not_uret.setEnabled(self.motor is not None)
         self._durum_ayarla("Not üretilemedi", "#DC2626")
-        self.not_bilgi.setText("Not üretilemedi — LLM erişimini kontrol et; İnceleme sayfasından ya da Geçmiş → "
+        self.not_bilgi.setText("Not üretilemedi — LLM erişimini kontrol et; 'Notu yeniden üret' ya da Geçmiş → "
                                "Yeniden özetle ile tekrar dene. Ayrıntı: Olaylar paneli.")
         QtWidgets.QMessageBox.warning(self, "Not üretilemedi", mesaj[-800:])
 
@@ -1091,7 +988,7 @@ class Pencere(QtWidgets.QMainWindow):
         self._not_gorunumu()
         self.ilerleme.hide()
         self._serit_bitir()
-        self.b_uygula.setEnabled(self.tablo.rowCount() > 0)    # oneriler sonradan onaylanip not yeniden uretilebilir
+        self.b_not_uret.setEnabled(self.motor is not None)     # not istenirse yeniden uretilebilir
         yol = os.path.join(self.motor.klasor, 'not.md')
         hic_bolum = "_(özetlenebilen bölüm yok)_" in md
         if hic_bolum or "## Eksik bölümler" in md:
@@ -1107,8 +1004,8 @@ class Pencere(QtWidgets.QMainWindow):
         else:
             self._durum_ayarla("Not hazır", "#14B8A6")
             self.not_bilgi.setText(f"Kaydedildi: {yol}")
-        self.nav.setCurrentRow(2)
-        self.sozluk_yenile()
+        self.nav.setCurrentRow(self.SAYFA_NOT)
+        self._belirsizler_goster()
         self.gecmis_yenile()
         if self.a_outlook.isChecked() and not hic_bolum:      # bos notla Outlook taslagi acilmaz
             self.outlook_ac()
@@ -1124,46 +1021,6 @@ class Pencere(QtWidgets.QMainWindow):
                 os.startfile(os.path.abspath(self.motor.klasor))
             else:
                 subprocess.Popen(["xdg-open", self.motor.klasor])
-
-    # ================================================================== sozluk
-    def sozluk_yenile(self):
-        self.s_tablo.setRowCount(0)
-        for y, d in sorted(self.sozluk.aliaslar.items()):
-            r = self.s_tablo.rowCount()
-            self.s_tablo.insertRow(r)
-            self.s_tablo.setItem(r, 0, QtWidgets.QTableWidgetItem(y))
-            self.s_tablo.setItem(r, 1, QtWidgets.QTableWidgetItem(d))
-        for t in self.sozluk.terimler:
-            r = self.s_tablo.rowCount()
-            self.s_tablo.insertRow(r)
-            self.s_tablo.setItem(r, 0, QtWidgets.QTableWidgetItem(""))
-            self.s_tablo.setItem(r, 1, QtWidgets.QTableWidgetItem(t))
-
-    def sozluk_ekle(self):
-        y, d = self.s_yanlis.text().strip(), self.s_dogru.text().strip()
-        if not d:
-            return
-        if y:
-            self.sozluk.alias_ekle(y, d)
-        else:
-            self.sozluk.terim_ekle(d)
-        self.s_yanlis.clear()
-        self.s_dogru.clear()
-        self.sozluk_yenile()
-        self.s_yanlis.setFocus()
-
-    def sozluk_sil(self):
-        r = self.s_tablo.currentRow()
-        if r < 0:
-            return
-        y, d = self.s_tablo.item(r, 0).text(), self.s_tablo.item(r, 1).text()
-        if y:
-            self.sozluk.aliaslar.pop(y, None)
-        else:
-            self.sozluk.terimler = [t for t in self.sozluk.terimler if t != d]
-        self.sozluk._derle()
-        self.sozluk.kaydet()
-        self.sozluk_yenile()
 
     # ================================================================== gecmis
     def _gecmis_kayitlari(self):
@@ -1185,7 +1042,8 @@ class Pencere(QtWidgets.QMainWindow):
     def gecmis_yenile(self):
         self.g_liste.clear()
         for tarih, ctime, yol, m in self._gecmis_kayitlari():
-            etiket = {"tamam": "tamam", "inceleme": "inceleme bekliyor", "devam": "yarım"}.get(m["durum"], m["durum"])
+            etiket = {"tamam": "tamam", "bitti": "not bekliyor", "inceleme": "not bekliyor",
+                                                      "devam": "yarım"}.get(m["durum"], m["durum"])
             saat = dt.datetime.fromtimestamp(ctime).strftime("%H:%M")
             it = QtWidgets.QListWidgetItem(f"{tarih} {saat}  {m['baslik']}   [{etiket}, {m['parca']} parça]")
             it.setData(QtCore.Qt.UserRole, yol)
@@ -1314,17 +1172,19 @@ class Pencere(QtWidgets.QMainWindow):
         if yol and os.path.exists(yol):
             with open(yol, encoding="utf-8") as f:
                 self.not_md = f.read()
-            self.motor = Motor.yukle(k, self.sozluk)
+            self.motor = Motor.yukle(k, self.terimler)
             self.not_goster.setHtml(md_to_html(self.not_md))
             self._not_gorunumu()
             self.not_bilgi.setText(f"Kaydedildi: {yol}")
-            self.nav.setCurrentRow(2)
+            self.b_not_uret.setEnabled(True)
+            self._belirsizler_goster()
+            self.nav.setCurrentRow(self.SAYFA_NOT)
         else:
             QtWidgets.QMessageBox.information(self, "Not yok", "Bu toplantının notu henüz üretilmemiş.")
 
     def gecmis_yeniden_ozetle(self):
-        """Secili toplantinin TUM parcalarini yeniden ozetler ve yeni not uretir (yarim kayitlar icin de).
-        otomatik_not kapaliysa sonunda Inceleme sekmesine gidilir (eski 'Yarim kalani tamamla' davranisi)."""
+        """Secili toplantinin TUM parcalarini yeniden ozetler ve yeni not uretir (yarim kayitlar icin de). Duzeltme
+        yalniz 'raw'i olan satirlarda calisir; v2 oncesi kayitlarin metni degismez."""
         k = self._secili_klasor()
         if not k:
             return
@@ -1332,11 +1192,8 @@ class Pencere(QtWidgets.QMainWindow):
                 or (self.tamamla and self.tamamla.isRunning()):
             QtWidgets.QMessageBox.information(self, "Yeniden özetle", "Başka bir iş sürüyor; bitince tekrar dene.")
             return
-        otomatik = self.a_otomatik_not.isChecked()
-        self.tablo.setRowCount(0)
-        self.nav.item(1).setText(self.SAYFALAR[1])
-        self.k_oneri.deger.setText("0")
-        self.b_uygula.setEnabled(False)
+        self.b_not_uret.setEnabled(False)
+        self._belirsizler_goster([])
         self.canli_not.clear()
         self._canli_sifirla()
         self.motor = None
@@ -1347,40 +1204,24 @@ class Pencere(QtWidgets.QMainWindow):
         self._durum_ayarla("Yeniden özetleniyor…", "#EA580C")
         self.not_bilgi.setText(f"{os.path.basename(k)}: tüm parçalar yeniden özetleniyor…")
         self._serit_baslat("Kayıt yükleniyor")
-        self.nav.setCurrentRow(2)
+        self.nav.setCurrentRow(self.SAYFA_NOT)
         try:
             with open(os.path.join(k, "meta.json"), encoding="utf-8") as f:
                 self.baslik.setText(json.load(f).get("baslik", os.path.basename(k)))
         except Exception:
             self.baslik.setText(os.path.basename(k))
         ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
-        self.yeniden = YenidenOzetlemeIsi(k, self.sozluk, otomatik, self.a_duzelt.isChecked(), ben,
+        self.yeniden = YenidenOzetlemeIsi(k, self.terimler, self.a_duzelt.isChecked(), ben,
                                           self.ayar.get("not_sablonu", "genel"))
         self.yeniden.olay.connect(self.olay)
         self.yeniden.durum.connect(lambda m: self._durum_ayarla(m, "#EA580C"))
         self.yeniden.bitti.connect(self._yeniden_bitti)
-        self.yeniden.inceleme_hazir.connect(self._yeniden_inceleme)
         self.yeniden.hata.connect(self.not_hata)
         self.yeniden.start()
 
     def _yeniden_bitti(self, md):
         self.motor = self.yeniden.motor
-        mevcut = {int(self.tablo.item(r, 0).text()) for r in range(self.tablo.rowCount())}
-        for o in self.motor.bekleyen_oneriler():        # bilgi icin: sonradan onaylanip not yeniden uretilebilir
-            if o["id"] not in mevcut:
-                self.oneri_satiri(o)
-        n = self.tablo.rowCount()
-        if n:
-            self.nav.item(1).setText(f"{self.SAYFALAR[1]}  ({n})")
-            self.k_oneri.deger.setText(str(n))
-            self.inc_bilgi.setText(f"Kayıt yeniden özetlendi, not üretildi. {n} şüpheli terim bilgi için burada: "
-                                   "istersen onaylayıp 'Uygula ve notu üret' ile notu yeniden üret.")
         self.not_hazir(md)
-
-    def _yeniden_inceleme(self, oneriler):
-        self.motor = self.yeniden.motor
-        self._serit_bitir()
-        self.inceleme_hazir(oneriler, kaynak="gecmis", otomatik=False)
 
     def parca_yeniden(self):
         k = self._secili_klasor()
@@ -1389,7 +1230,7 @@ class Pencere(QtWidgets.QMainWindow):
             return
         no = it.data(QtCore.Qt.UserRole)
         if not (self.motor and self.motor.klasor == k):
-            self.motor = Motor.yukle(k, self.sozluk)
+            self.motor = Motor.yukle(k, self.terimler)
         self.ilerleme.show()
         self._durum_ayarla(f"Parça {no} yeniden özetleniyor…", "#EA580C")
         self.parca_isi = ParcaIsi(self.motor, no)
@@ -1459,7 +1300,7 @@ class Pencere(QtWidgets.QMainWindow):
                           "altyazi_yedek": self.a_altyazi_yedek.isChecked(),
                           "altyazi_goster": self.a_altyazi_goster.isChecked(),
                           "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value(),
-                          "otomatik_not": self.a_otomatik_not.isChecked()})
+                          "stt_ipucu": self.a_stt_ipucu.isChecked()})
         ayar_yaz(self.ayar)
         llm.ayarla(self.ayar)                  # LLM adresi/modeli hemen gecerli: yeniden baslatma gerekmez
         rag.ayarla(self.ayar)
@@ -1821,7 +1662,7 @@ def hata_kancalari_kur():
 
 
 def uygulama_klasoru():
-    """Kaynak dosyalarin (config, sozluk, toplantilar, logo) bulundugu klasor.
+    """Kaynak dosyalarin (config, terimler, toplantilar, logo) bulundugu klasor.
     Exe olarak calisirken exe'nin yanidir; PyInstaller'in gecici klasoru degil."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
@@ -1841,7 +1682,7 @@ def logo_ikonu():
 
 def main():
     hata_kancalari_kur()
-    os.chdir(uygulama_klasoru())                # config.json, sozluk.json, toplantilar/ hep bu klasorde
+    os.chdir(uygulama_klasoru())                # config.json, terimler/, toplantilar/ hep bu klasorde
     try:
         app = QtWidgets.QApplication(sys.argv)
         hata_koprusu_kur()                      # QApplication'dan sonra, ana thread'de

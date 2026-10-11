@@ -419,12 +419,11 @@ def test_olcum_cli_cikti_ad_icermez(tmp_path, capsys):
 def test_replay_baslat_hatasinda_saat_yamasi_geri_alinir(tmp_path, monkeypatch):
     import time as gercek_time
     import motor as motor_mod
-    import sozluk as sozluk_mod
     import yakalayici as yak_mod
 
     def bozuk(*a, **k):
-        raise RuntimeError("sozluk bozuk")
-    monkeypatch.setattr(sozluk_mod, "Sozluk", bozuk)
+        raise RuntimeError("motor bozuk")
+    monkeypatch.setattr(motor_mod, "Motor", bozuk)
     (tmp_path / "olcum").mkdir()
     (tmp_path / "olcum" / "klipler.jsonl").write_text("", encoding="utf-8")
     (tmp_path / "olcum" / "okumalar.jsonl").write_text(json.dumps(

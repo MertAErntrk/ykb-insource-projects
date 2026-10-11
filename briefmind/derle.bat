@@ -16,14 +16,14 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed --name BriefMind -
   --collect-all uiautomation --collect-all soundcard --collect-all sounddevice --collect-all soundfile ^
   --hidden-import win32com --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes ^
   --hidden-import PyQt5.QtSvg ^
+  --add-data "veri;veri" ^
   app.py
 if errorlevel 1 ( echo derleme basarisiz & pause & exit /b 1 )
 
 echo [4/4] calisma dosyalari exe'nin yanina kopyalaniyor...
 copy /y logo1.jpeg dist\BriefMind\ >nul
 copy /y logo.ico   dist\BriefMind\ >nul
-if exist sozluk.json copy /y sozluk.json dist\BriefMind\ >nul
-if exist sozluk.txt  copy /y sozluk.txt  dist\BriefMind\ >nul
+if exist terimler xcopy /e /i /y terimler dist\BriefMind\terimler >nul
 if exist config.json copy /y config.json dist\BriefMind\ >nul
 if not exist dist\BriefMind\toplantilar mkdir dist\BriefMind\toplantilar
 

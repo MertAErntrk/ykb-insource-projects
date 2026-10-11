@@ -14,7 +14,6 @@ Kullanim:
   python whisper_deneme.py 45         -> 45 sn
   python whisper_deneme.py kayit.wav  -> dosyadan
 """
-import json
 import os
 import sys
 import time
@@ -24,15 +23,13 @@ DIL = "tr"
 ORNEK = 16000
 
 
-def sozluk_istemi():
-    """Sozluk terimlerini ve katilimci adlarini Whisper'a 'bu kelimeler gecebilir' diye verir."""
-    terimler = []
-    if os.path.exists("sozluk.json"):
-        with open("sozluk.json", encoding="utf-8") as f:
-            v = json.load(f)
-        terimler = v.get("terimler", [])
+def terim_istemi(seri=None):
+    """Whisper'a verilecek ipucu: terim.prompt(seri, adlar) (katilimci adlari + serinin <=20 terimi). Terim havuzu
+    (terimler/terimler.json) bossa yalniz adlar gider. Uygulamadaki ipucuyla ayni uretici."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import terim
     kisiler = ["Deniz Can Öztürk"]                    # istersen toplanti katilimcilarini ekle
-    return "Toplantı notları. Geçen terimler: " + ", ".join(terimler[:40] + kisiler) + "."
+    return terim.TerimHavuzu().prompt(seri or "", kisiler)
 
 
 def mikrofondan(saniye):
@@ -70,7 +67,7 @@ def main():
     t1 = time.perf_counter()
     parcalar, bilgi = model.transcribe(
         ses, language=DIL, beam_size=5, vad_filter=True,
-        initial_prompt=sozluk_istemi(),
+        initial_prompt=terim_istemi(os.environ.get("BRIEFMIND_SERI")),
         condition_on_previous_text=False,
     )
     metin = []

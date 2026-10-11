@@ -25,7 +25,8 @@ def ayar_oku():
          "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
          "altyazi_turkce": True,           # altyazi bulununca konusulan dili Turkce yapmayi dene
          "olcum_kaydi": False,             # Faz 0 PoC: klip + altyazi okumalarini toplanti klasorune yaz
-         "otomatik_not": True,             # toplanti bitince incelemeyi bekleme, notu dogrudan uret
+         "stt_ipucu": True,                # Whisper prompt'u: katilimci adlari + serinin <=20 terimi (dusuk RMS klibe gitmez)
+         "stt_repetition_penalty": None,   # STT servisine repetition_penalty (None: gonderilmez; A/B icin 1.1 denenir)
          "ca_bundle": ""}                  # kurum kok sertifikasi (.cer, Base64); bos: TLS dogrulamasi kapali
     global AYAR_HATASI
     if os.path.exists(AYAR_DOSYA):

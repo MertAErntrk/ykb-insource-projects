@@ -21,6 +21,27 @@ def _katilimci_listesi(*alanlar):
     return adlar
 
 
+DAVET_GOVDE_TAVAN = 6000
+
+
+def _davet_verisi(k):
+    """Davet kaydi (COM nesnesi) -> {"govde": tam metin (<=6000), "ekler": [dosya adlari]}. terim.davetten_cikar'a
+    girdi olur (Whisper prompt / duzeltme beyaz listesi); hata verirse bos."""
+    try:
+        govde = re.sub(r"\s+", " ", (k.Body or "")).strip()[:DAVET_GOVDE_TAVAN]
+    except Exception:
+        govde = ""
+    ekler = []
+    try:
+        for ek in k.Attachments:
+            ad = str(getattr(ek, "FileName", "") or "").strip()
+            if ad and ad not in ekler:
+                ekler.append(ad)
+    except Exception:
+        pass
+    return {"govde": govde, "ekler": ekler}
+
+
 def _benzerlik(a, b):
     import difflib
     import re as _re
@@ -71,7 +92,8 @@ def aday_toplantilar(tolerans_dk=20):
                 adaylar.append({"baslik": k.Subject or "Toplantı",
                                 "katilimcilar": _katilimci_listesi(k.Organizer, k.RequiredAttendees,
                                                                    k.OptionalAttendees),
-                                "gundem": govde[:1500], "baslangic": bas, "bitis": bit})
+                                "gundem": govde[:1500], "baslangic": bas, "bitis": bit,
+                                "davet": _davet_verisi(k)})
     except Exception:
         return []
     adaylar.sort(key=lambda a: a["baslangic"])
@@ -129,7 +151,7 @@ def aktif_toplanti(tolerans_dk=15):
                 return {"baslik": k.Subject or "Toplantı",
                         "katilimcilar": _katilimci_listesi(k.Organizer, k.RequiredAttendees, k.OptionalAttendees),
                         "gundem": govde[:1500],
-                        "baslangic": bas, "bitis": bit}
+                        "baslangic": bas, "bitis": bit, "davet": _davet_verisi(k)}
     except Exception:
         return None
     return None

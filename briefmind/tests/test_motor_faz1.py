@@ -9,8 +9,10 @@ import time as gercek_time
 
 import pytest
 
+import duzelt as duzelt_mod
 import llm
 import motor as motor_mod
+import saat as saat_mod
 from metin import gorunen_ad, kesin_ad_mi
 
 T0 = 1760170000.0
@@ -20,7 +22,7 @@ A, B, C, BEN = "Ayşe Demir", "Burak Şahin", "Cem Yıldız", "Deniz Kaya"
 # ---------------------------------------------------------------- duzenek
 
 class Saat:
-    """motor.time yerine: time() elle ilerler, digerleri gercek."""
+    """saat.simdi yerine: time() elle ilerler, digerleri gercek."""
 
     def __init__(self, t=T0):
         self.t = t
@@ -33,9 +35,11 @@ class Saat:
 
 
 def saat_kur(monkeypatch):
-    """motor.time -> Saat (diger test modulleri kendi 'saat' fixture'inda kullanir)."""
+    """saat.simdi -> Saat (diger test modulleri kendi 'saat' fixture'inda kullanir)."""
     s = Saat()
-    monkeypatch.setattr(motor_mod, "time", s)
+    monkeypatch.setattr(saat_mod, "simdi", s.time)          # tum modullerin zaman kaynagi (saat.simdi)
+    monkeypatch.setattr(saat_mod, "duvar", lambda t: t)     # sanal saatte duvar ofseti 0
+    monkeypatch.setattr(saat_mod, "duvardan", lambda t: t)
     return s
 
 
@@ -365,12 +369,13 @@ def test_llm_duzeltmesi_satir_id_ile_eslesir_arada_satir_silinse_de(tmp_path, sa
     monkeypatch.setattr(motor_mod, "DUZELT_MIN_TOKEN", 0)
     basladi, devam = threading.Event(), threading.Event()
 
-    def duzelt(satirlar, baglam):
+    def duzelt(satirlar, adaylar, adlar, sor_fn=None):
         basladi.set()
         assert devam.wait(5)
-        return [x.split(":", 1)[0] + ": " + x.split(":", 1)[1].strip().upper() for x in satirlar], []
+        rapor = {"satirlar": {}, "gecersiz": [], "oneri": 0, "kabul": 0, "red": 0, "belirsiz": 0, "hata": None}
+        return [dict(s, text=s["raw"].upper()) for s in satirlar], rapor
 
-    monkeypatch.setattr(llm, "satirlari_duzelt", duzelt)
+    monkeypatch.setattr(duzelt_mod, "duzelt", duzelt)
     monkeypatch.setattr(llm, "bolum_ozetle", lambda *a, **k: None)
     for no, metin in ((1, "birinci satir burada"), (2, "ikinci satir burada"), (3, "ucuncu satir burada")):
         m.ses_olayi(klip(no, no * 3, no * 3 + 2, metin))
@@ -455,7 +460,7 @@ def test_bitir_bekleyenleri_zorlar_bol_kararini_bolemez(tmp_path, saat, monkeypa
     sat = m.tum_satirlar()
     assert [s["speaker"] for s in sat] == [A, f"{A} → {B}", "?"] and not any(s["durum"] == "beklemede" for s in sat)
     meta = json.loads(open(m.klasor + "/meta.json", encoding="utf-8").read())
-    assert meta["durum"] == "inceleme" and meta["stt_eksik"] == []
+    assert meta["durum"] == "bitti" and meta["stt_eksik"] == []
     m.kapat()
 
 

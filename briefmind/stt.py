@@ -3,7 +3,8 @@ stt.py — Whisper STT istemcisi ve cikti suzgecleri (ses.py'den ayrildi, Faz 1)
 
   SttIstemci       OpenAI uyumlu /v1/audio/transcriptions; baglanti kopmasinda toplam sure sinirli yeniden deneme
   sonuc_gecerli    halusinasyon / anlamsiz dizi eleme (segment alanlari yoksa yalniz metne bakar)
-  tekrar_temizle   Whisper'in kisa klipte urettigi tekrarlar
+  halusinasyon_puani  klip metni icin 0-1 sentetik-halusinasyon puani (logprob yok: sure/metin/RMS/cizelge kurallari)
+  tekrar_temizle   Whisper'in kisa klipte urettigi DONGU tekrarlari (gercek tekrar kelime/kisa cevaplara dokunmaz)
   KesintiKuyrugu   STT yokken klipleri yerel diske yazar (olcum_kaydi / kesinti_kaydi izinliyse), sirayla geri okur
 
 Saf Python + numpy + requests: Qt ve ses cihazi gerekmez. ses.py bu adlari yeniden disa aktarir (eski importlar calisir).
@@ -15,6 +16,7 @@ import re
 import threading
 import time
 import wave
+import zlib
 
 import numpy as np
 import requests
@@ -22,30 +24,163 @@ import requests
 import ayar as ayar_mod
 
 ORNEK = 16000
-IPUCU_GONDER = False         # Whisper prompt'u: sozluk terimleri sessizlikte halusinasyona donusuyor ("ODS'i kullandiginda")
+IPUCU_GONDER = True          # Whisper prompt'u KORUMALI gider (ses.SesServisi: dusuk RMS klibe yok, supheli sonuc promptsuz tekrar);
+                             # eskiden kapaliydi: sozluk terimleri sessizlikte halusinasyona donusuyordu ("ODS'i kullandiginda")
+IPUCU_KR_TAVAN = 400         # prompt en fazla ~120 token (~400 karakter)
 
 KISA_GECERLI = {"evet", "hayır", "hayir", "tamam", "peki", "yok", "ok", "olur", "aynen", "doğru", "dogru", "hı", "hıhı"}
 
-# Whisper'in sessizlige/muzige yapistirdigi, egitim verisindeki video altyazilarindan gelen kaliplar
+# Whisper'in sessizlige/muzige yapistirdigi, egitim verisindeki video altyazilarindan gelen kaliplar (altdizge eslesmesi;
+# sonuc_gecerli cumleyi eler). Ilk 9'u Faz 0 oncesi gozlenenler; sonrakiler sentetik Turkce sessizlik kaliplari.
 HALUSINASYON = ("izlediğiniz için teşekkür", "izlediginiz icin tesekkur", "abone olmayı unutmayın",
                 "abone olmayi unutmayin", "beğenmeyi unutmayın", "altyazı m.k", "altyazı: m.k",
-                "bir sonraki videoda görüşmek", "kanalıma abone")
+                "bir sonraki videoda görüşmek", "kanalıma abone",
+                "kanalımıza abone", "yorum yapmayı unutmayın", "bildirimleri açmayı unutmayın",
+                "videoyu beğenmeyi", "bu videoyu izlediğiniz", "bir sonraki bölümde görüşmek", "iyi seyirler")
+# metnin TAMAMI bu ise (genel sozcukler: altdizge olarak gercek konusmayi da yakalardi)
+HALUSINASYON_TAM = {"müzik", "[müzik]", "(müzik)", "♪", "altyazı", "alt yazı", "altyazı."}
+_ALTYAZI_MK = re.compile(r"altyaz[ıi]\s*[:.]?\s*m\s*\.?\s*k\b")
+
+# halusinasyon_puani esikleri ve agirliklari (config 'esikler' ile ezilir; mimari plan 4 ve 8)
+HAL_ESIKLER = {
+    "hal_supheli": 0.5,        # puan >= bu: klip olayi 'supheli' (soluk, nota girmez)
+    "hal_at": 0.9,             # puan >= bu: metin atilir (text "", atildi="halusinasyon")
+    "hal_krsn_ust": 30.0,      # kr/sn bundan buyukse tek basina supheli (+0.6)
+    "hal_krsn_ust_yumusak": 25.0,    # 25-30: +0.4
+    "hal_krsn_alt": 2.0,       # kr/sn bundan kucukse tek basina supheli (+0.6)
+    "hal_krsn_alt_yumusak": 3.0,     # 2-3: +0.4
+    "hal_tok_sn": 12.0,        # token/sn bundan buyukse +0.3
+    "hal_zlib": 2.4,           # zlib sikistirma orani bundan buyukse +0.4
+    "hal_tekrar": 0.5,         # >=3-gram tekrar payi bundan buyukse +0.3
+    "hal_rms_dusuk": 0.012,    # sesli aralik RMS'i bundan kucuk ...
+    "hal_uzun_kr": 80,         # ... ve metin en az bu kadar karakterse +0.3
+    "hal_yanki": 0.6,          # cikti kelimelerinin bu payi (en az 3 kelime) gonderilen prompt'ta geciyorsa +0.9
+}
+# Whisper prompt'u (terim.prompt) etiketleri: ciktida gecerse prompt aynen sizmistir (sessiz/gurultulu klip)
+_PROMPT_ETIKET = re.compile(r"(?:kat[ıi]l[ıi]mc[ıi]lar|terimler)\s*:")
+YANKI_EN_AZ = 3
+
+
+def hal_esik(esikler, ad):
+    """config 'esikler' sozlugunden (sayi ise) deger, yoksa HAL_ESIKLER varsayilani."""
+    v = (esikler or {}).get(ad)
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else HAL_ESIKLER[ad]
 
 
 # ---------------------------------------------------------------- metin suzgecleri
 
+def _kucuk(metin):
+    return (metin or "").replace("İ", "i").replace("I", "ı").lower()
+
+
+def _buyuk_ilk(metin):
+    """Ilk harfi Turkce kurallariyla buyutur (i -> İ, ı -> I)."""
+    if not metin:
+        return metin
+    c = metin[0]
+    return ({"i": "İ", "ı": "I"}.get(c) or c.upper()) + metin[1:]
+
+
+def prompt_yankisi_mi(metin, ipucu=None, esikler=None):
+    """Cikti Whisper prompt'unun yankisi mi? 'Katılımcılar:'/'Terimler:' etiketi geciyor ya da (ipucu verilmisse)
+    cikti kelimelerinin >= hal_yanki payi (en az YANKI_EN_AZ kelime) prompt'ta geciyor."""
+    ml = _kucuk(metin)
+    if _PROMPT_ETIKET.search(ml):
+        return True
+    if not ipucu:
+        return False
+    kel = [k for k in re.findall(r"[^\W\d_]+", ml, flags=re.UNICODE) if len(k) >= 2]
+    havuz = set(re.findall(r"[^\W\d_]+", _kucuk(ipucu), flags=re.UNICODE))
+    ortak = sum(1 for k in kel if k in havuz)
+    return ortak >= YANKI_EN_AZ and ortak >= hal_esik(esikler, "hal_yanki") * len(kel)
+
+
+def halusinasyon_puani(metin, sure_sn, tokens=None, rms=None, cizelge_etkin=None, esikler=None, ipucu=None):
+    """Klip metni gercek konusma mi? 0 (gercek) .. 1 (halusinasyon) puani; kurallar toplanir (plan 4, logprob yok):
+      kr/sn > 30 ya da < 2          +0.6 (tek basina supheli);  25-30 ya da 2-3  +0.4
+      token/sn > 12                 +0.3 (tokens verilmisse: token listesi ya da sayi)
+      zlib orani > 2.4              +0.4
+      >=3-gram tekrar payi > 0.5    +0.3
+      kara liste (video altyazi kaliplari)  +0.5
+      RMS dusuk + metin uzun        +0.3 (rms verilmisse)
+      cizelge_etkin False           +0.6 (altyazi saglikliyken o aralikta etkinlik yok); None: kural uygulanmaz
+      prompt yankisi                +0.9 (prompt_yankisi_mi: etiket ya da ipucu kelimeleri; ipucu: gonderilen prompt)
+    sure_sn: klibin SESLI suresi. Esikler config 'esikler' (esikler=) ile ezilir. Metin bossa 0.0."""
+    m = re.sub(r"\s+", " ", metin or "").strip()
+    if not m:
+        return 0.0
+    puan = 0.0
+    ml = _kucuk(m)
+    kelimeler = re.findall(r"[^\W_]+", ml, flags=re.UNICODE)
+    # a) kr/sn (tek kelimelik kisa cevap 'Evet.' dusuk oran kuralindan muaf: sure icinde sessizlik payi olabilir)
+    if isinstance(sure_sn, (int, float)) and sure_sn > 0:
+        oran = len(m) / float(sure_sn)
+        kisa_cevap = ml.strip(" .?!,;") in KISA_GECERLI
+        if oran > hal_esik(esikler, "hal_krsn_ust"):
+            puan += 0.6
+        elif oran > hal_esik(esikler, "hal_krsn_ust_yumusak"):
+            puan += 0.4
+        elif not kisa_cevap and oran < hal_esik(esikler, "hal_krsn_alt"):
+            puan += 0.6
+        elif not kisa_cevap and oran < hal_esik(esikler, "hal_krsn_alt_yumusak"):
+            puan += 0.4
+        # b) token/sn
+        n_tok = None
+        if isinstance(tokens, (list, tuple)):
+            n_tok = len(tokens) or None
+        elif isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
+            n_tok = tokens
+        if n_tok is not None and n_tok / float(sure_sn) > hal_esik(esikler, "hal_tok_sn"):
+            puan += 0.3
+    # c) zlib sikistirma orani (tekrarli metin cok iyi sikisir)
+    ham = m.encode("utf-8")
+    if len(ham) >= 24 and len(ham) / float(len(zlib.compress(ham))) > hal_esik(esikler, "hal_zlib"):
+        puan += 0.4
+    # d) >=3-gram tekrar payi
+    ucluler = [tuple(kelimeler[i:i + 3]) for i in range(len(kelimeler) - 2)]
+    if len(ucluler) >= 4 and 1.0 - len(set(ucluler)) / float(len(ucluler)) > hal_esik(esikler, "hal_tekrar"):
+        puan += 0.3
+    # e) kara liste
+    if (any(h in ml for h in HALUSINASYON) or _ALTYAZI_MK.search(ml)
+            or ml.strip(" .?!,;") in HALUSINASYON_TAM):
+        puan += 0.5
+    # f) dusuk RMS + uzun metin
+    if (isinstance(rms, (int, float)) and rms < hal_esik(esikler, "hal_rms_dusuk")
+            and len(m) >= hal_esik(esikler, "hal_uzun_kr")):
+        puan += 0.3
+    # g) cizelge kurali
+    if cizelge_etkin is False:
+        puan += 0.6
+    # h) prompt yankisi: Whisper gonderilen prompt'u (ya da parcasini) aynen soyler
+    if prompt_yankisi_mi(m, ipucu, esikler):
+        puan += 0.9
+    return round(min(1.0, puan), 4)
+
+
 def tekrar_temizle(metin):
-    """Whisper'in kisa parcalarda urettigi tekrarlari siler:
-    'Selamlar. Selamlar. Selamlar.' -> 'Selamlar.'   'bu hangi sebepten dolayi bu hangi sebepten dolayi ...' -> tek.
-    Tekrarlarin SONUNCUSU tutulur (devami olan o)."""
-    import difflib
+    """Whisper'in kisa klipte urettigi DONGU tekrarlarini siler; gercek tekrar kelime ve kisa cevaplara dokunmaz.
+      'Selamlar. Selamlar. Selamlar.' -> 'Selamlar.'   'bu hangi sebepten dolayi' x3 -> tek.
+    Kurallar (dar): kelime obegi 2-8 kelime ve >= 3 kez ust uste; TEK kelime >= 4 kez (kisa cevap evet/tamam... >= 6);
+    ayni cumle (birebir) >= 3 kez ust uste (2 kelimelik cumle >= 4, tek kelimelik kisa cevap >= 6). Rakam iceren obek/cumle (sayi, tarih,
+    para) hic dokunulmaz. 'cok cok guzel', 'evet evet', 'Evet. Evet.' korunur. Benzer/kapsayan cumleler birlestirilmez
+    (eskiden 'Toplanti 5te. Toplanti 6da.' tek cumleye iniyordu). Dongude SONUNCU kopya tutulur (devami olan o)."""
     m = re.sub(r"\s+", " ", (metin or "")).strip()
     if not m:
         return m
 
     def sade(k):
-        return re.sub(r"[^\w']", "", k.lower())
+        return re.sub(r"[^\w']", "", _kucuk(k))
 
+    def dongu_mu(birim, k):
+        if not any(birim) or any(ch.isdigit() for b in birim for ch in b):
+            return False
+        if len(birim) == 1:
+            return k >= (6 if birim[0] in KISA_GECERLI else 4)
+        if len(set(birim)) == 1:                    # 'tamam tamam' obegi tek kelime tekrarinin parcasi: yukaridaki kural karar verir
+            return False
+        return k >= 3
+
+    degisti = False
     # a) ardisik tekrarlayan kelime obekleri (token bazli; 1-8 kelimelik obek)
     tok = m.split()
     nrm = [sade(k) for k in tok]
@@ -54,33 +189,35 @@ def tekrar_temizle(metin):
         atlandi = False
         for n in range(min(8, (len(tok) - i) // 2), 0, -1):
             if nrm[i:i + n] and nrm[i:i + n] == nrm[i + n:i + 2 * n]:
-                k = 1
+                k = 2
                 while nrm[i + k * n:i + (k + 1) * n] == nrm[i:i + n]:
                     k += 1
-                i += (k - 1) * n                 # onceki tekrarlari at, sonuncusundan devam et
-                atlandi = True
-                break
+                if dongu_mu(nrm[i:i + n], k):
+                    i += (k - 1) * n                 # onceki tekrarlari at, sonuncusundan devam et
+                    atlandi = degisti = True
+                    break
         if not atlandi:
             out.append(tok[i])
             i += 1
     m = " ".join(out)
-    # b) ardisik ayni/benzer/kapsayan cumleler
-    cumleler = re.split(r"(?<=[.?!])\s+", m)
-    tutulan = []
-    for c in cumleler:
-        c = c.strip()
-        if not c:
-            continue
-        if tutulan:
-            a, b = tutulan[-1].lower().strip(".?! "), c.lower().strip(".?! ")
-            if a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.85 \
-                    or (len(a) > 6 and a in b) or (len(b) > 6 and b in a):
-                if len(c) >= len(tutulan[-1]):
-                    tutulan[-1] = c
-                continue
-        tutulan.append(c)
+    # b) birebir ayni cumle ust uste (benzerlik/kapsama ARANMAZ)
+    cumleler = [c.strip() for c in re.split(r"(?<=[.?!])\s+", m) if c.strip()]
+    tutulan, i = [], 0
+    while i < len(cumleler):
+        anahtar = [sade(k) for k in cumleler[i].split() if sade(k)]
+        k = 1
+        while anahtar and i + k < len(cumleler) and \
+                [sade(x) for x in cumleler[i + k].split() if sade(x)] == anahtar:
+            k += 1
+        esik = 6 if (len(anahtar) == 1 and anahtar[0] in KISA_GECERLI) else (4 if len(anahtar) == 2 else 3)
+        if k >= esik and not any(ch.isdigit() for a in anahtar for ch in a):
+            tutulan.append(cumleler[i + k - 1])
+            degisti = True
+        else:
+            tutulan.extend(cumleler[i:i + k])
+        i += k
     sonuc = " ".join(tutulan)
-    return (sonuc[0].upper() + sonuc[1:]) if sonuc and sonuc[0].islower() else sonuc
+    return _buyuk_ilk(sonuc) if degisti and sonuc and sonuc[0].islower() else sonuc
 
 
 def cumlelere_bol(segmentler, sure):
@@ -191,7 +328,7 @@ class SttIstemci:
     TEKRARLANAN_KODLAR = (408, 429, 502, 503, 504)
 
     def __init__(self, adres, ipucu_fn=None, zaman_asimi=180, model="whisper", api_key="", proxy=True,
-                 verify=None):
+                 verify=None, repetition_penalty=None):
         self.proxy = proxy                        # False: Windows/ortam proxy'si atlanir, dogrudan baglanilir
         # A8: ca_bundle yolu ya da False; verilmezse config.json'dan (ayar.tls_dogrulama)
         self.verify = ayar_mod.tls_dogrulama() if verify is None else verify
@@ -202,7 +339,8 @@ class SttIstemci:
         self.adres = adres.rstrip("/")
         if self.adres.endswith("/v1/audio/transcriptions"):
             self.adres = self.adres[:-len("/v1/audio/transcriptions")]
-        self._ipucu = ipucu_fn or (lambda: "")
+        self._ipucu = ipucu_fn or (lambda: "")      # artik coz() kendiliginden cagirmaz: ipucu acikca verilir (ses.SesServisi)
+        self.repetition_penalty = repetition_penalty    # None: alan gonderilmez (sunucu varsayilani)
         self.zaman_asimi = zaman_asimi
         self.model = model or "whisper"
         self.api_key = api_key
@@ -247,19 +385,28 @@ class SttIstemci:
                     self.saglik_hatasi = f"{yol} -> {type(e).__name__}: {str(e)[:160]}"
         return False
 
-    def _istek(self, ses, bicim, onceki=""):
-        # Not: onceki cumleyi prompt'a eklemek Whisper'da tekrar dongusune ("Selamlar. Selamlar...")
-        # yol aciyor; yalnizca kisa sozluk/katilimci ipucu gonderilir.
+    def _istek(self, ses, bicim, onceki="", ipucu=""):
         veri = {"language": "tr", "model": self.model, "temperature": "0", "response_format": bicim}
-        if IPUCU_GONDER:
-            veri["prompt"] = self._ipucu()[:200]
+        # Prompt YALNIZ cagiran (ses.SesServisi) verirse gider; o da dusuk RMS klipte hic vermez (sessizlikte prompt kelimesi
+        # ciktiya sizar). onceki (bir onceki cumle) yalniz ipucu varsa eklenir: ipucusuz klipte (dusuk RMS) hic gitmez;
+        # tek basina onceki cumle Whisper'da tekrar dongusune ("Selamlar. Selamlar...") yol acar.
+        ipucu = re.sub(r"\s+", " ", ipucu or "").strip()
+        if ipucu:
+            prompt = ipucu[:IPUCU_KR_TAVAN]
+            kalan = IPUCU_KR_TAVAN - len(prompt) - 1
+            onceki = (onceki or "").strip()
+            if onceki and kalan >= 20:
+                prompt += " " + onceki[-kalan:]
+            veri["prompt"] = prompt
+        if self.repetition_penalty is not None:
+            veri["repetition_penalty"] = str(self.repetition_penalty)
         okuma = min(float(self.zaman_asimi), max(float(self.OKUMA_TABAN),
                                                   self.OKUMA_KATI * len(ses) / ORNEK + 15.0))
         return self._oturum.post(f"{self.adres}/v1/audio/transcriptions", verify=self.verify,
                                  timeout=(self.BAGLANTI_ZAMAN_ASIMI, okuma), headers=self._basliklar(),
                                  files={"file": ("parca.wav", wav_bayt(ses), "audio/wav")}, data=veri)
 
-    def _dayanikli_istek(self, ses, bicim, onceki=""):
+    def _dayanikli_istek(self, ses, bicim, onceki="", ipucu=""):
         """Baglanti koparsa (Windows 10053/10054, proxy/VPN/OpenShift router bosta kalan baglantiyi
         kapatti, pod yeniden basladi) ya da sunucu 408/429/502/503/504 donerse, yeni bir baglantiyla tekrar dener.
         Eskiden tek kopma o ses parcasini (konusmayi) kaybettiriyordu. Toplam sure TOPLAM_SN ile sinirlidir:
@@ -273,7 +420,7 @@ class SttIstemci:
                     break
                 time.sleep(bekle)
             try:
-                r = self._istek(ses, bicim, onceki)
+                r = self._istek(ses, bicim, onceki, ipucu=ipucu) if ipucu else self._istek(ses, bicim, onceki)
             except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 son_hata = e
                 self._oturum.close()
@@ -287,13 +434,14 @@ class SttIstemci:
             return r
         raise son_hata
 
-    def coz(self, ses, onceki=""):
+    def coz(self, ses, onceki="", ipucu=""):
         """Ses -> [{'start','end','text'}] (parca icindeki goreli saniyeler).
-        onceki: ayni akisin bir onceki cumlesi (baglam kosullamasi, dogrulugu artirir)."""
-        r = self._dayanikli_istek(ses, "verbose_json" if self.verbose else "json", onceki)
+        ipucu: Whisper prompt'u (katilimci adlari + ilgili terimler); bos ise prompt gitmez. onceki: ayni akisin onceki
+        cumlesi, yalniz ipucu varsa prompt'un sonuna eklenir."""
+        r = self._dayanikli_istek(ses, "verbose_json" if self.verbose else "json", onceki, ipucu)
         if r.status_code == 400 and self.verbose:
             self.verbose = False
-            r = self._dayanikli_istek(ses, "json", onceki)
+            r = self._dayanikli_istek(ses, "json", onceki, ipucu)
         r.raise_for_status()
         v = r.json()
         return v.get("segments") or ([{"start": 0, "end": 0, "text": v.get("text", "")}]

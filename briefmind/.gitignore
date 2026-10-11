@@ -1,7 +1,8 @@
 # yerel/kisisel: repoya girmez
 config.json
+# terim havuzu ve eski sozluk.json (terim_aktar.py girdisi): kisisel, repoya girmez
+terimler/
 sozluk.json
-sozluk.txt
 sozluk.json.yedek-*
 toplantilar/
 # olcum kayitlari (ses, UIA okumalari, etiketler, replay ciktisi): yerel

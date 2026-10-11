@@ -170,3 +170,64 @@ def test_kesinti_kuyrugu_yarim_dosya_listede_gorunmez_io_hatasi_kapatir(tmp_path
     assert not k2.acik and olaylar == ["log"]
     assert not k2.ekle({"klip_no": 2}, np.zeros(10, dtype="float32"))
     assert olaylar == ["log"]                                  # bir kez bildirildi
+
+
+# ---------------------------------------------------------------- Faz 2: tekrar kurallari (dar), prompt, repetition_penalty
+
+def test_tekrar_temizle_gercek_tekrar_ve_kisa_cevaplara_dokunmaz():
+    for m in ("çok çok güzel olmuş", "Yavaş yavaş ilerliyoruz.", "Evet evet evet.", "Tamam tamam tamam",
+              "Evet. Evet. Evet.", "Tamam mı? Tamam mı?", "Hayır hayır, olmaz.", "Bu bu bu değil, şu.",
+              "Toplantı 5te. Toplantı 6da.", "Rakam 3 3 3 3 3 olsun", "Fatura 0 0 0 0 0 TL."):
+        assert stt.tekrar_temizle(m) == m, m
+
+
+def test_tekrar_temizle_donguyu_siler_sonuncuyu_tutar():
+    assert stt.tekrar_temizle("Selamlar. Selamlar. Selamlar.") == "Selamlar."
+    assert stt.tekrar_temizle("iyi iyi iyi iyi iyi") == "İyi"                       # Turkce buyuk harf
+    assert stt.tekrar_temizle("Peki. bu hangi sebepten dolayı bu hangi sebepten dolayı bu hangi sebepten dolayı") \
+        == "Peki. bu hangi sebepten dolayı"                                        # basa harf eklenmez (degisen ilk harf degil)
+    assert stt.tekrar_temizle("tamam " * 8) == "Tamam"                             # kisa cevap ancak >= 6 tekrarda dongu
+    assert stt.tekrar_temizle("Evet. " * 8) == "Evet."
+    assert stt.tekrar_temizle("Tamam mı? Tamam mı? Tamam mı? Tamam mı?") == "Tamam mı?"
+    assert stt.tekrar_temizle("Bu bir cümle. Bu bir cümle. Bu bir cümle.") == "Bu bir cümle."
+    # benzer / kapsayan cumleler artik birlestirilmez
+    assert stt.tekrar_temizle("Bunu yarın yaparız. Bunu yarın yaparız bence.") == "Bunu yarın yaparız. Bunu yarın yaparız bence."
+
+
+def test_tekrar_temizle_degismeyen_metnin_buyuk_harfine_dokunmaz():
+    assert stt.tekrar_temizle("iyi günler") == "iyi günler"
+
+
+class _OturumVeri(_Oturum):
+    def veri(self):
+        return self.cagrilar[-1][1]["data"]
+
+
+def test_prompt_yalniz_ipucu_verilirse_gider_onceki_tek_basina_gitmez():
+    s = stt.SttIstemci("https://stt.ornek", proxy=False, ipucu_fn=lambda: "ASLA CAGRILMAZ")
+    o = s._oturum = _OturumVeri()
+    s.coz(np.zeros(16000, dtype="float32"), onceki="Bir önceki cümle burada.")
+    assert "prompt" not in o.veri() and "repetition_penalty" not in o.veri()          # ipucu_fn kendiliginden cagrilmaz
+    s.coz(np.zeros(16000, dtype="float32"), ipucu="Katılımcılar: Ayşe, Kemal; Jenkins")
+    assert o.veri()["prompt"] == "Katılımcılar: Ayşe, Kemal; Jenkins" and o.veri()["temperature"] == "0"
+    s.coz(np.zeros(16000, dtype="float32"), onceki="Bir önceki cümle burada.", ipucu="Jenkins")
+    assert o.veri()["prompt"] == "Jenkins Bir önceki cümle burada."
+
+
+def test_prompt_en_fazla_400_karakter():
+    s = stt.SttIstemci("https://stt.ornek", proxy=False)
+    o = s._oturum = _OturumVeri()
+    s.coz(np.zeros(16000, dtype="float32"), ipucu="terim " * 200, onceki="x" * 300)
+    assert len(o.veri()["prompt"]) <= stt.IPUCU_KR_TAVAN == 400
+
+
+def test_repetition_penalty_yalniz_verilirse_gider():
+    s = stt.SttIstemci("https://stt.ornek", proxy=False, repetition_penalty=1.1)
+    o = s._oturum = _OturumVeri()
+    s.coz(np.zeros(16000, dtype="float32"))
+    assert o.veri()["repetition_penalty"] == "1.1"
+
+
+def test_halusinasyon_puani_ses_ile_ayni_nesne():
+    assert ses.halusinasyon_puani is stt.halusinasyon_puani and ses.hal_esik is stt.hal_esik
+    assert stt.HAL_ESIKLER["hal_supheli"] == 0.5 and stt.HAL_ESIKLER["hal_at"] == 0.9

@@ -62,6 +62,8 @@ def test_basla_altyazi_metnini_transkripte_yazmaz_sesi_baglar(tmp_path, monkeypa
     hic kurulmuyordu."""
     import llm
     import ses
+    import terim
+    monkeypatch.setattr(terim, "uygulama_klasoru", lambda: str(tmp_path))          # terimler/ repoya yazilmaz
     monkeypatch.setattr(ses, "SesServisi", SahteServis)
     monkeypatch.setattr(llm, "bolum_ozetle", lambda *a, **k: None)
     monkeypatch.setattr(toplanti, "Yakalayici", SahteYakalayici)
@@ -71,7 +73,7 @@ def test_basla_altyazi_metnini_transkripte_yazmaz_sesi_baglar(tmp_path, monkeypa
     monkeypatch.setattr(toplanti.motor_mod, "yeni_klasor", lambda b, t: str(tmp_path / "k"))
     yakalanan = {}
 
-    def tamamla(m, a_outlook, alicilar=None, inceleme=True):
+    def tamamla(m, a_outlook, alicilar=None):
         m.bitir()
         yakalanan["m"] = m
 

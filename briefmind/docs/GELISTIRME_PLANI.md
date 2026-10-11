@@ -2,6 +2,8 @@
 
 Tarih: 2026-09-29. Kapsam: `app.py`, `motor.py`, `llm.py`, `ses.py`, `yakalayici.py`, `sozluk.py`, `outlook.py`, `toplanti.py`.
 
+Durum (2026-10-11): Faz 2 uygulandı. Sözlük ve İnceleme kaldırıldı; yerine terim havuzu (`terim.py`), parça düzeltme kapısı (`duzelt.py`), halüsinasyon çizelge kuralı ve Belirsizler paneli geldi. Ayrıntı ve kabul ölçütleri: `docs/MIMARI_v3.md` §7 ve §10. Bu dosyadaki `sozluk.py` ve İnceleme anlatımı tarihsel kayıttır.
+
 ## 1. Uygulama nasıl çalışıyor
 
 ```

@@ -11,10 +11,15 @@ Konusmanin ilk hecesi kesilmesin diye 0.3 sn on-yuk eklenir.
 
 Zaman tabani (plan 3): her akisin sifirinci orneginin epoch'u (epoch_capa) + ornek sayaci. Klip bas/bit bu sayactan gelir,
 varis anindan degil; bit = SON SESLI blogun sonu. Her 60 sn'de sayac ile saat karsilastirilir, 0.3 sn'den fazla
-kayma varsa yeniden capalanir (olay + olaylar.jsonl).
+kayma varsa yeniden capalanir (olay + olaylar.jsonl). Saat = saat.simdi() (monotonik tabanli): duvar saati adimi
+(NTP/elle) ankrajlari ve altyazi okumalarini ayni anda etkilemez, ikisi hep ayni zaman tabaninda kalir.
 
 Olaylar (SesServisi(olay_fn=...)): klip / bosluk / kulaklik sozlukleri, akis basina sirali (bkz. SesServisi).
 olay_fn verilmezse eski yol: satir_fn(ts, konusmaci, metin, kaynak).
+
+Halusinasyon: klip metni stt.halusinasyon_puani ile puanlanir (klip olayinda hal_puani); >= hal_supheli 'supheli', >= hal_at atilir.
+Whisper prompt'u (ipucu_fn) yalniz yeterli RMS'li klipte gider; supheli sonuc promptsuz bir kez tekrar cozulur.
+Mikrofon 16 kHz disindaki cihaz hizinda acilirsa YenidenOrnekleyici (alcak geciren + secme; scipy varsa resample_poly) indirir.
 
 Halka tampon: her akisin son 10 dk'si float16 olarak bellekte; yeniden_kes(klip_no, an) klibi en sessiz blokta ikiye boler.
 
@@ -26,6 +31,7 @@ Ses diske YAZILMAZ: klip bellekte tutulur, STT cevabi gelince silinir. Istisnala
 """
 import collections
 import datetime as dt
+import inspect
 import itertools
 import json
 import math
@@ -38,15 +44,19 @@ import time
 import numpy as np
 import requests
 
+import saat as saat_mod                 # adima dayanikli zaman kaynagi (time.time yerine)
+
 # STT ve metin suzgecleri stt.py'ye tasindi; eski importlar (ses.SttIstemci, ses.sonuc_gecerli, ses.requests...) calismaya devam eder
-from stt import (HALUSINASYON, IPUCU_GONDER, KISA_GECERLI, ORNEK, KesintiKuyrugu, SttIstemci, cumlelere_bol,
-                 kesinti_hatasi_mi, segment_ozeti, sonuc_gecerli, tekrar_temizle, wav_bayt, wav_oku)
+from stt import (HAL_ESIKLER, HALUSINASYON, IPUCU_GONDER, IPUCU_KR_TAVAN, KISA_GECERLI, ORNEK, KesintiKuyrugu, SttIstemci,
+                 cumlelere_bol, hal_esik, halusinasyon_puani, kesinti_hatasi_mi, segment_ozeti, sonuc_gecerli,
+                 tekrar_temizle, wav_bayt, wav_oku)
 
 # yeniden disa aktarilan adlar (pyflakes: kullanilmamis import sayilmasin)
-__all__ = ["HALUSINASYON", "IPUCU_GONDER", "KISA_GECERLI", "ORNEK", "KesintiKuyrugu", "SttIstemci", "cumlelere_bol",
-           "kesinti_hatasi_mi", "requests", "segment_ozeti", "sonuc_gecerli", "tekrar_temizle", "wav_bayt", "wav_oku",
-           "AkisYakalayici", "HalkaTampon", "KulaklikTespit", "OlcumKaydi", "SesServisi", "bolme_noktasi",
-           "cihazlari_listele", "normalize_et", "zarf_hesapla"]
+__all__ = ["HAL_ESIKLER", "HALUSINASYON", "IPUCU_GONDER", "IPUCU_KR_TAVAN", "KISA_GECERLI", "ORNEK", "KesintiKuyrugu",
+           "SttIstemci", "cumlelere_bol", "hal_esik", "halusinasyon_puani", "kesinti_hatasi_mi", "requests",
+           "segment_ozeti", "sonuc_gecerli", "tekrar_temizle", "wav_bayt", "wav_oku",
+           "AkisYakalayici", "HalkaTampon", "KulaklikTespit", "OlcumKaydi", "SesServisi", "YenidenOrnekleyici",
+           "bolme_noktasi", "cihazlari_listele", "normalize_et", "yeniden_ornekle", "zarf_hesapla"]
 
 MIN_SN = 1.5                 # bundan kisa "cumle" gonderilmez (cok kisa klipte Whisper tekrar uretir)
 CUMLE_SESSIZLIK = 0.55       # cumle sonu sayilan sessizlik (kisa: konusmaci degisimi ayni klibe dusmesin)
@@ -75,6 +85,11 @@ KES_KONTRAST = 0.4           # kesim blogu RMS'i klibin medyan blok RMS'inin bu 
 CAPA_ARALIK_SN = 60          # saat capasi bu sure aralikla (akis zamani) denetlenir
 CAPA_ESIK_SN = 0.3           # |simdi - t| bundan buyukse yeniden capalanir
 HOL_SN = 60                  # sirada bekleyen sonuc icin: bastaki numara bu kadar gelmezse atlanir
+IPUCU_RMS = 0.015            # Whisper prompt'u yalniz sesli aralik RMS'i bundan buyuk klipte gider (config esikler 'ipucu_rms');
+                             # sessiz/gurultulu klipte prompt kelimeleri ciktiya sizar (Faz 0 denemesi)
+TEKRAR_YAKIN_SN = 30         # ayni akista ayni cumle (>= 3 kelime) bu sure icinde ikinci kez gelirse tekrar sayilir
+TEKRAR_PENCERE_SN = 3600     # ... ve bu pencerede (1 saat) ucuncu kez gelirse; eskiden toplanti boyunca sayilirdi
+KISA_CUMLE_KELIME = 2        # bu kadar ya da daha kisa cumle ('Tamam, anladim.') tekrar suzgecine girmez: gercek kisa cevap
 KESINTI_YOKLAMA = 5.0        # STT kesintisinde saglik yoklamasi araligi (sn)
 KESINTI_BITIS_SN = 120       # durdurulurken kesinti kuyrugunun bosalmasi icin en fazla bekleme
 KUYRUK_KLIP_DENEME = 3       # kesinti kuyrugunun basindaki klip saglik yoklamasi gecerken bu kadar kez ust uste
@@ -107,6 +122,157 @@ def cihazlari_listele():
     except Exception:
         vg = vc = None
     return girisler, cikislar, (vg, vc)
+
+
+# ---------------------------------------------------------------- yeniden ornekleme (alcak geciren suzgec + secme)
+
+RS_KESIM = 0.45              # alcak geciren kesim: hedef hizin 0.45 kati (16 kHz icin 7.2 kHz); 8 kHz ustu alias olmasin
+RS_SIFIR_GECIS = 22          # suzgec yarim uzunlugu: kesim frekansinin bu kadar sifir gecisi (Kaiser penceresi)
+RS_BETA = 8.6                # Kaiser beta (~ -80 dB durdurma)
+RS_TABLO_TAVAN = 2048        # faz tablosu en fazla bu kadar satir (up); fazlasi her cagrida benzersiz fazlardan hesaplanir
+
+
+def _scipy_resample_poly():
+    """scipy.signal.resample_poly ya da None (scipy kurulu degilse). Kurulum zorunlu degil (pip aynasi)."""
+    try:
+        from scipy.signal import resample_poly
+        return resample_poly
+    except Exception:
+        return None
+
+
+class YenidenOrnekleyici:
+    """Akan (blok blok) anti-alias'li yeniden ornekleme: hiz -> hedef Hz. np.interp'in dogrusal enterpolasyonu 8 kHz ustu
+    enerjiyi altina katlıyordu (alias); burada once Kaiser pencereli sinc alcak geciren (kesim 0.45 * hedef), sonra secme.
+    Arka uc: scipy kuruluysa scipy.signal.resample_poly (ayni suzgec katsayilariyla, her blokta gecmis/ileri baglamla;
+    kurulumda sentetik tonla numpy arka ucuna karsi dogrulanir, uyusmazsa numpy'a duser), yoksa numpy polifaz sinc.
+    isle(x) her cagrida o ana kadar hazir olan cikis orneklerini dondurur. gecikme=True (varsayilan, mikrofon akisi):
+    sabit H ornek (~1.5 ms) gecikme eklenir; boylece N girisli ilk blok tam N*hedef/hiz cikis verir (BLOK korunur).
+    gecikme=False: zaman hizali (yeniden_ornekle, bitir() ile sonu bosaltilir)."""
+
+    def __init__(self, hiz, hedef=16000, gecikme=True, arka_uc=None):
+        hiz, hedef = int(hiz), int(hedef)
+        g = math.gcd(hiz, hedef)
+        self.up, self.down = hedef // g, hiz // g
+        self.hiz, self.hedef = hiz, hedef
+        fa = RS_KESIM * min(hiz, hedef) / float(hiz)               # kesim, girisin ornek basina cevrimi
+        self._fa = fa
+        self.H = int(math.ceil(RS_SIFIR_GECIS / (2.0 * fa)))      # suzgec yarim uzunlugu (giris ornegi)
+        self._d = self.H if gecikme else 0                         # basa eklenen sifir ornek (sabit gecikme)
+        self._tampon = np.zeros(self._d, dtype=np.float32)
+        self._b0 = 0                                               # tampon[0]'in mutlak indeksi (down'un kati)
+        self._sonraki = 0                                          # uretilecek ilk cikis indeksi
+        self._tablo = None
+        self._poly = None
+        if arka_uc != "numpy" and self.up != self.down:
+            rp = _scipy_resample_poly()
+            if rp is not None:
+                self._poly = rp
+                if not self._dogrula():
+                    self._poly = None
+
+    @property
+    def arka_uc(self):
+        return "scipy" if self._poly is not None else "numpy"
+
+    # --- suzgec ---
+    def _pencere(self, d):
+        """Surekli sinc cekirdegi k(d) (d: giris ornegi cinsinden uzaklik), Kaiser pencereli; integrali ~1."""
+        w = np.i0(RS_BETA * np.sqrt(np.clip(1.0 - (d / self.H) ** 2, 0.0, 1.0))) / np.i0(RS_BETA)
+        return 2.0 * self._fa * np.sinc(2.0 * self._fa * d) * w * (np.abs(d) < self.H)
+
+    def _agirliklar(self, faz):
+        """faz: dizi, 0..up-1 -> (len, 2H) agirlik matrisi; her satir birim DC kazanc."""
+        ofset = np.arange(-self.H + 1, self.H + 1, dtype=np.float64)
+        if self.up <= RS_TABLO_TAVAN:
+            if self._tablo is None:
+                self._tablo = self._satirlar(np.arange(self.up), ofset)
+            return self._tablo[faz]
+        benz, ters = np.unique(faz, return_inverse=True)
+        return self._satirlar(benz, ofset)[ters]
+
+    def _satirlar(self, fazlar, ofset):
+        d = ofset[None, :] - (fazlar[:, None] / float(self.up))
+        k = self._pencere(d)
+        return k / k.sum(axis=1, keepdims=True)
+
+    def _poly_suzgec(self):
+        """resample_poly'ye verilecek yukseltilmis hizdaki katsayilar (toplam 1; scipy up ile carpar)."""
+        m = np.arange(-self.H * self.up, self.H * self.up + 1, dtype=np.float64)
+        k = self._pencere(m / float(self.up))
+        return k / k.sum()
+
+    # --- cikis hesabi: [n0, n1) cikis indeksleri ---
+    def _numpy_hesapla(self, n0, n1):
+        j = np.arange(n0, n1, dtype=np.int64)
+        pay = j * self.down
+        i0 = pay // self.up
+        w = self._agirliklar(pay % self.up)
+        idx = i0[:, None] + np.arange(-self.H + 1, self.H + 1, dtype=np.int64)[None, :] - self._b0
+        gecerli = (idx >= 0) & (idx < len(self._tampon))
+        x = self._tampon[np.clip(idx, 0, max(0, len(self._tampon) - 1))]
+        return np.sum(np.where(gecerli, x, 0.0) * w, axis=1).astype(np.float32)
+
+    def _poly_hesapla(self, n0, n1):
+        # segment bas indeksi down'un kati olmali (cikis izgarasi mutlak izgarayla ayni hizada kalsin)
+        bas = max(self._b0, ((n0 * self.down // self.up - self.H - 1) // self.down) * self.down)
+        seg = self._tampon[bas - self._b0:]
+        y = self._poly(seg.astype(np.float64), self.up, self.down, window=self._poly_suzgec())
+        o = bas // self.down * self.up
+        return np.asarray(y[n0 - o:n1 - o], dtype=np.float32)
+
+    def _hesapla(self, n0, n1):
+        return self._poly_hesapla(n0, n1) if self._poly is not None else self._numpy_hesapla(n0, n1)
+
+    def _dogrula(self):
+        """scipy yolunu sentetik tonla numpy yoluna karsi sina: kucuk bir kayma/olcek hatasi uretimde sessizce bozmasin."""
+        try:
+            n = 6 * self.H * self.down // self.up + self.down * 8
+            n = max(n, 4 * self.H + 8)
+            t = np.arange(n, dtype=np.float64)
+            x = (0.5 * np.sin(2 * np.pi * 0.01 * t) + 0.2 * np.sin(2 * np.pi * 0.037 * t)).astype(np.float32)
+            a = YenidenOrnekleyici(self.hiz, self.hedef, gecikme=False, arka_uc="numpy")
+            b = YenidenOrnekleyici(self.hiz, self.hedef, gecikme=False, arka_uc="numpy")
+            b._poly = self._poly
+            ya, yb = a.isle(x), b.isle(x)
+            return len(ya) == len(yb) and len(ya) > 0 and float(np.max(np.abs(ya - yb))) < 5e-3
+        except Exception:
+            return False
+
+    def isle(self, x):
+        """Girdi blogunu ekler; hazir cikis orneklerini float32 dizi olarak dondurur (bos olabilir)."""
+        x = np.asarray(x, dtype=np.float32).reshape(-1)
+        if self.up == self.down:
+            return x.copy()
+        self._tampon = np.concatenate([self._tampon, x])
+        toplam = self._b0 + len(self._tampon)
+        n_son = ((toplam - 1 - self.H) * self.up) // self.down      # son hesaplanabilir cikis (ileri baglam H ornek)
+        if n_son < self._sonraki:
+            return np.zeros(0, dtype=np.float32)
+        cikti = self._hesapla(self._sonraki, n_son + 1)
+        self._sonraki = n_son + 1
+        gerek = max(0, (self._sonraki * self.down) // self.up - self.H - 1)   # sonraki cikis icin gereken ilk giris
+        yeni_b0 = (gerek // self.down) * self.down
+        if yeni_b0 > self._b0:
+            self._tampon = self._tampon[yeni_b0 - self._b0:]
+            self._b0 = yeni_b0
+        return cikti
+
+    def bitir(self):
+        """Akis sonu: kalan cikis orneklerini (ileri baglam yerine sifir) dondurur."""
+        return self.isle(np.zeros(self.H + self.down, dtype=np.float32))
+
+
+def yeniden_ornekle(x, hiz, hedef=16000):
+    """Tek seferde (zaman hizali, gecikmesiz) anti-alias'li yeniden ornekleme: x (hiz Hz) -> hedef Hz, float32.
+    Uzunluk = ceil(len(x) * hedef / hiz). Mikrofon akisi icin YenidenOrnekleyici kullanilir (ayni suzgec)."""
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    if int(hiz) == int(hedef):
+        return x.copy()
+    r = YenidenOrnekleyici(hiz, hedef, gecikme=False)
+    y = np.concatenate([r.isle(x), r.bitir()])
+    n = int(math.ceil(len(x) * int(hedef) / float(hiz)))
+    return y[:n]
 
 
 # ---------------------------------------------------------------- halka tampon
@@ -281,7 +447,7 @@ class AkisYakalayici(threading.Thread):
         self._olay = olay or (lambda t, v: None)
         self._blok_fn = blok_fn                 # (akis, blok_orta_epoch, rms): pasif kulaklik tespiti
         self._tasma_fn = tasma_fn               # kuyruk KUYRUK_TAVAN'i asinca klip(p) -> True: diske alindi
-        self._saat = saat or time.time
+        self._saat = saat or (lambda: saat_mod.simdi())     # gec baglanir (testler saat.simdi'yi degistirir)
         self._dur = threading.Event()
         self.hata = None
         self.toplam_sn = 0.0
@@ -323,6 +489,7 @@ class AkisYakalayici(threading.Thread):
             return
         while self._sonraki_capa <= self.toplam_ornek:
             self._sonraki_capa += CAPA_ARALIK_SN * ORNEK
+        saat_mod.adim_denetle()                 # duvar saati adimi yalniz loglanir (simdi() etkilenmez)
         simdi = self._saat()
         fark = simdi - self.ornek_epoch(self.toplam_ornek)
         if abs(fark) <= CAPA_ESIK_SN:
@@ -354,19 +521,24 @@ class AkisYakalayici(threading.Thread):
         except Exception:
             hiz = ORNEK
         blok = int(BLOK * hiz / ORNEK)
-        hedef_t = np.arange(BLOK) * (hiz / ORNEK)
-        kaynak_t = np.arange(blok)
+        # np.interp 8 kHz ustu enerjiyi altina katiyordu (alias): akan alcak geciren + secme. Hesap geri cagirmada degil
+        # bu is parcaciginda yapilir (PortAudio geri cagirmasi hafif kalsin).
+        rs = YenidenOrnekleyici(hiz, ORNEK) if hiz != ORNEK else None
 
         def geri(indata, frames, zaman, durum):
-            x = indata[:, 0].copy()
-            q.put(x if hiz == ORNEK else np.interp(hedef_t, kaynak_t[:len(x)], x).astype("float32"))
+            q.put(indata[:, 0].copy())
         with sd.InputStream(samplerate=hiz, channels=1, dtype="float32", blocksize=blok,
                             device=self.cihaz, callback=geri):
             while not self._dur.is_set():
                 try:
-                    yield q.get(timeout=0.5)
+                    x = q.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                if rs is not None:
+                    x = rs.isle(x)
+                    if not len(x):
+                        continue
+                yield x
 
     # --- parcalama ---
     def run(self):
@@ -488,7 +660,7 @@ class AkisYakalayici(threading.Thread):
         bas, bit = self.ornek_epoch(v_bas), self.ornek_epoch(v_bit)
         no = next(self._sayac) if self._sayac is not None else None
         klip_no = (no if no is not None else next(self._yerel_sayac)) + 1
-        p = {"kaynak": self.kaynak, "basla": dt.datetime.fromtimestamp(bas), "bitis": dt.datetime.fromtimestamp(bit),
+        p = {"kaynak": self.kaynak, "basla": saat_mod.yerel(bas), "bitis": saat_mod.yerel(bit),
              "ses": normalize_et(ham), "no": no, "klip_no": klip_no,
              "ornek_bas": ornek_bas, "ornek_bit": ornek_bas + n, "epoch_capa": self.epoch_capa,
              "bas_epoch": bas, "bit_epoch": bit, "v_ornek_bas": v_bas, "v_ornek_bit": v_bit,
@@ -558,8 +730,8 @@ class AkisYakalayici(threading.Thread):
             no = next(self._sayac) if self._sayac is not None else None
             yeni_no = (no if no is not None else next(self._yerel_sayac)) + 1
             bas, bit = self.ornek_epoch(vb), self.ornek_epoch(ve)
-            p = {"kaynak": self.kaynak, "basla": dt.datetime.fromtimestamp(bas),
-                 "bitis": dt.datetime.fromtimestamp(bit), "ses": normalize_et(ses_), "no": no, "klip_no": yeni_no,
+            p = {"kaynak": self.kaynak, "basla": saat_mod.yerel(bas),
+                 "bitis": saat_mod.yerel(bit), "ses": normalize_et(ses_), "no": no, "klip_no": yeni_no,
                  "ornek_bas": ob, "ornek_bit": oe, "epoch_capa": self.epoch_capa,
                  "bas_epoch": bas, "bit_epoch": bit, "v_ornek_bas": vb, "v_ornek_bit": ve,
                  "zarf": zarf_hesapla(ham_v), "rms": float(np.sqrt(np.mean(np.square(ham_v)))) if len(ham_v) else 0.0,
@@ -649,7 +821,7 @@ class OlcumKaydi:
         if not self.acik:
             return
         try:
-            satir = {"zaman": round(time.time(), 3), "tur": tur}
+            satir = {"zaman": round(saat_mod.simdi(), 3), "tur": tur}
             if isinstance(veri, dict):
                 satir.update({k: v for k, v in veri.items() if k not in satir})
             with self._kilit:
@@ -674,8 +846,8 @@ class OlcumKaydi:
             elif ob is not None and capa is not None:
                 bas, bit = capa + ob / ORNEK, capa + p["ornek_bit"] / ORNEK
             else:                                  # sayac yok (ornegin elle uretilmis klip): varis anlarindan
-                bit = p["bitis"].timestamp() if isinstance(p.get("bitis"), dt.datetime) else time.time()
-                bas = p["basla"].timestamp() if isinstance(p.get("basla"), dt.datetime) else bit - sure
+                bit = saat_mod.epoch(p["bitis"]) if isinstance(p.get("bitis"), dt.datetime) else saat_mod.simdi()
+                bas = saat_mod.epoch(p["basla"]) if isinstance(p.get("basla"), dt.datetime) else bit - sure
             kayit = {"no": no, "akis": p["kaynak"], "bas": round(bas, 3), "bit": round(bit, 3),
                      "ornek_bas": ob, "ornek_bit": p.get("ornek_bit"), "sure": round(sure, 2),
                      "ts": p["basla"].strftime("%H:%M:%S") if isinstance(p.get("basla"), dt.datetime) else None}
@@ -722,19 +894,35 @@ class SesServisi:
     """Yakalama + STT'yi yonetir.
 
     olay_fn(dict) verilirse (Faz 1) her olay sozlugu SIRALI cagrilir (STT cikis sirasi degil, klip sirasi):
-      klip    {"tur","klip_no","akis","bas","bit","sure","text","ts","rms","zarf","ust_klip","supheli"}
+      klip    {"tur","klip_no","akis","bas","bit","sure","text","ts","rms","zarf","ust_klip","supheli","hal_puani"[,"atildi"]}
+              hal_puani: stt.halusinasyon_puani (0-1); >= esikler.hal_supheli (0.5) -> supheli; >= hal_at (0.9) -> text "" ve
+              atildi="halusinasyon" (olay yine gelir: o anda akista ses vardi)
       bosluk  {"tur","akis","bas","bit","neden"}   cozulemeyen klip ('stt_yok': kesinti; 'kuyruk_tasti'; 'stt_hata')
       kulaklik {"tur","durum","guven"}             pasif tespit degisince
     olay_fn yoksa eski yol: satir_fn(ts, konusmaci, metin, kaynak); konusmaci: mikrofon icin 'ben', loopback icin None.
+
+    Whisper prompt'u: ipucu_fn(akis) -> str (terim.prompt baglanacak). Korumalar: config 'stt_ipucu' (varsayilan True); klibin
+    sesli RMS'i esikler.ipucu_rms (0.015) altindaysa prompt GITMEZ ve onceki cumle hic gonderilmez; prompt'lu sonuc 'supheli'
+    (puan >= hal_supheli) cikarsa klip promptsuz bir kez daha cozulur ve puani dusuk olan tutulur.
+    stt_repetition_penalty (config; None: alan gonderilmez). cizelge_fn(akis, bas, bit) -> bool|None puana cizelge kuralini ekler.
 
     STT kesintisi altyazi moduna dusurmez: yakalama surer, klipler bosluk olur; olcum_kaydi/kesinti_kaydi aciksa diske yazilip
     STT donunce sirayla cozulur. Durum: stt_durumu."""
 
     def __init__(self, stt_adres, ipucu_fn=None, mod="otomatik", mik_cihaz=None, olay=None, satir_fn=None,
                  model="whisper", api_key="", proxy=True, verify=None, olcum_klasor=None, olay_fn=None,
-                 kesinti_klasor=None):
+                 kesinti_klasor=None, esikler=None, stt_ipucu=True, stt_repetition_penalty=None, cizelge_fn=None):
         self.kuyruk = queue.Queue()
-        self.stt = SttIstemci(stt_adres, ipucu_fn, model=model, api_key=api_key, proxy=proxy, verify=verify)
+        self.stt = SttIstemci(stt_adres, model=model, api_key=api_key, proxy=proxy, verify=verify,
+                              repetition_penalty=stt_repetition_penalty)
+        self._ipucu_fn = ipucu_fn            # ipucu_fn(akis) -> str (Whisper prompt'u); eski sifir argumanli lambda da olur
+        self.stt_ipucu = bool(stt_ipucu)     # config 'stt_ipucu'
+        self.esikler = dict(esikler.get("esikler") if isinstance((esikler or {}).get("esikler"), dict)
+                            else (esikler or {}))      # config 'esikler' (halusinasyon, ipucu_rms)
+        self._cizelge_fn = cizelge_fn        # cizelge_fn(akis, bas, bit) -> True/False/None (None: kapsama yok, kural uygulanmaz)
+        self.ipucu_gonderilen = 0            # prompt ile giden klip sayisi (A/B teshisi)
+        self.ipucu_yeniden = 0               # supheli prompt'lu sonucun promptsuz tekrarlandigi klip sayisi
+        self.atilan_halusinasyon = 0         # puani 'at' esigini asip metni atilan klip sayisi
         self.mod = mod                       # otomatik | cift | tek
         self.mik_cihaz = mik_cihaz
         self._olay = olay or (lambda t, v: None)
@@ -749,8 +937,8 @@ class SesServisi:
         self.son_hata = None
         self.cozulen = 0
         self.gonderilen = 0
-        self._son_satirlar = []          # (zaman, kaynak, metin) — tekrar/eko tekillestirme icin
-        self._sayim = {}                 # cumle -> kac kez geldi (halusinasyon kalibi tespiti)
+        self._son_satirlar = []          # (zaman, kaynak, metin) — eski yol eko tekillestirme icin
+        self._cumle_gecmisi = []         # (an, kaynak, normalize cumle): tekrar suzgeci (TEKRAR_PENCERE_SN)
         self._bicim_bildirildi = False
         self.elenen = 0
         self._kilit = threading.RLock()
@@ -891,7 +1079,7 @@ class SesServisi:
         self.gonderilen += 1
         self._olay("ses_parca", {"kaynak": p["kaynak"], "sn": round(sure, 1),
                                  "kuyruk": self.kuyruk.qsize()})
-        t0 = time.time()
+        t0 = saat_mod.simdi()
         olcum = self._olcum
         olaylar, ham, seg_ozet, hata = [], None, None, None
         kesintide = False
@@ -903,7 +1091,7 @@ class SesServisi:
                 hata = "stt kesintisi"
             else:
                 once = self.stt.yeniden_deneme
-                segmentler = self.stt.coz(p["ses"])
+                segmentler = self._coz(p)
                 self.cozulen += 1
                 if olcum is not None:
                     ham = " ".join((s.get("text") or "").strip() for s in segmentler).strip()
@@ -912,12 +1100,12 @@ class SesServisi:
                     self._olay("log", f"  · STT bağlantısı koptu, yeniden denendi ve kurtarıldı "
                                       f"(toplam {self.stt.yeniden_deneme})")
                 if p.get("bit_epoch") is not None:
-                    gecikme = round(time.time() - p["bit_epoch"], 2)
+                    gecikme = round(saat_mod.simdi() - p["bit_epoch"], 2)
                 else:
-                    gecikme = (round(time.time() - p["bitis"].timestamp(), 2)
+                    gecikme = (round(saat_mod.simdi() - saat_mod.epoch(p["bitis"]), 2)
                                if isinstance(p.get("bitis"), dt.datetime) else None)
                 self._olay("ses_metin", {"kaynak": p["kaynak"], "segment": len(segmentler),
-                                         "sn": round(sure, 1), "islem": round(time.time() - t0, 2),
+                                         "sn": round(sure, 1), "islem": round(saat_mod.simdi() - t0, 2),
                                          "gecikme": gecikme})
                 if not self._bicim_bildirildi:
                     self._bicim_bildirildi = True
@@ -940,7 +1128,7 @@ class SesServisi:
                 if olcum is not None:
                     tsler = [a[0].strftime("%H:%M:%S") if isinstance(a, tuple) else a["ts"]
                              for a in olaylar if isinstance(a, tuple) or a.get("tur") == "klip"]
-                    olcum.sonuc(p, ham, round(time.time() - t0, 2), tsler, seg_ozet, hata)
+                    olcum.sonuc(p, ham, round(saat_mod.simdi() - t0, 2), tsler, seg_ozet, hata)
             finally:
                 p["ses"] = None                       # ses bellekten dusurulur
                 self._sirali_yay(p.get("no"), olaylar)   # hata olsa da numara kapanir, sira takilmaz
@@ -958,9 +1146,9 @@ class SesServisi:
             adaylar.append((basla + dt.timedelta(seconds=gorel), kaynak, metin))
         return adaylar
 
-    def klip_metni(self, segmentler):
+    def klip_metni(self, segmentler, say=True):
         """STT segmentleri -> tek klip metni: segment basina tekrar temizle, cumle cumle gecerlilik suzgeci
-        (halusinasyon/anlamsiz cumle atilir), kalanlar birlestirilir. Bos olabilir."""
+        (halusinasyon/anlamsiz cumle atilir), kalanlar birlestirilir. Bos olabilir. say=False: elenen sayaci artmaz."""
         parcalar = []
         for s in segmentler:
             ham = (s.get("text") or "").strip()
@@ -970,27 +1158,128 @@ class SesServisi:
             for c in re.split(r"(?<=[.?!])\s+", metin):
                 c = c.strip()
                 if len(c) < 2 or not sonuc_gecerli(s, c):
-                    self.elenen += 1
+                    if say:
+                        self.elenen += 1
                     continue
                 parcalar.append(c)
         return " ".join(parcalar)
 
+    # --- halusinasyon puani, Whisper prompt'u ---
+    def _esik(self, ad):
+        """config 'esikler' degeri (sayi ise) ya da varsayilan: hal_* (stt.HAL_ESIKLER) ve ipucu_rms."""
+        if ad == "ipucu_rms":
+            v = self.esikler.get(ad)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else IPUCU_RMS
+        return hal_esik(self.esikler, ad)
+
+    @staticmethod
+    def _token_sayisi(segmentler):
+        """Segmentlerdeki 'tokens' alanlarinin toplam uzunlugu; servis vermiyorsa (bos/yok) None (kural uygulanmaz)."""
+        toplam, var = 0, False
+        for s in segmentler:
+            t = s.get("tokens")
+            if isinstance(t, (list, tuple)) and t:
+                toplam += len(t)
+                var = True
+        return toplam if var else None
+
+    def _puan(self, p, segmentler, metin=None, ipucu=None):
+        """Klip metni (suzgeclerden gecmis) icin halusinasyon puani. cizelge_fn varsa cizelge kuralini da uygular.
+        Suzgecler (kara liste cumlesi, dongu tekrari) bir sey sildiyse ham segment metni de puanlanir ve buyuk olan
+        alinir: silinen kanit kalan metni aklamaz ('Altyazı M.K. Herkese iyi akşamlar.'). ipucu: bu sonuc icin
+        gonderilen Whisper prompt'u (prompt yankisi kurali); None ise _coz'un p'ye yazdigi kullanilir."""
+        if metin is None:
+            metin = self.klip_metni(segmentler, say=False)
+        if not metin:
+            return 0.0, metin
+        if ipucu is None:
+            ipucu = p.get("ipucu_kullanilan") or ""
+        bas, bit = self._aralik(p)
+        cizelge = None
+        if self._cizelge_fn is not None:
+            try:
+                cizelge = self._cizelge_fn(p["kaynak"], bas, bit)
+            except Exception:
+                cizelge = None
+        sure = max(0.0, bit - bas)
+        ortak = dict(tokens=self._token_sayisi(segmentler), rms=p.get("rms"), cizelge_etkin=cizelge,
+                     esikler=self.esikler, ipucu=ipucu)
+        puan = halusinasyon_puani(metin, sure, **ortak)
+        ham = re.sub(r"\s+", " ", " ".join((s.get("text") or "").strip() for s in segmentler)).strip()
+        if ham and ham != metin:
+            puan = max(puan, halusinasyon_puani(ham, sure, **ortak))
+        return puan, metin
+
+    def _ipucu_hazirla(self, p):
+        """Bu klip icin Whisper prompt'u ('' = gonderme). Dusuk RMS (ya da bilinmeyen) klibe prompt yok."""
+        if not self.stt_ipucu or self._ipucu_fn is None:
+            return ""
+        rms = p.get("rms")
+        if not isinstance(rms, (int, float)) or rms < self._esik("ipucu_rms"):
+            return ""
+        try:
+            try:
+                n = len(inspect.signature(self._ipucu_fn).parameters)
+            except (TypeError, ValueError):
+                n = 1
+            m = self._ipucu_fn(p["kaynak"]) if n else self._ipucu_fn()
+        except Exception as e:
+            self._olay("log", f"! ipucu üretilemedi: {e!r}")
+            return ""
+        return re.sub(r"\s+", " ", m or "").strip()[:IPUCU_KR_TAVAN]
+
+    def _coz(self, p):
+        """Klibi STT'ye gonderir (korumali prompt ile). Prompt'lu sonuc supheliyse promptsuz bir kez daha cozer ve puani
+        dusuk olani tutar (esitlikte promptsuz). Istisna yalniz ilk istekten gelir (ikinci istek hatasi birinciyi bozmaz)."""
+        ses_ = p["ses"]
+        p.pop("ipucu_kullanilan", None)          # klip olayi puani tutulan sonucun prompt'uyla hesaplanir
+        ipucu = self._ipucu_hazirla(p)
+        if not ipucu:
+            return self.stt.coz(ses_)
+        self.ipucu_gonderilen += 1
+        birinci = self.stt.coz(ses_, ipucu=ipucu)
+        puan1, _ = self._puan(p, birinci, ipucu=ipucu)
+        if puan1 < self._esik("hal_supheli"):
+            p["ipucu_kullanilan"] = ipucu
+            return birinci
+        self.ipucu_yeniden += 1
+        try:
+            ikinci = self.stt.coz(ses_)
+        except Exception as e:
+            self._olay("log", f"! promptsuz tekrar çözüm başarısız: {e!r}")
+            p["ipucu_kullanilan"] = ipucu
+            return birinci
+        puan2, _ = self._puan(p, ikinci, ipucu="")
+        self._olay("log", f"  · prompt'lu sonuç şüpheli (puan {puan1:.2f}): promptsuz tekrar (puan {puan2:.2f})")
+        if puan2 <= puan1:
+            return ikinci
+        p["ipucu_kullanilan"] = ipucu
+        return birinci
+
     def klip_olayi_uret(self, p, segmentler):
         """Klip sozlugu p ve STT segmentlerinden C1 klip olayi (suzgecler uygulanmis metinle) | None (metin bos).
         Yeniden kesme parcasi (ust_klip) metni bos olsa da olay olur (text ""): motor parcanin geldigini bilir, diger
-        parcayla ozgun satiri degistirir. Tekrar suzgeci yayim sirasinda ayrica uygulanir."""
+        parcayla ozgun satiri degistirir. Tekrar suzgeci yayim sirasinda ayrica uygulanir.
+        hal_puani >= hal_supheli -> supheli; >= hal_at -> text "" ve atildi="halusinasyon"."""
         metin = self.klip_metni(segmentler)
         if not metin and p.get("ust_klip") is None:
             return None
         bas, bit = p.get("bas_epoch"), p.get("bit_epoch")
         if bas is None:
-            bas = p["basla"].timestamp()
+            bas = saat_mod.epoch(p["basla"])
         if bit is None:
-            bit = p["bitis"].timestamp() if isinstance(p.get("bitis"), dt.datetime) else bas
-        return {"tur": "klip", "klip_no": p.get("klip_no"), "akis": p["kaynak"], "bas": bas, "bit": bit,
-                "sure": round(bit - bas, 3), "text": metin, "ts": dt.datetime.fromtimestamp(bas).strftime("%H:%M:%S"),
-                "rms": float(p.get("rms") or 0.0), "zarf": list(p.get("zarf") or []),
-                "ust_klip": p.get("ust_klip"), "supheli": False}
+            bit = saat_mod.epoch(p["bitis"]) if isinstance(p.get("bitis"), dt.datetime) else bas
+        puan, _ = self._puan(p, segmentler, metin)
+        ev = {"tur": "klip", "klip_no": p.get("klip_no"), "akis": p["kaynak"], "bas": bas, "bit": bit,
+              "sure": round(bit - bas, 3), "text": metin, "ts": saat_mod.ts(bas),
+              "rms": float(p.get("rms") or 0.0), "zarf": list(p.get("zarf") or []),
+              "ust_klip": p.get("ust_klip"), "supheli": puan >= self._esik("hal_supheli"),
+              "hal_puani": round(puan, 3)}
+        if puan >= self._esik("hal_at"):
+            ev.update(text="", atildi="halusinasyon")
+            self.elenen += 1
+            self.atilan_halusinasyon += 1
+        return ev
 
     def _olaylar_uret(self, p, segmentler):
         """Worker/kesinti tekrar cozumu: olay_fn varsa [klip olayi], yoksa eski yol [(an, kaynak, metin)]."""
@@ -1009,9 +1298,9 @@ class SesServisi:
     def _aralik(p):
         bas, bit = p.get("bas_epoch"), p.get("bit_epoch")
         if bas is None:
-            bas = p["basla"].timestamp() if isinstance(p.get("basla"), dt.datetime) else time.time()
+            bas = saat_mod.epoch(p["basla"]) if isinstance(p.get("basla"), dt.datetime) else saat_mod.simdi()
         if bit is None:
-            bit = p["bitis"].timestamp() if isinstance(p.get("bitis"), dt.datetime) else bas
+            bit = saat_mod.epoch(p["bitis"]) if isinstance(p.get("bitis"), dt.datetime) else bas
         return bas, bit
 
     # --- sirali yayim ---
@@ -1089,16 +1378,24 @@ class SesServisi:
         self._son_satirlar.append((an, kaynak, metin))
 
     def _tekrar_mi(self, an, kaynak, metin):
-        """Ayni akista son 90 sn icinde ayni cumle, ya da toplanti boyunca 3+ kez birebir ayni cumle
-        (kisa onaylar haric): Whisper'in sessizlige yapistirdigi kalip."""
+        """Whisper'in sessizlige yapistirdigi kalip / dongu: ayni akista TEKRAR_YAKIN_SN icinde ayni cumle ya da TEKRAR_PENCERE_SN
+        icinde ucuncu kez ayni cumle. Gercek kisa cevaplar ve tekrarlar korunur: KISA_GECERLI ve <= KISA_CUMLE_KELIME kelimelik
+        cumleler ('Tamam, anladim.') hic elenmez. Elenmeyen cumle gecmise yazilir."""
         n = metin.lower().strip(" .?!,;")
-        if n in KISA_GECERLI:
+        if n in KISA_GECERLI or len(re.findall(r"[^\W\d_]+", n)) <= KISA_CUMLE_KELIME:
             return False
-        for t, k, m in self._son_satirlar:
-            if k == kaynak and m.lower().strip(" .?!,;") == n and (an - t).total_seconds() < 90:
+        self._cumle_gecmisi = [g for g in self._cumle_gecmisi if abs((an - g[0]).total_seconds()) < TEKRAR_PENCERE_SN]
+        adet = 1
+        for t, k, m in self._cumle_gecmisi:
+            if m != n:
+                continue
+            if k == kaynak and abs((an - t).total_seconds()) < TEKRAR_YAKIN_SN:
                 return True
-        self._sayim[n] = self._sayim.get(n, 0) + 1
-        return self._sayim[n] >= 3
+            adet += 1
+        if adet >= 3:
+            return True
+        self._cumle_gecmisi.append((an, kaynak, n))
+        return False
 
     def _eko_mu(self, an, kaynak, metin):
         """ESKI YOL: kulakliksiz kullanimda ayni cumle hem hoparlorden hem mikrofondan gelir.
@@ -1135,7 +1432,7 @@ class SesServisi:
         with self._durum_kilit:
             yeni = self._kesinti_bas is None
             if yeni:
-                self._kesinti_bas = time.time()
+                self._kesinti_bas = saat_mod.simdi()
             self._kesinti_hata = str(hata)[:200]
             self._bekci_baslat()
         if yeni:
@@ -1151,7 +1448,7 @@ class SesServisi:
         with self._durum_kilit:
             if self._kesinti_bas is None:
                 return
-            sure = time.time() - self._kesinti_bas
+            sure = saat_mod.simdi() - self._kesinti_bas
             self._kesinti_bas = None
         self._olay("log", f"✔ STT geri geldi (kesinti {int(sure)} sn)")
         if self._olcum is not None:
@@ -1260,9 +1557,9 @@ class SesServisi:
                 p = {"kaynak": meta["akis"], "ses": ses_, "no": None, "klip_no": meta["klip_no"],
                      "bas_epoch": meta["bas"], "bit_epoch": meta["bit"], "zarf": meta.get("zarf") or [],
                      "rms": meta.get("rms") or 0.0, "ust_klip": meta.get("ust_klip"),
-                     "basla": dt.datetime.fromtimestamp(meta["bas"]), "bitis": dt.datetime.fromtimestamp(meta["bit"])}
+                     "basla": saat_mod.yerel(meta["bas"]), "bitis": saat_mod.yerel(meta["bit"])}
                 try:
-                    segmentler = self.stt.coz(ses_)
+                    segmentler = self._coz(p)
                 except Exception as e:
                     self.son_hata = e
                     no = meta.get("klip_no")

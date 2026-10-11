@@ -3,7 +3,7 @@ replay.py — Kaydedilmis bir toplantiyi (olcum/okumalar.jsonl + olcum/klipler) 
 Ag yok: LLM cagrilari kapali (parca isleme saplanir), STT yalniz --stt ile (wav'lar yeniden cozulur; devirde yeniden kesme).
 
 Akis: okumalar (UIA ham panel okumasi, C2) ve klipler (STT cikisi, C1) zaman sirasiyla bir Hat'a verilir; zaman sanal saatle
-akar (motor.time epoch'a sabitlenir, bekleme yok). Cikan son satirlar <cikti>/satirlar.jsonl'e (klip_no ile) yazilir,
+akar (saat.simdi sanal saate baglanir, bekleme yok). Cikan son satirlar <cikti>/satirlar.jsonl'e (klip_no ile) yazilir,
 ardindan olcum.py metrikleri hesaplanip <cikti>/olcum.json'a yazilir.
 
 Hatlar (--hat):
@@ -16,9 +16,16 @@ Hatlar (--hat):
 Baska hat: `Hat` sozlesmesini uygulayan bir sinif --hat modul:Sinif ile takilir; kurucusu `ayar` sozlugunu alir
 ({"kaynak", "ben", "kulaklik", "katilimcilar", "stt", "klasor"}). Dongu yalniz Hat metotlarini cagirir.
 
+Duzeltme (Faz 2, --duzelt): Faz1Hat parca kapaninca terim/ad duzeltmesini de calistirir (duzelt.duzelt: LLM yalniz onerir,
+deterministik kapi karar verir; ozetleme yine saplanir). Varsayilan onerici SAHTE ve AGRESIF (SahteOneri: terim listesine
+benzeyen her kelimeyi oneririr; kapinin ne kadarini tuttugunu olcer, ag yok); --llm ile gercek LLM (config.json). Terim kaynagi:
+--terimler "A,B" ve/ya da --davet dosya (davet metni). Cikti olcum.json "duzeltme": duzeltilen / bozulan kelime (zemin gercegine
+gore; bozulan = dogru kelimenin yanlis olmasi, hedef 0), kabul, belirsiz; replay.duzelt: oneri / kabul / red nedenleri.
+
 Kullanim:
   python tools/replay.py toplantilar/<klasor> [--stt] [--cikti klasor] [--bas 0 --bit 10] [--hat modul:Sinif | --eski]
                          [--ben ad] [--katilimcilar "Ad1,Ad2"] [--hoparlor]
+                         [--duzelt [--llm] [--terimler "T1,T2"] [--davet dosya]]
 """
 import argparse
 import contextlib
@@ -27,9 +34,9 @@ import datetime as dt
 import importlib
 import json
 import os
+import re
 import sys
 import tempfile
-import time
 import types
 import wave
 
@@ -60,19 +67,6 @@ class SanalSaat:
         self.t = 0.0
 
 
-class SahteZaman:
-    """`time` modulu yerine: time() sanal saati verir, gerisi (sleep, perf_counter...) gercek modulden gelir."""
-
-    def __init__(self, saat):
-        self._saat = saat
-
-    def time(self):
-        return self._saat.t
-
-    def __getattr__(self, ad):
-        return getattr(time, ad)
-
-
 def saat_kaymasi(klipler):
     """Kaydin yerel saat dilimi bu makineninkinden farkliysa (klip ts'si ile epoch'tan turetilen ts arasi saat
     farki) saniye cinsinden duzeltme; ayni dilimde 0."""
@@ -87,6 +81,45 @@ def saat_kaymasi(klipler):
     farklar.sort()
     f = farklar[len(farklar) // 2]
     return round(f / 3600) * 3600 if abs(f) > 1800 else 0
+
+
+# ---------------------------------------------------------------- sahte onerici (--duzelt, --llm yok)
+
+def mesaj_coz(mesajlar):
+    """duzelt.mesajlar() kullanici mesaji -> (terimler, adlar, [(satir id, metin)])."""
+    icerik = mesajlar[-1]["content"]
+    terim = re.search(r"^TERİMLER:\s*(.*)$", icerik, re.M)
+    ad = re.search(r"^ADLAR:\s*(.*)$", icerik, re.M)
+    liste = lambda m: [x.strip() for x in m.group(1).split(";") if x.strip() and x.strip() != "-"] if m else []
+    satirlar = re.findall(r"^\[(-?\d+)\]\s(.*)$", icerik.split("SATIRLAR:", 1)[-1], re.M)
+    return liste(terim), liste(ad), satirlar
+
+
+class SahteOneri:
+    """duzelt.duzelt(sor_fn=): AGRESIF sahte LLM. Her kelime icin terim/ad listesinde en yakin ogeyi (normalize uzaklik
+    <= 0.5, ayni degil) onerir; kelime onerilen ogeyle basliyorsa eki korur (Jira'ya), aksi halde eksiz yazar. Gercek
+    modelden cok daha cok yanlis oneri uretir: kapinin onleyemedigi zarar bu hatta gorulur. Her cagri (mesajlar, sema)."""
+    ESIK = 0.5
+
+    def __init__(self):
+        self.cagri = 0
+
+    def __call__(self, mesajlar, sema):
+        import duzelt
+        self.cagri += 1
+        terimler, adlar, satirlar = mesaj_coz(mesajlar)
+        liste = list(terimler) + [p for a in adlar for p in a.split() if len(p) >= 3]
+        oneriler = []
+        for sid, metin in satirlar:
+            for w in re.findall(r"[^\W\d_]{4,}", metin):
+                en = min(((duzelt.uzaklik(w, t), t) for t in liste if " " not in t), default=None)
+                if en is None or not 0 < en[0] <= self.ESIK or en[1].lower() == w.lower():
+                    continue
+                t = en[1]
+                yeni = t + "'" + w[len(t):] if w.lower().startswith(t.lower()) and len(w) > len(t) else t
+                neden = "ad" if t not in terimler else "terim"
+                oneriler.append({"satir": int(sid), "eski": w, "yeni": yeni, "neden": neden})
+        return {"oneriler": oneriler[:duzelt.EN_FAZLA_ONERI]}
 
 
 # ---------------------------------------------------------------- hat sozlesmesi
@@ -130,22 +163,18 @@ class MevcutHat(Hat):
         platform_destegi()
         import llm
         import motor as motor_mod
-        import sozluk as sozluk_mod
         import ses as ses_mod
         import yakalayici as yak_mod
+        import saat as saat_mod
         self._modul = (llm, motor_mod, yak_mod)
-        self._eski = (llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA, motor_mod.time, yak_mod.time)
+        self._eski = (llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA)
         self.saat = SanalSaat()
-        sahte = SahteZaman(self.saat)
-        motor_mod.time, yak_mod.time = sahte, sahte
+        self._saat_geri = saat_mod.sanal_kur(lambda: self.saat.t)   # simdi() sanal saat, duvar ofseti 0
         self.kayma = self.ayar.get("saat_kaymasi", 0)
-        sozluk_yolu = os.path.join(klasor, "sozluk.json")          # bos sozluk: yerel sozluk.json'a dokunulmaz
-        with open(sozluk_yolu, "w", encoding="utf-8") as f:
-            json.dump({"terimler": [], "aliaslar": {}}, f)
         self._satirlar = []                                        # (satir referansi, klip_no)
         self._aktif = None
         self.motor = motor_mod.Motor(os.path.join(klasor, "toplanti"), "Replay", dt.date.today(),
-                                     sozluk_mod.Sozluk(sozluk_yolu), [], "", duzelt=False, olay=self._olay,
+                                     None, [], "", duzelt=False, olay=self._olay,
                                      kaynak=self.ayar.get("kaynak", "ses"), ben=self.ayar.get("ben"))
         self.motor._isle = lambda veri, duzelt: None               # LLM yok: duzeltme/ozet atlanir
         self.motor.kulaklik = self.ayar.get("kulaklik")
@@ -192,8 +221,9 @@ class MevcutHat(Hat):
 
     def kapat(self):
         if getattr(self, "_eski", None):                          # baslat yarida kaldiysa da yamalar geri alinir
-            llm, motor_mod, yak_mod = self._modul
-            llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA, motor_mod.time, yak_mod.time = self._eski
+            llm = self._modul[0]
+            llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA = self._eski
+            self._saat_geri()
             self._eski = None
         with contextlib.suppress(Exception):
             self.motor.kapat()
@@ -215,33 +245,57 @@ class Faz1Hat(Hat):
         import llm
         import motor as motor_mod
         import ses as ses_mod
+        import saat as saat_mod
         self._modul = (llm, motor_mod, ses_mod)
-        self._eski = (llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA, motor_mod.time)
+        self._eski = (llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA)
         self.saat = SanalSaat()
-        motor_mod.time = SahteZaman(self.saat)
+        self._saat_geri = saat_mod.sanal_kur(lambda: self.saat.t)   # simdi() sanal saat, duvar ofseti 0
         self._kayit = {}                                           # klip no -> klipler.jsonl kaydi (yeniden kesme)
         self._kesilen = set()
         self._cocuk = {}                                           # parca klip_no -> ust klip_no
         self._bekleyen = []                                        # kontrol()'de yayilacak parca olaylari
         self._cocuk_no = self.COCUK_NO
         self._klasor = self.ayar.get("klasor")
-        sozluk = None
-        try:                                                       # bos sozluk: yerel sozluk.json / sozluk.txt'e dokunulmaz
-            import sozluk as sozluk_mod
-            yol = os.path.join(klasor, "sozluk.json")
-            with open(yol, "w", encoding="utf-8") as f:
-                json.dump({"terimler": [], "aliaslar": {}}, f)
-            sozluk = sozluk_mod.Sozluk(yol)
-        except ImportError:                                        # Faz 2: sozluk.py silinir
-            pass
-        self.motor = motor_mod.Motor(os.path.join(klasor, "toplanti"), "Replay", dt.date.today(), sozluk,
-                                     list(self.ayar.get("katilimcilar") or []), "", duzelt=False, kaynak="ses",
-                                     ben=self.ayar.get("ben"), esikler=self.ayar.get("esikler"))
-        self.motor._isle = lambda veri, duzelt: None               # LLM yok: duzeltme/ozet atlanir
+        # terimler=None: Motor toplanti klasorunde bos, ozel bir terim havuzu kurar (uygulamanin terimler/ dosyasina dokunulmaz)
+        duzelt = bool(self.ayar.get("duzelt"))
+        self.motor = motor_mod.Motor(os.path.join(klasor, "toplanti"), "Replay", dt.date.today(), None,
+                                     list(self.ayar.get("katilimcilar") or []), "", duzelt=duzelt, kaynak="ses",
+                                     ben=self.ayar.get("ben"), esikler=self.ayar.get("esikler"),
+                                     davet={"govde": self.ayar["davet"], "ekler": []} if self.ayar.get("davet") else None)
+        self.sahte_oneri = None
+        if duzelt:                                                 # parca kapaninca yalniz duzeltme (ozet saplanir)
+            self.motor._isle = self._isle_duzelt
+            if not self.ayar.get("llm"):
+                self.sahte_oneri = self.motor.duzelt_sor_fn = SahteOneri()
+            self.motor.terimler.ekle(self.motor.seri, list(self.ayar.get("terimler") or []), "elle")
+            self.motor.terimleri_hazirla()                         # davet metninden terimler
+        else:
+            self.motor._isle = lambda veri, duzelt: None           # LLM yok: duzeltme/ozet atlanir
         self.motor.yeniden_kes_fn = self._yeniden_kes
         self.servis = ses_mod.SesServisi("", olay_fn=self.motor.ses_olayi)
         if self.ayar.get("kulaklik") in (True, False):             # pasif tespit kaydedilmedi: elle (--hoparlor)
             self.motor.ses_olayi({"tur": "kulaklik", "durum": self.ayar["kulaklik"], "guven": 1.0})
+
+    def _isle_duzelt(self, veri, duzelt):
+        """Motor._isle yerine: yalniz terim/ad duzeltmesi (kapali oneri LLM'i ya da --llm gercek); ozet yok."""
+        if duzelt and veri["token"] >= self._modul[1].DUZELT_MIN_TOKEN:
+            with contextlib.suppress(Exception):
+                self.motor._duzelt_parca(veri)
+        with self.motor._iz_kilit:
+            self.motor.parca_yaz(veri)
+        return None
+
+    def duzelt_ozeti(self):
+        """duzelt_log.jsonl (kabul/red kaydi, satir metni yok) -> {"oneri", "kabul", "red": {sebep: sayi}} | None."""
+        kayitlar = olcum.jsonl_oku(os.path.join(self.motor.klasor, "duzelt_log.jsonl"))
+        if not self.ayar.get("duzelt"):
+            return None
+        red = {}
+        for k in kayitlar:
+            for r in k.get("red") or []:
+                red[r.get("sebep", "?")] = red.get(r.get("sebep", "?"), 0) + 1
+        return {"oneri": sum(k.get("oneri", 0) for k in kayitlar), "kabul": sum(len(k.get("kabul") or []) for k in kayitlar),
+                "red": dict(sorted(red.items())), "llm": "gercek" if self.ayar.get("llm") else "sahte"}
 
     def okuma_olayi(self, okuma):
         self.saat.t = okuma.get("bit_epoch") or okuma.get("bas_epoch") or self.saat.t
@@ -333,8 +387,9 @@ class Faz1Hat(Hat):
 
     def kapat(self):
         if getattr(self, "_eski", None):                          # baslat yarida kaldiysa da yamalar geri alinir
-            llm, motor_mod, _ = self._modul
-            llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA, motor_mod.time = self._eski
+            llm = self._modul[0]
+            llm.GUNLUK_FN, llm.UYARI_FN, llm.SON_HATA = self._eski
+            self._saat_geri()
             self._eski = None
         with contextlib.suppress(Exception):
             self.motor.kapat()
@@ -463,6 +518,7 @@ def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=
                 hat.klip(an, v, segmentler_al(v, klasor, stt))
             hat.kontrol(an)
         satirlar = hat.bitir()
+        duzelt_ozeti = hat.duzelt_ozeti() if hasattr(hat, "duzelt_ozeti") else None
     finally:
         hat.kapat()
     with open(os.path.join(cikti, "satirlar.jsonl"), "w", encoding="utf-8") as f:
@@ -471,9 +527,14 @@ def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=
     m = olcum.hesapla(klipler, olcum.gercek_oku(klasor), satirlar, ben=ben)
     m["replay"] = {"okuma": len(okumalar), "klip": len(klipler), "stt": stt is not None,
                    "hat": type(hat).__name__}
+    if duzelt_ozeti is not None:
+        m["replay"]["duzelt"] = duzelt_ozeti
     with open(os.path.join(cikti, "olcum.json"), "w", encoding="utf-8") as f:
         json.dump(m, f, ensure_ascii=False, indent=1)
     yazdir(olcum.ozet_metin(m))
+    if duzelt_ozeti is not None:
+        yazdir(f"Düzeltme önerisi ({duzelt_ozeti['llm']} LLM): {duzelt_ozeti['oneri']} öneri, {duzelt_ozeti['kabul']} kabul; "
+               f"red nedenleri: {duzelt_ozeti['red']}")
     yazdir(f"çıktı: {cikti}")
     return m, cikti
 
@@ -491,8 +552,20 @@ def main(argv=None):
     ap.add_argument("--katilimcilar", help="virgülle ayrılmış katılımcı adları (Outlook daveti gibi); yoksa ad ≥ 3 ayrı satırda "
                                            "görülünce kişi sayılır")
     ap.add_argument("--hoparlor", action="store_true", help="kulaklık yok: yankı kuralı (kulaklik=False)")
+    ap.add_argument("--duzelt", action="store_true", help="terim/ad düzeltmesini de çalıştır (varsayılan: sahte agresif "
+                                                          "önerici); çıktı: düzeltilen / bozulan kelime")
+    ap.add_argument("--llm", action="store_true", help="--duzelt ile gerçek LLM (config.json); yoksa sahte önerici")
+    ap.add_argument("--terimler", help="--duzelt için virgülle ayrılmış terimler (Whisper'ın bozduğu doğru yazımlar)")
+    ap.add_argument("--davet", help="--duzelt için davet metni dosyası (büyük harfli öbekler terim olur)")
     a = ap.parse_args(argv)
     ayar = {"kulaklik": False} if a.hoparlor else {}
+    if a.duzelt:
+        ayar.update(duzelt=True, llm=a.llm)
+        if a.terimler:
+            ayar["terimler"] = [t.strip() for t in a.terimler.split(",") if t.strip()]
+        if a.davet:
+            with open(a.davet, encoding="utf-8") as f:
+                ayar["davet"] = f.read()
     if a.katilimcilar:
         ayar["katilimcilar"] = [k.strip() for k in a.katilimcilar.split(",") if k.strip()]
     kos(a.klasor, hat_sinifi_yukle("eski" if a.eski else a.hat), stt_istemci() if a.stt else None, a.bas, a.bit, a.cikti,

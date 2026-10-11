@@ -109,9 +109,7 @@ QStatusBar { background: white; border-top: 1px solid #CCFBF1; color: #475569; }
 
 IKONLAR = {
     "canli":    '<circle cx="12" cy="12" r="4" fill="{c}"/><circle cx="12" cy="12" r="9" fill="none" stroke="{c}" stroke-width="2"/>',
-    "inceleme": '<path d="M4 17.5V20h2.5L17 9.5 14.5 7 4 17.5z" fill="{c}"/><path d="M15.5 6l2.5 2.5 1.5-1.5a1 1 0 000-1.4L18.4 4.5a1 1 0 00-1.4 0L15.5 6z" fill="{c}"/>',
     "not":      '<rect x="5" y="3" width="14" height="18" rx="2" fill="none" stroke="{c}" stroke-width="2"/><path d="M8 8h8M8 12h8M8 16h5" stroke="{c}" stroke-width="2" stroke-linecap="round"/>',
-    "sozluk":   '<path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2V5z" fill="none" stroke="{c}" stroke-width="2"/><path d="M4 19a2 2 0 012-2h13" fill="none" stroke="{c}" stroke-width="2"/>',
     "gecmis":   '<circle cx="12" cy="12" r="9" fill="none" stroke="{c}" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round"/>',
     "ayarlar":  '<circle cx="12" cy="12" r="3" fill="none" stroke="{c}" stroke-width="2"/>' + "".join(
                 f'<rect x="11" y="2" width="2" height="4" rx="1" fill="{{c}}" transform="rotate({a} 12 12)"/>' for a in range(0, 360, 45)),

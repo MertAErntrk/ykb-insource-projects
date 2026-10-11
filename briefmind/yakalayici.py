@@ -14,7 +14,8 @@ from collections import deque
 
 import uiautomation as auto
 
-from sozluk import normalize
+import saat                                # adima dayanikli zaman kaynagi (time.time yerine)
+from kelime import normalize
 
 SPI_SETSCREENREADER = 0x0047
 GRUP_ADLARI = ("canlı alt yazı", "live captions")
@@ -131,6 +132,7 @@ class Yakalayici:
         self.hazir = False
         self.hazir_zamani = None
         self.kayip_zamani = None
+        self._kayip_simdi = None                   # kayip_zamani'nin simdi epoch'u: kayip_saniye saat adimindan etkilenmez
         self.pencere_basligi = ""
         self.toplanti_adi = ""
         self.okuma_sureleri = deque(maxlen=10)     # A7: son okumalarin suresi (sn)
@@ -268,7 +270,7 @@ class Yakalayici:
             self.okuma_sureleri.append(time.perf_counter() - bas)
 
     def _oku(self):
-        bas_epoch = time.time()                    # UIA okumasi baslamadan once
+        bas_epoch = saat.simdi()                   # UIA okumasi baslamadan once
         gorunen = []
         try:
             if self.grup is None:
@@ -279,23 +281,23 @@ class Yakalayici:
                 if self.grup is None:
                     if self.hazir:
                         self.kayip_zamani = self.kayip_zamani or dt.datetime.now()
+                        self._kayip_simdi = self._kayip_simdi or saat.simdi()
                     self.hazir = False
-                    self._okuma_yayinla(bas_epoch, time.time(), False, [])
+                    self._okuma_yayinla(bas_epoch, saat.simdi(), False, [])
                     return []
-                self.hazir, self.kayip_zamani = True, None
+                self.hazir, self.kayip_zamani, self._kayip_simdi = True, None, None
                 self.hazir_zamani = self.hazir_zamani or dt.datetime.now()
             gorunen = self._ciftler()
         except Exception:
             self.grup = None
-            self._okuma_yayinla(bas_epoch, time.time(), False, [])
+            self._okuma_yayinla(bas_epoch, saat.simdi(), False, [])
             return []
-        bit_epoch = time.time()                    # okuma biter bitmez (yayim hesabindan once)
+        bit_epoch = saat.simdi()                   # okuma biter bitmez (yayim hesabindan once)
         self._okuma_yayinla(bas_epoch, bit_epoch, True, gorunen)
         if not gorunen:
             return []
         # satir zamani: okumanin ortasi (eskiden okuma bittikten sonraki an: yavas okumada kayardi)
-        orta = dt.datetime.fromtimestamp((bas_epoch + bit_epoch) / 2)
-        return self._isle(self._etiketle(gorunen), orta.strftime("%H:%M:%S"))
+        return self._isle(self._etiketle(gorunen), saat.ts((bas_epoch + bit_epoch) / 2))   # ekranda yerel saat
 
     # ---------- yayim karari (UIA'dan bagimsiz; testler dogrudan cagirir)
     def _isle(self, gorunen, simdi):
@@ -431,7 +433,7 @@ class Yakalayici:
         ama artik gorunmeyen ve adayin onek-uzantisi ya da >= BENZER_ORAN benzeri olan kayit. 'Bir onceki
         okumada gorulmus' sarti, panelden coktan kaymis eski bir cumleye benzeyen YENI satiri ayirir."""
         kim, ne, a = aday["kim"], aday["ne"], aday["a"]
-        simdi, bakilan, en, en_puan = time.time(), 0, None, 0.0
+        simdi, bakilan, en, en_puan = saat.simdi(), 0, None, 0.0
         for k in reversed(self._son_kayitlar):
             if simdi - k["zaman"] > GUNCELLEME_SN or bakilan >= GUNCELLEME_SATIR:
                 break
@@ -464,7 +466,7 @@ class Yakalayici:
             onceki, k["text"] = k["text"], ne
         else:
             self._no += 1
-            k = {"no": self._no, "ts": aday["ts"], "speaker": kim, "text": ne, "zaman": time.time()}
+            k = {"no": self._no, "ts": aday["ts"], "speaker": kim, "text": ne, "zaman": saat.simdi()}
             self._son_kayitlar.append(k)
         k["son_gorulme"] = self._okuma_no
         if aday["uzun"]:
@@ -512,7 +514,9 @@ class Yakalayici:
         """Altyazi grubu kayboldugundan beri gecen sure (0 = kayip degil)."""
         if self.kayip_zamani is None:
             return 0
-        return (dt.datetime.now() - self.kayip_zamani).total_seconds()
+        if self._kayip_simdi is not None:
+            return saat.simdi() - self._kayip_simdi
+        return (dt.datetime.now() - self.kayip_zamani).total_seconds()      # kayip_zamani elle atanmissa
 
     def bitir(self):
         """Son okumada bekleyen (kararlilik/canli) satirlar: toplanti bitti, beklemeden yayilir."""

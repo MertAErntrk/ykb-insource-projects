@@ -12,8 +12,8 @@ Teams canlı altyazısı (UI Automation) ─ okuma (epoch) ─► konuşmacı ar
         └─ konusmaci.py: klip [bas, bit] ile aralıkların ZAMAN kesişimi (metin eşlemesi yok); altyazı metni
            transkripte girmez. Karar gelene kadar satır "beklemede…", sonra "Ad", belirsizse "Ad?", "Bilinmeyen",
            "A → B" (sıralı devir; mümkünse klip ikiye kesilir), "A / B (aynı anda)"
-Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inceleme (şüpheli terimler)
-     ─► birleştirme ─► dayanak kontrolü (transkriptte olmayan madde düşer) ─► Markdown not
+Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, deterministik kapı karar verir)
+     ─► bölüm özeti (JSON) ─► birleştirme ─► dayanak kontrolü (transkriptte olmayan madde düşer) ─► Markdown not
      ─► Outlook taslağı (takvimdeki katılımcılara)
 ```
 
@@ -21,7 +21,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 
 | Dosya | Görev |
 |---|---|
-| `app.py` | PyQt5 masaüstü uygulaması (Canlı / İnceleme / Not / Sözlük / Geçmiş / Ayarlar) |
+| `app.py` | PyQt5 masaüstü uygulaması (Canlı / Not / Geçmiş / Ayarlar) |
 | `isler.py` | Arayüzü dondurmayan arka plan işleri (yakalama, not üretimi, yeniden özetleme, soru) |
 | `gorunum.py` | Tema (QSS), notun HTML görünümü, ikonlar |
 | `ayar.py` | `config.json` okuma/yazma |
@@ -33,9 +33,13 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 | `ses.py` | Ses yakalama (WASAPI loopback + mikrofon), VAD, STT istemcisi, tekrar/halüsinasyon filtreleri |
 | `yakalayici.py` | Teams altyazısını UI Automation ile okuma, toplantı adı, altyazıyı otomatik açma |
 | `outlook.py` | Takvimden toplantı eşleştirme, taslak e-posta, oturum kullanıcısı |
-| `sozluk.py` | Sözlük: alias uygulama, toplantı serisine göre terim kapsamı |
+| `terim.py` | Terim havuzu (`terimler/terimler.json`): davet, önceki notlar ve katılımcılardan aday; bağımsız kanıtla öğrenme, geri alma |
+| `duzelt.py` | Parça düzeltmesi: LLM yalnızca öneri verir, deterministik kapı (VE kuralı, ek uyumu, sayı/tarih sabit) karar verir; metin bayt bayt korunur |
+| `kelime.py` | Türkçe kelime yardımcıları (normalize, yaygın kelime listesi `veri/yaygin_kelimeler.txt`) |
+| `stt.py` | Whisper istemcisi, halüsinasyon puanı (`halusinasyon_puani`), tekrar temizleme |
+| `saat.py` | Adıma dayanıklı zaman kaynağı: duvar saati sıçrasa da ses ve altyazı zaman çizelgeleri kaymaz |
 | `toplanti.py` | Komut satırı arayüzü (başla / bitir / liste) |
-| `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, sözlük temizliği, LLM teşhisi, taşmış transkript temizliği) |
+| `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, terim aktarma ve geri alma, LLM teşhisi, taşmış transkript temizliği) |
 | `deploy/` | GPU'suz Whisper servisi için OpenShift manifestleri (CPU, faster-whisper) |
 
 ## Kurulum
@@ -43,7 +47,6 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 ```powershell
 pip install -r requirements.txt
 copy config.example.json config.json      # adresleri doldur
-copy sozluk.example.json sozluk.json
 python app.py
 ```
 
@@ -63,10 +66,11 @@ python app.py
 | `altyazi_yedek` | (varsayılan `false`) `true`: STT yokken Teams altyazı metni yedek olarak girer (`kaynak: altyazi-yedek`, şüpheli; notta "altyazıdan, düşük güven"; sahip/aksiyon üretmez). Ayarlar → "STT yokken Teams altyazı metnini yedek olarak nota al" |
 | `altyazi_goster` | (varsayılan `false`) Canlı ekranda Teams altyazısı da `[altyazı]` etiketiyle görünür; transkripte girmez |
 | `kesinti_kaydi` | (varsayılan `false`) STT yokken klipler toplantı klasörüne (`olcum/kesinti/`) yazılır, STT dönünce sırayla çözülür (`olcum_kaydi` açıkken zaten açık) |
-| `esikler` | (isteğe bağlı) Konuşmacı atama eşikleri, ör. `{"baskin": 0.6, "ikinci": 0.25, "kesin": 0.7, "erteleme_sn": 15}` (tam liste: `konusmaci.VARSAYILAN_ESIKLER`) |
+| `esikler` | (isteğe bağlı) Konuşmacı atama eşikleri, ör. `{"baskin": 0.6, "ikinci": 0.25, "kesin": 0.7, "erteleme_sn": 15}` (tam liste: `konusmaci.VARSAYILAN_ESIKLER`). Halüsinasyon eşikleri de burada: `hal_supheli` (varsayılan 0,5; satır nota girmez, Belirsizler'e düşer), `hal_at` (0,9; satır silinir) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
 | `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
-| `otomatik_not` | (varsayılan `true`) Toplantı bitince İnceleme beklenmez, not doğrudan üretilir. `false`: önce İnceleme sekmesi (eski akış). Ayarlar → "Toplantı bitince incelemeyi atla" |
+| `stt_ipucu` | (varsayılan `true`) Whisper'a prompt olarak katılımcı adları ve serinin en çok 20 terimi gider; düşük sesli kliplere gitmez. Ayarlar'dan açılıp kapatılır |
+| `stt_repetition_penalty` | (varsayılan boş) Boşken STT'ye gönderilmez; sayı (ör. `1.1`) yazılırsa `repetition_penalty` olarak gider. Deneme amaçlı |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
 | `not_sablonu` | `genel` / `haftalik` / `karar` / `birebir` / `calistay` (Ayarlar → Not şablonu) |
 | `saklama_gun` | Notu üretilmiş toplantıların transkripti bu kadar gün sonra silinir; `0` kapalı (Ayarlar → Transkript saklama süresi) |
@@ -88,7 +92,7 @@ Kurum içi sunucuların sertifikası kurumun kendi kök sertifikasıyla imzalıd
    `python tools\teshis.py` çıktısında da "TLS doğrulaması: açık" yazar. STT başka bir kökle imzalıysa
    iki sertifika aynı `.cer` dosyasına alt alta kopyalanabilir.
 
-Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
+Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`); `veri\` klasörü (yaygın kelime listesi) exe'ye eklenir.
 
 ## Kullanım
 
@@ -100,26 +104,36 @@ Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`).
    Kulaklıksız (hoparlör) kullanımda mikrofona giren karşı taraf sesi atılır. Altyazı 60 sn'den uzun okunamazsa
    "Konuşmacı bilgisi yok" şeridi çıkar. Parçalar arka planda özetlenir; kapanış, satırlarının konuşmacı kararını
    en fazla 20 sn bekler. Kısık gelen ses (tepe < 0,3) Whisper'a gitmeden yükseltilir.
-4. **Bitir** → not doğrudan üretilir (`otomatik_not`); Not sekmesindeki şeritte aşama ve geçen süre görünür
-   ("Parça 3/12 özetleniyor", "Özet paragrafı yazılıyor"…) → Outlook taslağı. Şüpheli terimler İnceleme
-   sekmesinde bilgi için durur: onaylayıp **Uygula ve notu üret** ile sözlüğe alınır ve not yeniden üretilir.
-   `otomatik_not` kapalıysa eski akış: İnceleme → **Uygula ve notu üret** → Not.
+4. **Bitir** → not doğrudan üretilir; onay istenmez. Not sekmesindeki şeritte aşama ve geçen süre görünür
+   ("Parça 3/12 özetleniyor", "Özet paragrafı yazılıyor"…) → Outlook taslağı. Kararsız kalınan kelimeler,
+   emin olunmayan konuşmacılar, şüpheli (halüsinasyon puanı yüksek) klipler ve özetleyicinin bozuk bıraktığı terimler
+   Not sekmesindeki **Belirsizler** panelinde salt okunur listelenir; `ts:HH:MM:SS` bağlantısı transkripti o ana açar.
+   Şüpheli klip nota girmez. Düzeltmeyi yeniden denemek için **Notu yeniden üret** düğmesi vardır.
 
 Ayarlar → **Kaydet** hemen geçerlidir; LLM adresi/modeli için uygulamayı yeniden başlatmak gerekmez. Açılışta ve
 Kaydet'ten sonra LLM sunucusu arka planda sorulur (model adı, bağlam penceresi); uyarılar Olaylar'a düşer.
 Ayarlar → **LLM sunucusunu test et** kısa bir sohbet denemesi yapar (süre, token/sn, cevap Türkçe mi). Ayrıntılı
 ölçüm: `python tools\llm_teshis.py --tam` ([Teşhis rehberi](docs/TESHIS_REHBERI.md#yeni-llm-sunucusu)). Bir
 parça özetlenemezse durum satırı "Not eksik" (turuncu) olur ve son LLM hatası gösterilir.
-Komut satırı: `python toplanti.py basla --inceleme-yok` (ya da `bitir <klasör> --inceleme-yok`) incelemeyi atlar.
+Komut satırı: `python toplanti.py basla` (ya da `bitir <klasör>`). Eski `--inceleme-yok` bayrağı kabul edilir, yok sayılır.
 
 Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplantılarımda her zaman alt yazıları göster*.
+
+## Terimler (otomatik, onaysız)
+
+- Terim havuzu `terimler/terimler.json` dosyasında, uygulamanın yanında tutulur (exe'de exe klasöründe); toplantı serisine göre ayrılır. Onay istenmez.
+- Adaylar davetten (başlık, gündem, davet metni, ek adları), aynı serinin önceki `not.md` dosyalarından ve katılımcı adlarından gelir. Terim ancak bağımsız kanıtla öğrenilir; düzeltilmiş metin ve LLM çıktısı kanıt sayılmaz.
+- Parça düzeltmesinde LLM yalnızca öneri verir; her öneri kelime sınırı, ek uyumu, sayı/tarih sabitliği ve en çok %30 değişim kapısından geçer. Yazım önerileri uygulanmaz; kelime Belirsizler'e düşer.
+- Yanlış öğrenilen bir terim için: `python tools\terim_geri_al.py "Terim"` (geçmiş: `--liste`). Geri alınan bir daha öğrenilmez.
+- Elle terim eklemek için `terimler\elle.txt`: satır başına `Terim` ya da `Terim | varyant1; varyant2` (`#` yorum). Bu dosya JSON'a yazılmaz.
+- Eski `sozluk.json` varsa `python tools\terim_aktar.py sozluk.json` ile terimleri taşınır (yedekli; alias'lar taşınmaz).
 
 ## Notla çalışma
 
 - **Kaynağa git:** Karar ve aksiyonların yanındaki `⏱10:12:03`'e tıklayınca transkript o anda açılır.
 - **Soru sor:** Not sekmesindeki kutuya "Test ortamı ne zaman hazır, kim söyledi?" gibi sorular yazılır; cevap yalnızca bu toplantının transkriptinden gelir.
 - **Ara:** Geçmiş sekmesinde tüm toplantıların transkript ve notlarında arama yapılır.
-- **Yeniden özetle:** Geçmiş sekmesinde bir toplantı seçilip basılır; **tüm** parçalar güncel sözlükle yeniden
+- **Yeniden özetle:** Geçmiş sekmesinde bir toplantı seçilip basılır; **tüm** parçalar güncel terim havuzuyla yeniden
   düzeltilip özetlenir ve yeni not üretilir (yarım kalmış kayıtlar için de). Eski not `not.md.yedek-YYYYMMDD-HHMM`
   olarak saklanır. Tek parça için: "Seçili parçayı yeniden özetle".
   Kayıtta **altyazı taşması** varsa (aynı satırlar yüzlerce kez; Geçmiş bilgi satırında "⚠ Altyazı taşması") önce
@@ -165,5 +179,5 @@ sekmesinden elle (**Run workflow**) tetiklenince Windows'ta exe derlenir ve `Bri
 - Ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir. Tek istisna kapalı gelen
   `olcum_kaydi` ayarıdır (yukarıdaki Ölçüm bölümü; yerel, repo dışı).
 - Embedding açıksa transkript pencereleri yalnızca kurum içi embedding servisine gönderilir; vektörler toplantı klasöründe (bilgisayarda) kalır, merkezi bir veritabanına yazılmaz.
-- Sözlük, `config.json` ve `toplantilar/` klasörü `.gitignore`'dadır; repoya girmez.
+- `config.json`, `toplantilar/`, `terimler/` (terim havuzu) ve eski `sozluk.json` `.gitignore`'dadır; repoya girmez.
 - Kurum içi adresler yer tutucudur; gerçek adresler yalnızca `config.json`'da durur.

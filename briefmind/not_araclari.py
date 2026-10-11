@@ -9,7 +9,7 @@ import os
 import re
 
 import motor as motor_mod
-from sozluk import normalize
+from kelime import normalize
 
 BILGILENDIRME = ("Bilgi: Bu toplantıda BriefMind ile not alınmaktadır. Ses kaydedilmez; konuşmalar kurum içi "
                  "sistemlerde metne çevrilip özetlenir ve not katılımcılarla paylaşılır. Not alınmasını "

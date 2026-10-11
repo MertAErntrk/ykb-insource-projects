@@ -1,4 +1,5 @@
 """Teams altyazisi: onceki satir sonradan duzeltilince ayni satirlar yeniden yayilmamali."""
+import saat as saat_mod
 import yakalayici
 
 
@@ -41,7 +42,7 @@ import types
 
 import pytest
 
-from sozluk import normalize
+from kelime import normalize
 
 KIM_A, KIM_B = "Ahmet Yılmaz", "Ayşe Demir"
 
@@ -89,9 +90,9 @@ def test_okuma_zamanlari_uia_okumasini_cevreler():
         return [(KIM_A, "IFRS dokuz raporunda PD kolonu string geliyor")]
 
     y._ciftler = yavas
-    once = time.time()
+    once = saat_mod.simdi()
     y.oku()
-    sonra = time.time()
+    sonra = saat_mod.simdi()
     o = y.okumalar[0]
     assert once <= o["bas_epoch"] and o["bit_epoch"] <= sonra
     assert o["bit_epoch"] - o["bas_epoch"] >= 0.05                          # bas okuma BASLAMADAN, bit bittikten sonra alinir
@@ -214,7 +215,7 @@ def test_ad_esigi_dolunca_konusmaci_sahte_devir_uretmez(monkeypatch, tohum):
                 n = len(kel) if t >= e + gecikme else max(1, int(len(kel) * (t - b - gecikme) / (e - b)))
                 panel += [kim, " ".join(kel[:n])]
         _sahte_uia(monkeypatch, panel[-12:])
-        monkeypatch.setattr(yakalayici.time, "time", lambda t=t: T + t)
+        monkeypatch.setattr(saat_mod, "simdi", lambda t=t: T + t)
         y.oku()
         kararlar += kon.kontrol(T + t)
         t += 0.6

@@ -382,7 +382,7 @@ def test_teshis_etiket_ve_sema_denetimi():
 def _sahte_boru_hatti_sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
     gorev = llm._gorev_adi(mesajlar)
     if gorev == "duzeltme":
-        return json.dumps({"duzeltmeler": [{"orijinal": "jandarma kaydı", "duzeltilmis": "Jira kaydı"}]}), "stop"
+        return json.dumps({"oneriler": []}), "stop"                 # duzelt.py cevabi: oneri yok
     if gorev in ("bolum", "liste"):
         return json.dumps({"ozet": "Ekip rapor ekranındaki gecikmeyi ve kampanya takvimini konuştu.",
                            "konular": ["Rapor gecikmesi"], "kararlar": ["Kampanya bir hafta ertelendi"],

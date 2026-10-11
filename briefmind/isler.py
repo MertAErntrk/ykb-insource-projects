@@ -34,16 +34,17 @@ def hata_logla(tb):
 
 class YakalamaIsi(QtCore.QThread):
     """Toplanti boyunca calisir: ses olaylari (SesServisi olay_fn) ve altyazi okumalari (Yakalayici okuma_fn) -> motor.
-    Bitince bekleyen onerileri yayar.
-    Her yolda (hata dahil) motor.bitir() bir kez cagrilir ve inceleme_hazir yayilir; hata ayrica hata sinyaliyle."""
+    Bitince salt-okunur belirsizler listesini yayar.
+    Her yolda (hata dahil) motor.bitir() bir kez cagrilir ve toplanti_bitti yayilir; hata ayrica hata sinyaliyle.
+    terimler: paylasilan terim.TerimHavuzu (None: toplantiya ozel havuz). Whisper prompt'u terim.prompt(seri, adlar)."""
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
-    inceleme_hazir = QtCore.pyqtSignal(list)
+    toplanti_bitti = QtCore.pyqtSignal(list)
     hata = QtCore.pyqtSignal(str)
 
-    def __init__(self, baslik, ctx, sozluk, duzelt, otobitir, ayar=None):
+    def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None):
         super().__init__()
-        self.baslik, self.ctx, self.sozluk, self.duzelt, self.otobitir = baslik, ctx, sozluk, duzelt, otobitir
+        self.baslik, self.ctx, self.terimler, self.duzelt, self.otobitir = baslik, ctx, terimler, duzelt, otobitir
         self.ayar = ayar or {}
         self.motor = None
         self.ses_servisi = None
@@ -54,15 +55,15 @@ class YakalamaIsi(QtCore.QThread):
         self._dur = True
 
     def run(self):
-        oneriler = []
+        belirsizler = []
         try:
             self._yakala()
         except Exception as e:
             hata_logla(traceback.format_exc())
             self._bildir(f"Yakalama hatası: {type(e).__name__}: {e}")
         finally:
-            oneriler = self._kapat()
-            self.inceleme_hazir.emit(oneriler)       # arayuz motoru baglar, Baslat'i acar, notu baslatir
+            belirsizler = self._kapat()
+            self.toplanti_bitti.emit(belirsizler)    # arayuz motoru baglar, Baslat'i acar, notu baslatir
 
     def _bildir(self, mesaj):
         """Hata: gunluge + hata sinyali (arayuz ana thread'de gosterir)."""
@@ -73,7 +74,7 @@ class YakalamaIsi(QtCore.QThread):
             pass
 
     def _kapat(self):
-        """Ses servisini durdurur, motor.bitir()'i EN FAZLA BIR KEZ cagirir -> oneriler (hata olursa [])."""
+        """Ses servisini durdurur, motor.bitir()'i EN FAZLA BIR KEZ cagirir -> belirsizler (hata olursa [])."""
         try:
             if self.ses_servisi:
                 self.durum.emit("Ses kuyruğu boşaltılıyor…")
@@ -93,6 +94,10 @@ class YakalamaIsi(QtCore.QThread):
             self._bildir(f"Parçalar tamamlanamadı: {type(e).__name__}: {e}")
             return []
 
+    def _ipucu(self, akis=None):
+        """Whisper prompt'u: katilimci adlari + serinin <=20 ilgili terimi (<=~380 karakter). Bos olabilir."""
+        return self.motor.terimler.prompt(self.motor.seri, list(self.motor.katilimcilar))
+
     def _stt_yok(self, neden):
         """Ses servisi kurulamadi/baslatilamadi: altyazi moduna DUSULMEZ; arayuz 'STT yok' durumunu gosterir."""
         self.olay.emit("log", f"✖ ses yakalama başlatılamadı: {neden} — transkript yazılamayacak "
@@ -110,27 +115,36 @@ class YakalamaIsi(QtCore.QThread):
             self.olay.emit("log", f"! kaynak '{self.ayar.get('kaynak')}' artık yok, ses kullanılıyor "
                                   "(altyazı metni yalnız 'altyazi_yedek' açıkken ve STT yokken girer)")
         katilimcilar = list(self.ctx.get("katilimcilar") or [])
-        self.motor = Motor(klasor, self.baslik, tarih, self.sozluk, katilimcilar,
-                           self.ctx.get("gundem", ""), duzelt=self.duzelt,
+        self.motor = Motor(klasor, self.baslik, tarih, self.terimler, katilimcilar,
+                           self.ctx.get("gundem", ""), duzelt=self.duzelt, davet=self.ctx.get("davet"),
                            olay=lambda t, v: self.olay.emit(t, v),
                            kaynak="ses", ben=outlook.ben_adi(self.ayar),   # ayar bossa Outlook/Windows tam adi
                            sablon=self.ayar.get("not_sablonu", "genel"),
                            esikler=self.ayar.get("esikler"),
                            altyazi_yedek=bool(self.ayar.get("altyazi_yedek", False)))
         self.olay.emit("log", f"Klasör: {klasor}")
+        try:                                              # davet + onceki not terimleri bu serinin havuzuna (prompt icin)
+            self.motor.terimleri_hazirla()
+        except Exception as e:
+            self.olay.emit("log", f"! davet terimleri alınamadı: {e!r}")
         olcum = bool(self.ayar.get("olcum_kaydi", False))
         try:
             import ses as ses_mod
             self.ses_servisi = ses_mod.SesServisi(
                 self.ayar.get("stt_url", ""),
-                ipucu_fn=lambda: (self.sozluk.metin(self.motor.seri) + "; " + ", ".join(self.motor.katilimcilar)),
+                ipucu_fn=self._ipucu,                           # terim.prompt(seri, adlar): ad + <=20 ilgili terim
                 mod="otomatik",
                 mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
                 olay=lambda t, v: self.olay.emit(t, v),
                 olay_fn=self.motor.ses_olayi,                   # C1: klip / bosluk / kulaklik -> motor
                 model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
                 proxy=self.ayar.get("stt_proxy", True),   # false: Windows proxy'sini atla (kopmalar icin)
-                verify=ayar_mod.tls_dogrulama(self.ayar))
+                verify=ayar_mod.tls_dogrulama(self.ayar),
+                esikler=self.ayar.get("esikler"),               # hal_* (halusinasyon puani), ipucu_rms
+                stt_ipucu=bool(self.ayar.get("stt_ipucu", True)),
+                stt_repetition_penalty=self.ayar.get("stt_repetition_penalty"))
+            # cizelge_fn verilmez: STT aninda altyazi henuz gelmemistir (gecikme L); cizelge kurali konusmaci karari
+            # gelince Motor tarafindan uygulanir (motor.cizelge_etkin)
             if olcum:
                 self.ses_servisi.olcum_kaydi_ac(klasor)       # olcum/klipler/*.wav + klipler.jsonl (kesinti diski dahil)
             elif self.ayar.get("kesinti_kaydi", False):
@@ -239,21 +253,18 @@ class YakalamaIsi(QtCore.QThread):
 
 
 class TamamlamaIsi(QtCore.QThread):
-    """Inceleme kararlarini uygular, notu uretir."""
+    """Notu uretir (toplanti bitince kullanici onayi beklenmez)."""
     olay = QtCore.pyqtSignal(str, object)
     bitti = QtCore.pyqtSignal(str)
     hata = QtCore.pyqtSignal(str)
 
-    def __init__(self, m, kararlar):
+    def __init__(self, m):
         super().__init__()
-        self.m, self.kararlar = m, kararlar
+        self.m = m
 
     def run(self):
         self.m._olay = lambda t, v: self.olay.emit(t, v)
         try:
-            n = self.m.kararlari_uygula(self.kararlar)
-            if n:
-                self.olay.emit("log", f"{n} parça güncellendi.")
             md = self.m.notu_uret()
             self.m.kapat()
         except Exception as e:
@@ -303,17 +314,16 @@ class SoruIsi(QtCore.QThread):
 
 class YenidenOzetlemeIsi(QtCore.QThread):
     """Gecmis -> 'Yeniden ozetle': kayitta altyazi tasmasi varsa once transkript temizlenir (motor.
-    transkript_temizle); var olan not.md yedeklenir, sozluk tum parcalara uygulanir, TUM parcalar yeniden
-    duzeltilip ozetlenir; otomatik_not ise yeni not dogrudan uretilir, degilse inceleme hazirlanir."""
+    transkript_temizle); var olan not.md yedeklenir, TUM parcalar yeniden duzeltilip ozetlenir (duzeltme yalniz
+    'raw'i olan satirlarda; terim kapisindan gecer) ve yeni not dogrudan uretilir."""
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
     bitti = QtCore.pyqtSignal(str)
-    inceleme_hazir = QtCore.pyqtSignal(list)
     hata = QtCore.pyqtSignal(str)
 
-    def __init__(self, klasor, sozluk, otomatik_not=True, duzelt=True, ben=None, sablon="genel"):
+    def __init__(self, klasor, terimler, duzelt=True, ben=None, sablon="genel"):
         super().__init__()
-        self.klasor, self.sozluk, self.otomatik_not = klasor, sozluk, otomatik_not
+        self.klasor, self.terimler = klasor, terimler
         self.duzelt, self.ben, self.sablon = duzelt, ben, sablon
         self.motor = None
 
@@ -327,7 +337,7 @@ class YenidenOzetlemeIsi(QtCore.QThread):
                 if t:
                     self.olay.emit("log", f"taşma temizlendi: {t['once']} → {t['sonra']} satır, "
                                           f"{t['parca_once']} → {t['parca_sonra']} parça (yedekler kayıt klasöründe)")
-            self.motor = Motor.yukle(self.klasor, self.sozluk, olay=lambda t, v: self.olay.emit(t, v),
+            self.motor = Motor.yukle(self.klasor, self.terimler, olay=lambda t, v: self.olay.emit(t, v),
                                      duzelt=self.duzelt, ben=self.ben, sablon=self.sablon)
             yedek = self.motor.not_yedekle()
             if yedek:
@@ -335,11 +345,7 @@ class YenidenOzetlemeIsi(QtCore.QThread):
             self.durum.emit("Parçalar yeniden özetleniyor…")
             n = self.motor.yeniden_ozetle()
             self.olay.emit("log", f"{n} parça yeniden özetlendi.")
-            oneriler = self.motor.bitir()
-            if not self.otomatik_not:
-                self.motor.kapat()
-                self.inceleme_hazir.emit(oneriler)
-                return
+            self.motor.bitir()                       # terim ogrenmesi + meta; belirsizler arayuzde motor.belirsizler()
             self.durum.emit("Not üretiliyor…")
             md = self.motor.notu_uret()
             self.motor.kapat()

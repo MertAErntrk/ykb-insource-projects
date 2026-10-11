@@ -1,15 +1,15 @@
 """
-toplanti.py — tek komut: yakala -> (arka planda duzelt + ozetle) -> bitiste inceleme -> not -> Outlook taslagi
+toplanti.py — tek komut: yakala -> (arka planda terim/ad duzeltmesi + ozetle) -> bitiste not -> Outlook taslagi
 
-  python toplanti.py basla [--baslik "..."] [--outlook] [--sessiz] [--duzeltme-yok] [--otobitir 180] [--inceleme-yok]
-      Baslik verilmezse Outlook takviminden aktif toplanti alinir (katilimcilar + gundem de).
+  python toplanti.py basla [--baslik "..."] [--outlook] [--sessiz] [--duzeltme-yok] [--otobitir 180]
+      Baslik verilmezse Outlook takviminden aktif toplanti alinir (katilimcilar + gundem + davet terimleri de).
       Teams'te altyazi grubu gorunene kadar bekler, gorununce yakalamaya baslar. Metin sesten (STT), konusmaci
       altyazinin zamanindan gelir; Teams altyazi metni transkripte girmez.
       Altyazi grubu --otobitir saniye boyunca kaybolursa (toplantidan cikildi) kendiliginden bitirir;
-      Ctrl+C de bitirir. Bitiste supheli terimler konsolda sorulur, sonra not uretilir.
-      --inceleme-yok: konsol incelemesi atlanir, not dogrudan uretilir (oneriler oneriler.json'da kalir).
-  python toplanti.py bitir toplantilar\\2026-09-14_modeldev-haftalik [--outlook] [--inceleme-yok]
-      Yarim kalmis toplantiyi diskten tamamlar (inceleme dahil).
+      Ctrl+C de bitirir. Bitiste kullanici onayi sorulmaz: belirsiz kelime/konusmaci ozeti yazilir, not uretilir.
+      (--inceleme-yok eski bayragi kabul edilir ve yok sayilir: inceleme akisi kaldirildi.)
+  python toplanti.py bitir toplantilar\\2026-09-14_modeldev-haftalik [--outlook]
+      Yarim kalmis toplantiyi diskten tamamlar (not uretimi dahil).
   python toplanti.py liste
 """
 import argparse
@@ -23,8 +23,8 @@ import ayar as ayar_mod
 import llm
 import motor as motor_mod
 import outlook
+import terim as terim_mod
 from motor import Motor
-from sozluk import Sozluk
 from yakalayici import Yakalayici, ekran_okuyucu
 
 DURUM_ARALIK = 60
@@ -47,65 +47,28 @@ def olay(tip, v):
                   f"{v['duzeltme']} düzeltme", flush=True)
         else:
             print(f"✖ parça {v['sira']} özetlenemedi (bitişte tekrar denenecek)", flush=True)
-    elif tip == "oneri":
-        print(f"   ? öneri #{v['id']}: '{v['yanlis']}' → '{v['oneri'] or '?'}'", flush=True)
 
 
 olay.sessiz = False
 
 
-# ---------- inceleme ----------
+# ---------- bitis ----------
 
-def konsol_inceleme(oneriler):
-    """Supheli terimleri tek tek sorar. Dondurur {id: dogru | None}."""
-    kararlar = {}
-    if not oneriler:
-        print("İnceleme: şüpheli terim yok.")
-        return kararlar
-    print(f"\n=== İnceleme: {len(oneriler)} şüpheli terim ===")
-    print("Enter = öneriyi onayla | d = kendin yaz | y = yoksay | h = kalanların hepsini onayla | g = kalanları geç\n")
-    toplu = None
-    for n, o in enumerate(oneriler, 1):
-        if toplu == "onayla" and o["oneri"]:
-            kararlar[o["id"]] = o["oneri"]
-            continue
-        if toplu == "gec":
-            continue
-        print(f"[{n}/{len(oneriler)}] parça {o['parca']} | '{o['yanlis']}' → '{o['oneri'] or '?'}'")
-        if o["baglam"]:
-            print(f"      bağlam: {o['baglam']}")
-        try:
-            c = input("      > ").strip()
-        except (EOFError, KeyboardInterrupt):
-            c = "g"
-        if c == "" and o["oneri"]:
-            kararlar[o["id"]] = o["oneri"]
-        elif c in ("", "y"):
-            kararlar[o["id"]] = None
-        elif c == "d":
-            d = input("      doğru yazım: ").strip()
-            kararlar[o["id"]] = d or None
-        elif c == "h":
-            toplu = "onayla"
-            kararlar[o["id"]] = o["oneri"] or None
-        elif c == "g":
-            toplu = "gec"
-        else:
-            kararlar[o["id"]] = c          # dogrudan yazilan metin = duzeltme
-    return kararlar
+def belirsiz_ozeti(belirsizler):
+    """Salt-okunur bilgi (onay sorulmaz): tur basina sayi."""
+    if not belirsizler:
+        return "Belirsiz kelime/konuşmacı yok."
+    sayac = {}
+    for b in belirsizler:
+        sayac[b.get("tur")] = sayac.get(b.get("tur"), 0) + 1
+    ad = {"kelime": "belirsiz kelime", "konusmaci": "emin olunmayan konuşmacı satırı", "supheli": "şüpheli klip (nota girmez)",
+          "terim": "bozuk duyulan terim"}
+    return "Belirsizler: " + ", ".join(f"{n} {ad.get(t, t)}" for t, n in sorted(sayac.items(), key=lambda x: str(x[0])))
 
 
-def tamamla(m, a_outlook, alicilar=None, inceleme=True):
-    oneriler = m.bitir()
-    if inceleme:
-        kararlar = konsol_inceleme(oneriler)
-    else:
-        kararlar = {}
-        if oneriler:
-            print(f"İnceleme atlandı: {len(oneriler)} şüpheli terim oneriler.json'da bekliyor.")
-    yeniden = m.kararlari_uygula(kararlar)
-    if yeniden:
-        print(f"{yeniden} parça güncellendi.")
+def tamamla(m, a_outlook, alicilar=None):
+    belirsizler = m.bitir()
+    print(belirsiz_ozeti(belirsizler))
     not_md = m.notu_uret()
     m.kapat()
     print("\n" + not_md + f"\n\nKaydedildi: {os.path.join(m.klasor, 'not.md')}")
@@ -123,10 +86,12 @@ def ses_servisi_kur(m, ayar, klasor):
         import ses as ses_mod
         servis = ses_mod.SesServisi(
             ayar.get("stt_url", ""),
-            ipucu_fn=lambda: (m.sozluk.metin(m.seri) + "; " + ", ".join(m.katilimcilar)),
+            ipucu_fn=lambda akis=None: m.terimler.prompt(m.seri, list(m.katilimcilar)),   # ad + <=20 ilgili terim
             mod="otomatik", mik_cihaz=ayar.get("mikrofon_cihaz"), olay=olay, olay_fn=m.ses_olayi,
             model=ayar.get("stt_model", "whisper"), api_key=ayar.get("stt_key", ""),
-            proxy=ayar.get("stt_proxy", True), verify=ayar_mod.tls_dogrulama(ayar))
+            proxy=ayar.get("stt_proxy", True), verify=ayar_mod.tls_dogrulama(ayar),
+            esikler=ayar.get("esikler"), stt_ipucu=bool(ayar.get("stt_ipucu", True)),
+            stt_repetition_penalty=ayar.get("stt_repetition_penalty"))
         if ayar.get("olcum_kaydi", False):
             servis.olcum_kaydi_ac(klasor)
         elif ayar.get("kesinti_kaydi", False):
@@ -157,9 +122,13 @@ def komut_basla(a):
         print(f"Outlook: '{ctx['baslik']}' — {len(ctx['katilimcilar'])} katılımcı, gündem {'var' if ctx.get('gundem') else 'yok'}")
     klasor = motor_mod.yeni_klasor(baslik, tarih)
     katilimcilar = list(ctx.get("katilimcilar") or [])
-    m = Motor(klasor, baslik, tarih, Sozluk(), katilimcilar, ctx.get("gundem", ""),
+    if getattr(a, "inceleme_yok", False):
+        print("! --inceleme-yok artık gereksiz: toplantı bitince kullanıcı onayı hiç sorulmuyor.")
+    m = Motor(klasor, baslik, tarih, terim_mod.TerimHavuzu(), katilimcilar, ctx.get("gundem", ""),
               duzelt=not a.duzeltme_yok, olay=olay, kaynak="ses", ben=outlook.ben_adi(ayar),
-              esikler=ayar.get("esikler"), altyazi_yedek=bool(ayar.get("altyazi_yedek", False)))
+              esikler=ayar.get("esikler"), altyazi_yedek=bool(ayar.get("altyazi_yedek", False)),
+              davet=ctx.get("davet"))
+    m.terimleri_hazirla()                        # davet + onceki not terimleri Whisper prompt'u icin havuza
     servis = ses_servisi_kur(m, ayar, klasor)
     y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=m.okuma_ekle)
     print(f"Klasör: {klasor}\nTeams'te altyazı bekleniyor (pencere arkada kalabilir, küçültme). Bitirmek için Ctrl+C.")
@@ -190,7 +159,7 @@ def komut_basla(a):
             if time.time() - son_durum > DURUM_ARALIK and basladi:
                 biten = sum(1 for i in m.isler if i.done())
                 print(f"— {m.parca_no} parça kapandı, {biten} işlendi, açık parça ~{m.mevcut_tok} token, "
-                      f"{len(m.bekleyen_oneriler())} öneri —")
+                      f"{len(m.tum_satirlar())} satır —")
                 son_durum = time.time()
             time.sleep(y.onerilen_aralik())      # A7: UIA okumasi yavassa aralik 1,2 sn'ye cikar
     except KeyboardInterrupt:
@@ -205,12 +174,14 @@ def komut_basla(a):
         m.yeniden_kes_fn = None                   # ses durdu: bitiste devir bolunmez ('A → B')
     for satir in y.bitir():
         m.altyazi_satiri(satir)
-    tamamla(m, a.outlook, ctx.get("katilimcilar"), inceleme=not a.inceleme_yok)
+    tamamla(m, a.outlook, ctx.get("katilimcilar"))
 
 
 def komut_bitir(a):
-    m = Motor.yukle(a.klasor, Sozluk(), olay=olay)
-    tamamla(m, a.outlook, m.katilimcilar, inceleme=not a.inceleme_yok)
+    if getattr(a, "inceleme_yok", False):
+        print("! --inceleme-yok artık gereksiz: toplantı bitince kullanıcı onayı hiç sorulmuyor.")
+    m = Motor.yukle(a.klasor, terim_mod.TerimHavuzu(), olay=olay)
+    tamamla(m, a.outlook, m.katilimcilar)
 
 
 def komut_liste(a):
@@ -240,12 +211,12 @@ def main():
     b.add_argument("--sessiz", action="store_true")
     b.add_argument("--duzeltme-yok", action="store_true", help="arka plan düzeltme geçişini kapat")
     b.add_argument("--otobitir", type=int, default=180, help="altyazı bu kadar sn kaybolunca bitir")
-    b.add_argument("--inceleme-yok", action="store_true", help="bitişte şüpheli terimleri sorma, notu doğrudan üret")
+    b.add_argument("--inceleme-yok", action="store_true", help="(eski bayrak, yok sayılır: inceleme akışı kaldırıldı)")
     b.set_defaults(f=komut_basla)
     bt = alt.add_parser("bitir")
     bt.add_argument("klasor")
     bt.add_argument("--outlook", action="store_true")
-    bt.add_argument("--inceleme-yok", action="store_true", help="şüpheli terimleri sorma, notu doğrudan üret")
+    bt.add_argument("--inceleme-yok", action="store_true", help="(eski bayrak, yok sayılır: inceleme akışı kaldırıldı)")
     bt.set_defaults(f=komut_bitir)
     alt.add_parser("liste").set_defaults(f=komut_liste)
     a = p.parse_args()

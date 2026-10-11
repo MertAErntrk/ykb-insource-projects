@@ -397,16 +397,6 @@ def hata_metni(e):
 
 GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
-DUZELT_SEMASI = {
-    "type": "object",
-    "properties": {
-        "duzeltmeler": {"type": "array", "items": {"type": "object", "properties": {
-            "orijinal": {"type": "string"}, "duzeltilmis": {"type": "string"}},
-            "required": ["orijinal", "duzeltilmis"]}},
-    },
-    "required": ["duzeltmeler"],
-}
-
 BOLUM_SEMASI = {
     "type": "object",
     "properties": {
@@ -423,14 +413,8 @@ BOLUM_SEMASI = {
     "required": ["ozet", "konular", "kararlar", "aksiyonlar", "acik_sorular", "belirsiz_terimler"],
 }
 
-DUZELT_SISTEM = (
-    "Aşağıdaki satırlar Teams'in OTOMATİK ALTYAZISINDAN geldi; kelimeler yanlış duyulmuş, terimler ve "
-    "kişi adları bozulmuş olabilir (örn. 'komplo tit' -> 'commit', 'jandarma kaydı' -> 'Jira kaydı', "
-    "'atay'da' -> 'Ata'da'). Görevin: sözlükteki terimlere ve katılımcı adlarına göre, ya da bağlamda "
-    "anlamsız duran ve sesçe yakın gerçek bir kelimesi olan yerleri bulmak. Satırları YENİDEN YAZMA; "
-    "yalnızca düzeltme listesi döndür: her maddede altyazıdaki TAM ifade (orijinal) ve doğrusu (duzeltilmis). "
-    "Emin olmadığını listeye alma. En fazla 25 madde. Yalnızca JSON döndür."
-)
+# duzeltme isteginin sistem mesaji duzelt.DUZELT_SISTEM'dedir (llm duzelt'i ice aktarmaz); _gorev_adi bu onekle tanir
+DUZELT_ONEK = "Aşağıdaki satırlar konuşmayı yazıya çeviren Whisper"
 
 TURKCE_KURAL = ("ÇIKTI DİLİ: Bütün alanları yalnızca TÜRKÇE yaz. Terimleri, ürün ve kişi adlarını olduğu gibi "
                 "bırak ama cümleleri asla İngilizce kurma.")
@@ -453,7 +437,7 @@ MAP_SISTEM = (
     "Şunları YAZMA: kendi anlama soruların (kim/ne olduğu belirsiz ad ve terimler 'belirsiz_terimler'e "
     "gider), transkriptten alıntı ya da parantez içi açıklama, aynı bölümde cevaplanan soru.\n"
     "- belirsiz_terimler: bozuk duyulduğunu düşündüğün kelime/terimler (transkriptteki yazımıyla).\n"
-    "Kurallar: emin olamadığın yeri olduğu gibi aktar ve sonuna (?) koy. Sözlük ve gündem yalnızca yazım "
+    "Kurallar: emin olamadığın yeri olduğu gibi aktar ve sonuna (?) koy. Terim listesi ve gündem yalnızca yazım "
     "ipucudur; oradan içerik üretme. Bölümde bir şey yoksa ilgili liste boş kalır, ozet 1 cümle olur.\n"
     + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
@@ -485,7 +469,7 @@ LISTE_SISTEM = (
     "Aksiyonun 'madde' alanını asla boş bırakma.\n"
     "- Açık sorularda aynı konudaki soruları tek soruda birleştir; birleştirilmiş kararlar ya da aksiyonlarla "
     "cevaplanan soruyu çıkar; toplam en fazla 8 açık soru.\n"
-    "- Yeni madde EKLEME; sözlük, gündem ya da genel bilgiden içerik üretme. İfadeleri kısaltabilirsin, anlamı "
+    "- Yeni madde EKLEME; terim listesi, gündem ya da genel bilgiden içerik üretme. İfadeleri kısaltabilirsin, anlamı "
     "değiştirme. [B..] etiketlerini çıktıya yazma. (?) işaretli belirsizlikleri koru.\n"
     + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
@@ -619,7 +603,7 @@ GUNLUK_FN = None          # motor ayarlar: her LLM cagrisinin istatistigi (iceri
 
 def _gorev_adi(mesajlar):
     sistem = mesajlar[0]["content"] if mesajlar else ""
-    for ad, sablon in (("duzeltme", DUZELT_SISTEM), ("bolum", MAP_SISTEM), ("liste", LISTE_SISTEM),
+    for ad, sablon in (("duzeltme", DUZELT_ONEK), ("bolum", MAP_SISTEM), ("liste", LISTE_SISTEM),
                        ("genel", GENEL_SISTEM), ("soru", SORU_SISTEM)):
         if sistem.startswith(sablon):
             return ad
@@ -810,42 +794,15 @@ def _json_tam(mesajlar, max_tokens, sema, temperature=0.2):
     return None
 
 
-def baglam_metni(baslik, tarih, konusmacilar, sozluk_metni, gundem=""):
+def baglam_metni(baslik, tarih, konusmacilar, terim_metni, gundem=""):
     m = (f"Toplantı: {baslik}\nTarih: {tarih.isoformat()} ({GUNLER[tarih.weekday()]})\n"
          f"Katılımcılar: {', '.join(konusmacilar) or '-'}\n"
-         f"Sözlük (doğru yazımlar): {sozluk_metni}")
+         f"Terimler (doğru yazımlar): {terim_metni}")
     if gundem:
         m += f"\nGündem/davet metni: {gundem[:800]}"
-    m += ("\nKural: Yalnızca bu toplantının konuşma metnini kullan. Sözlük ve gündem sadece yazım/ad ipucudur; "
+    m += ("\nKural: Yalnızca bu toplantının konuşma metnini kullan. Terim listesi ve gündem sadece yazım/ad ipucudur; "
           "metinde geçmeyen bir konuyu, terimi ya da kararı ekleme, başka toplantılardan bilgi varsayma.")
     return m
-
-
-# ---------- duzeltme ----------
-
-def satirlari_duzelt(satirlar, baglam):
-    """satirlar: ['Ad: cümle', ...]. Modelden yalnizca duzeltme listesi alir (kucuk cikti),
-    degisimleri metne kendisi uygular. Dondurur (duzeltilmis_satirlar, [(orijinal, duzeltilmis)])."""
-    mesajlar = [{"role": "system", "content": DUZELT_SISTEM},
-                {"role": "user", "content": f"{baglam}\n\nSatırlar:\n" + "\n".join(satirlar)}]
-    v = _json_sor(mesajlar, butce("duzeltme"), DUZELT_SEMASI, temperature=0.2, dusunme=False)
-    if not v:
-        return satirlar, []
-    duzeltmeler = []
-    for d in (v.get("duzeltmeler") or []):
-        if not isinstance(d, dict):
-            continue
-        o, y = _metin(d.get("orijinal")).strip(), _metin(d.get("duzeltilmis")).strip()
-        if o and y and o.lower() != y.lower() and len(o) >= 3:
-            duzeltmeler.append((o, y))
-    cikti = []
-    for satir in satirlar:
-        kim, _, ne = satir.partition(":")
-        for o, y in duzeltmeler:
-            # kelime sinirli: 'ata' -> 'Ata' duzeltmesi 'hatalar'in icini bozmasin
-            ne = re.sub(r"(?<!\w)" + re.escape(o) + r"(?!\w)", lambda _, y=y: y, ne, flags=re.IGNORECASE)
-        cikti.append(f"{kim}:{ne}")
-    return cikti, duzeltmeler
 
 
 # ---------- ozet ----------

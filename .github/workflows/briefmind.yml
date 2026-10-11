@@ -74,8 +74,9 @@ jobs:
             --collect-all uiautomation --collect-all soundcard --collect-all sounddevice --collect-all soundfile \
             --hidden-import win32com --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes \
             --hidden-import PyQt5.QtSvg \
+            --add-data "veri;veri" \
             app.py
-          cp config.example.json sozluk.example.json dist/BriefMind/
+          cp config.example.json dist/BriefMind/
           mkdir -p dist/BriefMind/toplantilar
       - uses: actions/upload-artifact@v4
         with:

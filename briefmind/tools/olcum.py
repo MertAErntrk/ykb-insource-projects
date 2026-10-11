@@ -9,6 +9,10 @@ Girdi (toplanti klasoru):
                         raw, kaynak}. --satirlar dosya.jsonl ile baska satir dosyasi (replay cikti) verilebilir.
   llm_log.jsonl         --token icin LLM kullanimi
 
+Duzeltme (Faz 2): satirda `raw` (Whisper) ve `text` (duzelt.py kapisindan gecmis) varsa m["duzeltme"] verir: degisen satir, kabul
+edilen duzeltme, belirsiz kelime ve zemin gercegine (etiket metni) gore kelime duzeyi duzeltilen (yanlis -> dogru) / bozulan
+(dogru -> yanlis; kapi hedefi 0) sayilari. Yalniz sayi; metin yok.
+
 Klip <-> satir eslemesi: satirda `klip_no` varsa dogrudan (Faz1 ekler). Yoksa (akis, ts) ile: satir ts'si klibin
 `tsler` listesinde (yoksa [ts, ts+sure] penceresinde) olan klipler aday; birden fazla aday varsa satir metninin
 klibin ham STT metniyle ortusmesi (sonra zaman yakinligi) belirler. SINIR: satirda akis yok, iki akis ayni saniyede
@@ -19,6 +23,7 @@ Kullanim:
   python tools/olcum.py toplantilar/<klasor> [--token] [--satirlar dosya.jsonl] [--ben ad] [--json cikti.json]
 """
 import argparse
+import difflib
 import json
 import os
 import re
@@ -127,6 +132,32 @@ def wer(ref_metin, hip_metin):
     """-> (hata_sayisi, referans_kelime_sayisi)"""
     ref, hip = kelimeler(ref_metin), kelimeler(hip_metin)
     return duzenleme_mesafesi(ref, hip), len(ref)
+
+
+def _dogru_konumlar(ref, hip):
+    """ref kelimelerinden hip'te dogru eslesenlerin konumlari (SequenceMatcher esleme bloklari)."""
+    sm = difflib.SequenceMatcher(None, ref, hip, autojunk=False)
+    konum = set()
+    for b in sm.get_matching_blocks():
+        konum.update(range(b.a, b.a + b.size))
+    return konum
+
+
+def kelime_etkisi(ref_metin, raw_metin, text_metin):
+    """LLM duzeltmesinin kelime duzeyi etkisi (Faz 2): zemin gercegine (ref) gore raw'da yanlis olup text'te dogru olan
+    kelime = duzeltilen; raw'da dogru olup text'te yanlis olan = bozulan (kapi hedefi 0). -> (duzeltilen, bozulan, ref_kelime)"""
+    ref = kelimeler(ref_metin)
+    if not ref:
+        return 0, 0, 0
+    iyi, kotu = kelime_etkisi_kelimeden(ref, kelimeler(raw_metin), kelimeler(text_metin))
+    return iyi, kotu, len(ref)
+
+
+def kelime_etkisi_kelimeden(ref, raw, text):
+    """kelime_etkisi, hazir kelime listeleriyle -> (duzeltilen, bozulan)."""
+    onceki = _dogru_konumlar(ref, raw)
+    sonra = _dogru_konumlar(ref, text)
+    return len(sonra - onceki), len(onceki - sonra)
 
 
 def _kapsama(satir_metni, klip_metni):
@@ -241,6 +272,23 @@ def hesapla(klipler, gercek, satirlar, ben=None):
             h2, n2 = wer(g["text"], raw)
             hata_ham, ref_ham = hata_ham + h2, ref_ham + n2
 
+    # LLM duzeltmesi (duzelt.py kapisi): satirda raw ve text varsa raw -> text degisimi zemin gercegine gore
+    duz_satir = duz_degisen = duz_iyi = duz_kotu = duz_ref = duz_kabul = duz_belirsiz = 0
+    for s in satirlar:
+        if isinstance(s.get("raw"), str) and isinstance(s.get("text"), str):
+            duz_satir += 1
+            duz_degisen += s["raw"] != s["text"]
+            duz_kabul += len(s.get("duzeltmeler") or [])
+            duz_belirsiz += len(s.get("belirsiz") or [])
+    for no, g in etiketli.items():
+        if g.get("halusinasyon") or not tr_normalize(g.get("text")) or not esl[no]:
+            continue
+        if not all(isinstance(s.get("raw"), str) for s in esl[no]):
+            continue
+        i, k_, n = kelime_etkisi(g["text"], " ".join(s["raw"] for s in esl[no]),
+                                 " ".join(s.get("text") or "" for s in esl[no]))
+        duz_iyi, duz_kotu, duz_ref = duz_iyi + i, duz_kotu + k_, duz_ref + n
+
     # SER-kesin / yanlis aynı anda
     kesin = yanlis = yanlis_ayni_anda = sirali_devir_klip = 0
     for no, g in etiketli.items():
@@ -280,6 +328,8 @@ def hesapla(klipler, gercek, satirlar, ben=None):
                 "whisper_ham_oran": _oran(hata_ham, ref_ham)},
         "ser_kesin": {"kesin_satir": kesin, "yanlis": yanlis, "oran": _oran(yanlis, kesin)},
         "yanlis_ayni_anda": {"satir": yanlis_ayni_anda, "sirali_devir_klip": sirali_devir_klip},
+        "duzeltme": {"satir": duz_satir, "degisen_satir": duz_degisen, "kabul": duz_kabul, "belirsiz_kelime": duz_belirsiz,
+                     "duzeltilen": duz_iyi, "bozulan": duz_kotu, "net": duz_iyi - duz_kotu, "referans_kelime": duz_ref},
         "halusinasyon": {"klip": len(hal_klip), "satir_cikaran": len(hal_cikti), "kesin_satir_cikaran": len(hal_kesin)},
         "eslesme": esl_say,
     }
@@ -335,6 +385,11 @@ def ozet_metin(m):
         f"Eşleme: {e['klip_no']} klip_no, {e['ts_tam']} ts-tam, {e['ts_pencere']} ts-pencere, "
         f"{e['belirsiz_aday']} çok-adaylı, {e['eslesmeyen']} eşleşmeyen",
     ]
+    d = m.get("duzeltme") or {}
+    if d.get("satir"):
+        satirlar.append(f"Düzeltme: {d['degisen_satir']}/{d['satir']} satır değişti, {d['kabul']} kabul, "
+                        f"{d['belirsiz_kelime']} belirsiz kelime; kelime: +{d['duzeltilen']} düzeldi, "
+                        f"-{d['bozulan']} bozuldu (net {d['net']:+d}, {d['referans_kelime']} referans kelime)")
     if "token" in m:
         t = m["token"]
         satirlar.append(f"Token: çıktı {t['cikti']['karakter_token']} kar/token ({t['cikti']['cagri']} çağrı); "

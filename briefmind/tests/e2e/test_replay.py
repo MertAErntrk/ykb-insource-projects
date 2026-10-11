@@ -166,3 +166,117 @@ def test_faz1_hat_cocuk_tekrar_muafiyeti_kapali_da_parcalar_gelir(tmp_path):
     satirlar = _satirlar(str(tmp_path / "c"))
     assert [s["speaker_ham"] for s in satirlar] == [KIM_A, KIM_B]
     assert [s["text"] for s in satirlar] == ["Bütçe tablosunu güncelledim.", "Test ortamı perşembe hazır."]
+
+
+# ---------------- Faz 2: --duzelt (sahte onerici ya da gercek LLM), duzeltilen / bozulan sayaclari ----------------
+
+GT_1 = "Kubernetes kümesine üç yeni düğüm ekleyeceğiz çünkü yük arttı."
+HAM_1 = "kubernetis kümesine üç yeni düğüm ekleyeceğiz çünkü yük arttı."
+GT_2 = "Komite toplantısı perşembe günü saat dörtte yapılacak."
+HAM_2 = "komite toplantısı perşembe günü saat dörtte yapılacak."
+
+
+def _kayit_duzelt(tmp_path):
+    k = str(tmp_path / "toplanti")
+    klipler = []
+    for no, (ts, ham) in enumerate((("10:00:10", HAM_1), ("10:00:30", HAM_2)), 1):
+        sn = int(ts[-2:])
+        klipler.append({"no": no, "akis": "loopback", "bas": T0 + sn, "bit": T0 + sn + 5.0, "sure": 5.0, "ts": ts,
+                        "tsler": [ts], "zarf": [0.05] * 50, "rms": 0.05, "raw": ham, "stt_sure": 0.5})
+    _yaz(os.path.join(k, "olcum", "klipler.jsonl"), klipler)
+    _yaz(os.path.join(k, "olcum", "gercek.jsonl"), [
+        {"klip_no": 1, "speaker": KIM_A, "cakisma": False, "halusinasyon": False, "text": GT_1},
+        {"klip_no": 2, "speaker": KIM_B, "cakisma": False, "halusinasyon": False, "text": GT_2}])
+    _yaz(os.path.join(k, "olcum", "okumalar.jsonl"), [
+        {"okuma_no": 1, "bas_epoch": T0 + 13.0, "bit_epoch": T0 + 13.2, "grup": True, "gorunen": [[KIM_A, "k0 k1 k2"]]},
+        {"okuma_no": 2, "bas_epoch": T0 + 33.0, "bit_epoch": T0 + 33.2, "grup": True, "gorunen": [[KIM_B, "k0 k1 k2"]]}])
+    return k
+
+
+def _duzelt_kos(tmp_path, monkeypatch, **ayar):
+    import motor
+    monkeypatch.setattr(motor, "DUZELT_MIN_TOKEN", 1)           # kucuk parca da duzeltme gecisine girer
+    k = _kayit_duzelt(tmp_path)
+    cikti = str(tmp_path / "c")
+    m, _ = replay.kos(k, cikti=cikti, ayar=dict({"duzelt": True, "katilimcilar": [KIM_A, KIM_B]}, **ayar),
+                      yazdir=lambda *a: None)
+    return m, _satirlar(cikti)
+
+
+def test_replay_duzelt_sahte_onerici_dogruyu_kabul_komiteyi_reddeder(tmp_path, monkeypatch):
+    m, satirlar = _duzelt_kos(tmp_path, monkeypatch, terimler=["Kubernetes", "commit"])
+    d = m["duzeltme"]
+    assert d["duzeltilen"] == 1 and d["bozulan"] == 0 and d["net"] == 1, d
+    assert d["degisen_satir"] == 1 and d["kabul"] == 1 and d["satir"] == 2
+    metinler = {s["klip_no"]: s["text"] for s in satirlar}
+    assert metinler[1] == GT_1 and metinler[2] == HAM_2        # komite -> commit YOK
+    z = m["replay"]["duzelt"]
+    assert z["llm"] == "sahte" and z["oneri"] >= 2 and z["kabul"] == 1 and sum(z["red"].values()) >= 1, z
+    assert m["wer"]["hata"] < m["wer"]["whisper_ham_hata"]
+
+
+def test_replay_duzelt_kapali_metin_degismez(tmp_path, monkeypatch):
+    import motor
+    monkeypatch.setattr(motor, "DUZELT_MIN_TOKEN", 1)
+    k = _kayit_duzelt(tmp_path)
+    m, _ = replay.kos(k, cikti=str(tmp_path / "c"), ayar={"katilimcilar": [KIM_A, KIM_B]}, yazdir=lambda *a: None)
+    assert m["duzeltme"]["degisen_satir"] == 0 and m["duzeltme"]["duzeltilen"] == 0 and "duzelt" not in m["replay"]
+
+
+def test_replay_duzelt_davet_metninden_terim(tmp_path, monkeypatch):
+    """--davet: metindeki ozel ad terim havuzuna girer (toplanti klasorune ozel havuz; uygulamanin terimler/ dosyasi degil)."""
+    _duzelt_kos(tmp_path, monkeypatch, davet="Mikroservisler için Jenkins pipeline planı görüşülecek.")
+    with open(str(tmp_path / "c" / "toplanti" / "terimler" / "terimler.json"), encoding="utf-8") as f:
+        terimler = [e["terim"] for e in json.load(f)["terimler"]]
+    assert "Jenkins" in terimler
+
+
+def test_replay_duzelt_agresif_sahte_onerici_zarar_veremez(tmp_path, monkeypatch):
+    """Terim listesinde komite'ye benzeyen 'commit' ve ad olarak 'Taslak' var; agresif onerici her yakin kelimeyi onerir."""
+    m, satirlar = _duzelt_kos(tmp_path, monkeypatch, terimler=["Kubernetes", "commit", "Komitesi", "Perşembe"])
+    assert m["duzeltme"]["bozulan"] == 0, m["duzeltme"]
+    assert {s["klip_no"]: s["text"] for s in satirlar}[2] == HAM_2
+
+
+def test_replay_duzelt_cli(tmp_path, monkeypatch, capsys):
+    import motor
+    monkeypatch.setattr(motor, "DUZELT_MIN_TOKEN", 1)
+    k = _kayit_duzelt(tmp_path)
+    assert replay.main([k, "--duzelt", "--terimler", "Kubernetes,commit", "--katilimcilar", f"{KIM_A},{KIM_B}",
+                        "--cikti", str(tmp_path / "c")]) == 0
+    cikti = capsys.readouterr().out
+    assert "Düzeltme:" in cikti and "+1 düzeldi" in cikti and "-0 bozuldu" in cikti and "sahte LLM" in cikti
+
+
+def test_replay_duzelt_gercek_llm_secenegi_sahte_onericiyi_baglamaz(tmp_path, monkeypatch):
+    """--llm: duzelt_sor_fn None (duzelt.duzelt gercek llm modulunu cagirir); burada llm.sor yamali bir sahtedir."""
+    import llm
+    gelen = []
+
+    def sahte_sor(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
+        gelen.append(mesajlar[0]["content"][:20])
+        return '{"oneriler": [{"satir": 1, "eski": "kubernetis", "yeni": "Kubernetes", "neden": "terim"}]}', "stop"
+    monkeypatch.setattr(llm, "sor", sahte_sor)
+    m, satirlar = _duzelt_kos(tmp_path, monkeypatch, terimler=["Kubernetes"], llm=True)
+    assert gelen and m["replay"]["duzelt"]["llm"] == "gercek"
+    assert m["duzeltme"]["bozulan"] == 0
+
+
+def test_olcum_kelime_etkisi():
+    import olcum
+    # raw'da yanlis -> text'te dogru: duzeltilen; raw'da dogru -> text'te yanlis: bozulan
+    assert olcum.kelime_etkisi("bugün kubernetes kümesi komite", "bugün kubernetis kümesi komite",
+                               "bugün Kubernetes kümesi komite") == (1, 0, 4)
+    assert olcum.kelime_etkisi("bugün kubernetes kümesi komite", "bugün kubernetes kümesi komite",
+                               "bugün kubernetes kümesi commit") == (0, 1, 4)
+    assert olcum.kelime_etkisi("a b c", "a b c", "a b c") == (0, 0, 3)
+    assert olcum.kelime_etkisi("", "x", "y") == (0, 0, 0)
+    # ekli biçim: Jenkins'e == jenkinse (tr_normalize apostrofu atar)
+    assert olcum.kelime_etkisi("Jenkins'e bak", "cenkinse bak", "Jenkins'e bak")[:2] == (1, 0)
+
+
+def test_olcum_cikti_metin_ve_ad_tasimaz_duzeltme_dahil(tmp_path, monkeypatch):
+    import json as j
+    m, _ = _duzelt_kos(tmp_path, monkeypatch, terimler=["Kubernetes", "commit"])
+    dump = j.dumps(m, ensure_ascii=False).lower()
+    assert "kubernetes" not in dump and "komite" not in dump and KIM_A.lower() not in dump

@@ -8,6 +8,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 import ses
 
@@ -381,7 +382,8 @@ def test_bir_klip_bir_olay_metin_birden_cok_cumle_icerir():
     s._calis()
     assert len(olaylar) == 1
     e = olaylar[0]
-    assert set(e) == {"tur", "klip_no", "akis", "bas", "bit", "sure", "text", "ts", "rms", "zarf", "ust_klip", "supheli"}
+    assert set(e) == {"tur", "klip_no", "akis", "bas", "bit", "sure", "text", "ts", "rms", "zarf", "ust_klip", "supheli",
+                    "hal_puani"}
     assert e["tur"] == "klip" and e["klip_no"] == 1 and e["akis"] == "loopback"
     assert e["text"] == "Raporu perşembeye yetiştirelim. Sonra toplantıyı kapatalım."
     assert e["bas"] == T0 + 10.0 and e["bit"] == T0 + 12.0 and abs(e["sure"] - 2.0) < 1e-9
@@ -882,3 +884,176 @@ def test_baslat_mod_cift_tek_kulaklik_olayi_yayar(monkeypatch):
     assert s.baslat() and s.kulaklik is True
     assert olaylar == [{"tur": "kulaklik", "durum": True, "guven": 1.0}]
     s.durdur()
+
+
+# ================================================================ Faz 2: anti-alias'li yeniden ornekleme, dar tekrar suzgeci
+
+def _ton(f, hiz, n, genlik=0.5):
+    return (genlik * np.sin(2 * np.pi * f * np.arange(n) / hiz)).astype("float32")
+
+
+def _bilesen(y, f, fs=ses.ORNEK):
+    """y'nin f Hz'deki genligi (tek frekans DFT; kenar etkisi icin bas/son kirpilir)."""
+    y = y[300:-300]
+    t = np.arange(len(y)) / fs
+    return float(abs(np.sum(y * np.exp(-2j * np.pi * f * t))) * 2 / len(y))
+
+
+def _interp_eski(x, hiz):
+    """Eski yol (np.interp, suzgecsiz): aliasing karsilastirmasi icin."""
+    hedef = np.arange(len(x) * ses.ORNEK // hiz) * (hiz / ses.ORNEK)
+    return np.interp(hedef, np.arange(len(x)), x).astype("float32")
+
+
+@pytest.mark.parametrize("hiz", [44100, 48000])
+def test_yeniden_ornekle_alias_enerjisi_yok_eskisi_vardi(hiz):
+    """10 kHz tonu 16 kHz'te 6 kHz'e katlanir; suzgecli yolda enerji ~yok, np.interp'te genligin buyuk kismi."""
+    x = _ton(10000, hiz, hiz * 2)
+    yeni = ses.yeniden_ornekle(x, hiz)
+    eski = _interp_eski(x, hiz)
+    assert _bilesen(eski, 6000) > 0.1                                   # sorun gercek: alias genligi ~0.2-0.5
+    assert _bilesen(yeni, 6000) < 0.5 * 1e-3                            # >= 60 dB bastirma
+    for f in (12000, 15000, 20000):                                     # baska stopband tonlari
+        al = abs(f - 16000 * round(f / 16000))
+        assert _bilesen(ses.yeniden_ornekle(_ton(f, hiz, hiz * 2), hiz), al) < 0.5 * 1e-3
+
+
+@pytest.mark.parametrize("hiz", [44100, 48000])
+def test_yeniden_ornekle_bant_ici_ton_korunur(hiz):
+    for f, alt in ((300, 0.97), (1000, 0.97), (3000, 0.97), (5000, 0.97), (6500, 0.85)):
+        y = ses.yeniden_ornekle(_ton(f, hiz, hiz * 2), hiz)
+        assert alt * 0.5 <= _bilesen(y, f) <= 1.03 * 0.5, (f, _bilesen(y, f))
+    assert len(y) == int(np.ceil(hiz * 2 * ses.ORNEK / hiz))
+
+
+def test_yeniden_ornekle_ayni_hizda_kopya():
+    x = _ton(500, 16000, 1000)
+    y = ses.yeniden_ornekle(x, 16000)
+    assert np.array_equal(x, y) and y is not x
+
+
+def test_akan_ornekleyici_bloklar_arasi_sureklilik_tek_seferle_ayni():
+    """Blok blok akan sonuc (gecikmesiz mod) tek seferlik sonucla birebir; blok sinirlarinda sicrama yok."""
+    rng = np.random.RandomState(3)
+    x = (0.3 * rng.randn(44100 * 2)).astype("float32")
+    tek = ses.yeniden_ornekle(x, 44100)
+    r = ses.YenidenOrnekleyici(44100, gecikme=False)
+    parcalar = [r.isle(x[i:i + 4410]) for i in range(0, len(x), 4410)] + [r.bitir()]
+    akan = np.concatenate(parcalar)[:len(tek)]
+    assert len(akan) == len(tek) and float(np.max(np.abs(akan - tek))) < 1e-5
+
+
+@pytest.mark.parametrize("hiz,blok", [(48000, 4800), (44100, 4410), (32000, 3200), (22050, 2205)])
+def test_mikrofon_modu_ilk_blok_tam_blok_uzunlugunda_ve_toplam_oran_dogru(hiz, blok):
+    r = ses.YenidenOrnekleyici(hiz)
+    x = _ton(440, hiz, blok * 40)
+    ciktilar = [r.isle(x[i:i + blok]) for i in range(0, len(x), blok)]
+    assert len(ciktilar[0]) == ses.BLOK
+    assert abs(sum(len(c) for c in ciktilar) - 40 * ses.BLOK) <= 1
+    y = np.concatenate(ciktilar)
+    # sabit kisa gecikme (H ornek) disinda sinus bozulmaz: ardisik fark siniri
+    assert float(np.max(np.abs(np.diff(y[200:])))) <= 0.5 * 2 * np.pi * 440 / ses.ORNEK * 1.05
+    assert r.H / hiz < 0.004                                            # gecikme < 4 ms
+
+
+def test_mikrofon_akisi_44khz_cihazda_alias_yok(monkeypatch):
+    """Gercek yol (_bloklar_mikrofon): 44.1 kHz cihaz, 10 kHz tonu; geri cagirma ham bloklari koyar, donusum akis ipinde."""
+    import sys
+    import types
+    hiz, blok = 44100, 4410
+    x = _ton(10000, hiz, blok * 12)
+
+    class Akis:
+        def __init__(self, samplerate, channels, dtype, blocksize, device, callback):
+            assert (samplerate, blocksize) == (hiz, blok)
+            self.cb = callback
+
+        def __enter__(self):
+            for i in range(12):
+                self.cb(x[i * blok:(i + 1) * blok].reshape(-1, 1), blok, None, None)
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    sahte = types.SimpleNamespace(InputStream=Akis, query_devices=lambda cihaz, tur: {"default_samplerate": float(hiz)})
+    monkeypatch.setitem(sys.modules, "sounddevice", sahte)
+    a = ses.AkisYakalayici("mikrofon", queue.Queue(), cihaz=3)
+    gen = a._bloklar_mikrofon()
+    bloklar = [next(gen) for _ in range(10)]
+    assert len(bloklar[0]) == ses.BLOK and all(b.dtype == np.float32 for b in bloklar)
+    y = np.concatenate(bloklar)
+    assert _bilesen(y, 6000) < 0.5 * 1e-3 and float(np.sqrt(np.mean(y[300:-300] ** 2))) < 1e-3
+
+
+def _sahte_resample_poly(olcek=1.0):
+    """scipy.signal.resample_poly'nin davranisi (h *= up, merkezlenmis, zero-pad) numpy ile; olcek!=1: bozuk arka uc."""
+    def resample_poly(x, up, down, window=None):
+        h = np.asarray(window, dtype=np.float64) * up * olcek
+        yari = (len(h) - 1) // 2
+        xu = np.zeros(len(x) * up)
+        xu[::up] = x
+        tam = np.convolve(xu, h)
+        n_cikis = int(np.ceil(len(x) * up / down))
+        return tam[yari:yari + len(xu)][::down][:n_cikis]
+    return resample_poly
+
+
+@pytest.mark.parametrize("hiz", [48000, 32000, 24000])
+def test_scipy_varsa_resample_poly_kullanilir_numpy_ile_ayni_sonuc(monkeypatch, hiz):
+    rng = np.random.RandomState(5)
+    x = (0.3 * rng.randn(hiz)).astype("float32")
+    numpy_r = ses.YenidenOrnekleyici(hiz, arka_uc="numpy")
+    assert numpy_r.arka_uc == "numpy"
+    monkeypatch.setattr(ses, "_scipy_resample_poly", lambda: _sahte_resample_poly())
+    scipy_r = ses.YenidenOrnekleyici(hiz)
+    assert scipy_r.arka_uc == "scipy"
+    blok = hiz // 10
+    a = np.concatenate([numpy_r.isle(x[i:i + blok]) for i in range(0, len(x), blok)])
+    b = np.concatenate([scipy_r.isle(x[i:i + blok]) for i in range(0, len(x), blok)])
+    assert len(a) == len(b) and float(np.max(np.abs(a - b))) < 5e-3
+
+
+def test_scipy_arka_ucu_beklenmedik_davranista_numpy_a_duser(monkeypatch):
+    monkeypatch.setattr(ses, "_scipy_resample_poly", lambda: _sahte_resample_poly(olcek=1.5))     # kazanc bozuk
+    assert ses.YenidenOrnekleyici(48000).arka_uc == "numpy"
+
+    def patlar(*a, **k):
+        raise ValueError("beklenmedik imza")
+    monkeypatch.setattr(ses, "_scipy_resample_poly", lambda: patlar)
+    assert ses.YenidenOrnekleyici(48000).arka_uc == "numpy"
+
+
+def test_scipy_kurulu_degilse_numpy(monkeypatch):
+    monkeypatch.setattr(ses, "_scipy_resample_poly", lambda: None)
+    assert ses.YenidenOrnekleyici(44100).arka_uc == "numpy"
+
+
+# --- dar tekrar suzgeci (SesServisi._tekrar_mi) ---
+
+def _tekrar_dizisi(metin, sureler, akis="loopback"):
+    s = ses.SesServisi("", olay_fn=lambda e: None)
+    return [s._tekrar_mi(dt.datetime.fromtimestamp(T0 + t), akis, metin) for t in sureler]
+
+
+def test_kisa_cevaplar_ve_iki_kelimelik_cumleler_hic_elenmez():
+    assert _tekrar_dizisi("Tamam, anladım.", [0, 5, 10, 15, 20]) == [False] * 5
+    assert _tekrar_dizisi("Evet.", [0, 1, 2, 3]) == [False] * 4
+    assert _tekrar_dizisi("Peki, tamam.", [0, 2, 4, 6]) == [False] * 4
+
+
+def test_ayni_uc_kelimelik_cumle_30sn_icinde_elenir_sonrasi_kalir():
+    assert _tekrar_dizisi("Raporu perşembeye yetiştirelim.", [0, 10]) == [False, True]
+    assert _tekrar_dizisi("Raporu perşembeye yetiştirelim.", [0, 45]) == [False, False]       # 30 sn'den uzak: gercek tekrar
+
+
+def test_ucuncu_tekrar_pencerede_elenir_farkli_akis_yakinligi_saymaz():
+    assert _tekrar_dizisi("Raporu perşembeye yetiştirelim.", [0, 100, 200]) == [False, False, True]
+    s = ses.SesServisi("", olay_fn=lambda e: None)
+    an = lambda t: dt.datetime.fromtimestamp(T0 + t)                                          # noqa: E731
+    assert s._tekrar_mi(an(0), "loopback", "Raporu perşembeye yetiştirelim.") is False
+    assert s._tekrar_mi(an(5), "mikrofon", "Raporu perşembeye yetiştirelim.") is False       # eko tekrar degil (konusmaci eler)
+
+
+def test_tekrar_penceresi_asildiktan_sonra_sayac_sifirlanir():
+    assert _tekrar_dizisi("Raporu perşembeye yetiştirelim.", [0, 100, ses.TEKRAR_PENCERE_SN + 500]) == [False] * 3
