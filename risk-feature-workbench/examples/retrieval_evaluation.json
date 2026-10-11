@@ -1,0 +1,117 @@
+{
+  "dataset": "synthetic-demo-v1",
+  "warning": "Yalnız sentetik retrieval kablo testi. Hash vektörleri Qwen değildir; banka doğruluk oranı değildir.",
+  "strategies": {
+    "bm25": {
+      "cases": 3,
+      "hit_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "details": [
+        {
+          "name": "FaizTuru",
+          "retrieved": [
+            "d6bd0035be3236aeb2045c54",
+            "1c32e1a14a2de0abddd7251f",
+            "7a0717adb3f290be13b9c702",
+            "8b3b17320a9cdf76857a7c59",
+            "4a0859cd3da096de3f41c91b"
+          ],
+          "first_expected_rank": 1
+        },
+        {
+          "name": "BeyanGelir",
+          "retrieved": [
+            "debed99d4b81b23d9a0d8b36",
+            "8b3b17320a9cdf76857a7c59",
+            "7a0717adb3f290be13b9c702",
+            "4a0859cd3da096de3f41c91b",
+            "1c32e1a14a2de0abddd7251f"
+          ],
+          "first_expected_rank": 1
+        },
+        {
+          "name": "RequestedLimit",
+          "retrieved": [
+            "4a0859cd3da096de3f41c91b",
+            "7a0717adb3f290be13b9c702"
+          ],
+          "first_expected_rank": 1
+        }
+      ]
+    },
+    "embedding": {
+      "cases": 3,
+      "hit_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "details": [
+        {
+          "name": "FaizTuru",
+          "retrieved": [
+            "d6bd0035be3236aeb2045c54",
+            "1c32e1a14a2de0abddd7251f",
+            "7a0717adb3f290be13b9c702",
+            "8b3b17320a9cdf76857a7c59",
+            "4a0859cd3da096de3f41c91b"
+          ],
+          "first_expected_rank": 1
+        },
+        {
+          "name": "BeyanGelir",
+          "retrieved": [
+            "debed99d4b81b23d9a0d8b36",
+            "8b3b17320a9cdf76857a7c59",
+            "7a0717adb3f290be13b9c702",
+            "4a0859cd3da096de3f41c91b",
+            "1c32e1a14a2de0abddd7251f"
+          ],
+          "first_expected_rank": 1
+        },
+        {
+          "name": "RequestedLimit",
+          "retrieved": [
+            "4a0859cd3da096de3f41c91b",
+            "7a0717adb3f290be13b9c702"
+          ],
+          "first_expected_rank": 1
+        }
+      ]
+    },
+    "hybrid": {
+      "cases": 3,
+      "hit_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "details": [
+        {
+          "name": "FaizTuru",
+          "retrieved": [
+            "d6bd0035be3236aeb2045c54",
+            "1c32e1a14a2de0abddd7251f",
+            "7a0717adb3f290be13b9c702",
+            "8b3b17320a9cdf76857a7c59",
+            "4a0859cd3da096de3f41c91b"
+          ],
+          "first_expected_rank": 1
+        },
+        {
+          "name": "BeyanGelir",
+          "retrieved": [
+            "debed99d4b81b23d9a0d8b36",
+            "8b3b17320a9cdf76857a7c59",
+            "7a0717adb3f290be13b9c702",
+            "4a0859cd3da096de3f41c91b",
+            "1c32e1a14a2de0abddd7251f"
+          ],
+          "first_expected_rank": 1
+        },
+        {
+          "name": "RequestedLimit",
+          "retrieved": [
+            "4a0859cd3da096de3f41c91b",
+            "7a0717adb3f290be13b9c702"
+          ],
+          "first_expected_rank": 1
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "mode": "real",
+  "allow_real_connections": false,
+  "oracle": {
+    "source_database": "",
+    "environment": "",
+    "container": "",
+    "schemas": [],
+    "user_env": "RISK_ORACLE_USER",
+    "password_env": "RISK_ORACLE_PASSWORD",
+    "dsn_env": "RISK_ORACLE_DSN",
+    "wallet_dir_env": "RISK_ORACLE_WALLET_DIR",
+    "wallet_password_env": "RISK_ORACLE_WALLET_PASSWORD",
+    "notes": "DSN veya host/port/service bilgilerini Oracle sürücüsünün DSN biçiminde ortam değişkenine girin; sırları bu dosyaya yazmayın."
+  },
+  "llm": {
+    "endpoint": "",
+    "allowed_hosts": [],
+    "contract": "",
+    "model": "",
+    "model_version": "",
+    "api_key_env": "RISK_LLM_API_KEY",
+    "timeout_seconds": 30,
+    "max_retries": 1,
+    "max_candidates": 8,
+    "max_chars": 1800,
+    "max_output_tokens": 1200,
+    "notes": "Kurumdan tam endpoint ve sözleşmeyi doğrulayın. openai_chat yalnız doğrulanınca seçilir. Model adı varsayılmamıştır."
+  },
+  "embedding": {
+    "endpoint": "",
+    "allowed_hosts": [],
+    "model": "",
+    "model_version": "",
+    "dimensions": 0,
+    "request_template": {},
+    "response_path": "",
+    "api_key_env": "RISK_EMBEDDING_API_KEY",
+    "timeout_seconds": 30,
+    "max_retries": 1,
+    "max_batch": 16,
+    "notes": "Yol, payload, response_path ve boyut gerçek API sözleşmesine göre doldurulur. OpenAI uyumluluğu varsayılmamıştır."
+  },
+  "retrieval": {
+    "limit": 8,
+    "expanded_limit": 24
+  },
+  "naming": {
+    "windows": {
+      "LM": "last_month",
+      "LW": "last_week",
+      "L2W": "last_2_weeks",
+      "L3M": "last_3_months"
+    }
+  },
+  "notes": "config.local.json adıyla kopyalayın. Gerçek mod ve bağlantı izni açıkça seçilmeden bağlantı kurulmaz. TLS doğrulaması kapatılmaz."
+}

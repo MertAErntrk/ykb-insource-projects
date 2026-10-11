@@ -1,0 +1,26 @@
+.venv/
+work/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.env
+.env.*
+!.env.example
+config.local.json
+*.local.json
+runtime/
+private/
+wallet/
+*.pem
+*.p12
+*.sso
+*.log
+# Gercek talep ve sonuc dosyalari yerel kalir; yalniz sentetik ornekler izlenir.
+*.xlsx
+*.xls
+*.xlsm
+!examples/**/*.xlsx
+!examples/*.xlsx
+!src/riskmatch/data/*.xlsx

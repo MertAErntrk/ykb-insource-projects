@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "version": "expert-reviewed-v1",
+  "review": {
+    "reviewer": "İş bilgisayarında onaylayan ekip/rolü girin",
+    "reviewed_at": "ISO-8601 onay zamanı",
+    "reference": "Onaylı iş tanımı veya doküman referansı"
+  },
+  "requests": {},
+  "catalog": {}
+}
