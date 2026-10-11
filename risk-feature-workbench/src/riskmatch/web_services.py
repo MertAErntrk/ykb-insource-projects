@@ -8,7 +8,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .adapters._http import _NoRedirect, post_json, render_template, response_path, validate_endpoint
-from .adapters.oracle import OracleAdapter, CONTEXT_SQL
+from .adapters.oracle import OracleAdapter, read_context, oracle_error
 from .adapters.qwen import LLMAdapter
 from .config import load_config
 from .errors import ConfigError, InputError, IntegrationError
@@ -124,18 +124,19 @@ def build_run(raw):
 def probe_oracle(raw):
     config,credentials=oracle_inputs(raw,probe=True)
     connection=OracleAdapter(config,credentials=credentials)._connect()
+    phase = "sorgu zaman aşımı ayarı"
     try:
         connection.call_timeout=30000
+        phase = "veritabanı bağlamı okuma"
         cursor=connection.cursor()
-        cursor.execute(CONTEXT_SQL)
-        context=cursor.fetchone()
-        if not context or not all(context):raise IntegrationError("Oracle veritabanı bağlamı okunamadı.")
+        db_name,container=read_context(cursor)
+        phase = "erişilebilir şemaları listeleme"
         cursor.execute("SELECT DISTINCT OWNER FROM ALL_TAB_COLUMNS WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','XDB') ORDER BY OWNER")
         rows=cursor.fetchmany(1001)
-        return {"ok":True,"db_name":str(context[0]),"container":str(context[1]),
+        return {"ok":True,"db_name":db_name,"container":container,
                 "schemas":[str(row[0]) for row in rows[:1000]],"truncated":len(rows)>1000}
     except IntegrationError:raise
-    except Exception:raise IntegrationError("Oracle bağlamı veya şema listesi okunamadı; katalog yetkilerini kontrol edin.") from None
+    except Exception as error:raise oracle_error(error, phase) from None
     finally:connection.close()
 
 
@@ -216,3 +217,31 @@ def validate_mapping(path,mapping):
     requests=read_requests(path,mapping)
     if len(requests)>2000:raise InputError("Bir analizde en fazla 2.000 değişken seçin; Excel'i bölerek çalıştırın.")
     return requests
+
+
+def automatic_mapping(path):
+    sheets=inspect_workbook(path)
+    result={s["name"]:{"header_row":s["header_row"],"columns":s["suggested"]}
+            for s in sheets if s["suggested"]["name"] and s["suggested"]["description"]}
+    if not result:raise InputError("Alan adı ve açıklama başlıkları tanınmadı. Sütun eşleştirmesini açıp seçin.")
+    return result
+
+
+def write_manual_request(path, values):
+    from openpyxl import Workbook
+    if not isinstance(values,list) or not 1<=len(values)<=100:
+        raise InputError("Ekrandan 1–100 değişken ekleyebilirsiniz. Daha fazlası için Excel kullanın.")
+    rows=[]
+    for index,value in enumerate(values,1):
+        if not isinstance(value,dict):raise InputError("Değişken satırı geçersiz.")
+        name=text(value.get("name"),str(index)+". değişkenin alan adı",True,256)
+        description=text(value.get("description"),str(index)+". değişkenin açıklaması",True,8000)
+        rows.append([name,description])
+    wb=Workbook();sheet=wb.active;sheet.title="Ekrandan eklenenler"
+    sheet.append(["Alan Adı","Açıklama"])
+    for row in rows:
+        sheet.append(row)
+        for cell in sheet[sheet.max_row]:cell.data_type="s"
+    path.parent.mkdir(parents=True,exist_ok=True)
+    wb.save(path);wb.close()
+    return {"Ekrandan eklenenler":{"header_row":1,"columns":{"name":1,"description":2}}}

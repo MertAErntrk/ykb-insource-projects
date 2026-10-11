@@ -1,4 +1,4 @@
-# Web sürümü doğrulaması — 0.2.0
+# Web sürümü doğrulaması — 0.3.0
 
 2026-10-11 tarihinde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 üzerinde doğrulandı. Kurum Oracle/Qwen servislerine bağlanılmadı; test bağlantıları kontrollü taklit adapter'lardır.
 
@@ -12,7 +12,9 @@
 
 ## Otomatik kontroller
 
-103 test: 85 semantik/Excel/adapter/retrieval/checkpoint kontrolü ve 18 web kontrolü.
+115 test, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile geçti. Önceki 103 kontrole ek olarak sabit DSN ile giriş, çoklu manuel değişken, çoklu şema, otomatik Excel eşlemesi, oturum ayrımı/süresi ve Oracle hata aşamaları doğrulandı.
+
+0.3.0 yeni çalışma bağımlılığı eklemez. Önceki web kurulumu üzerinde güncelleme yeterlidir. Verilen kurum adresleri kodda tanımlıdır; parola veya API anahtarı bu değerlere dahil değildir.
 
 | Alan | Kapsam |
 |---|---|
@@ -30,10 +32,12 @@
 
 Paketin gerçek web sunucusu localhost'ta HTTP 200 verdi. 1280 px masaüstü ve 390 px dar ekran düzeni görsel olarak kontrol edildi. Ayrı, repoya dahil olmayan test sunucusunda yalnız Oracle bağlantısı taklit edildi; gerçek web/pipeline kodu kullanıldı:
 
-- Oracle formu → bağlantı testi → container/şema listesi.
-- Beş sütunlu Excel yükleme → otomatik sütun eşleştirme → analiz ilerlemesi.
+- Yalnız kullanıcı adı/parola → erişilebilir şema açılır listesi → kapsam seçimi.
+- Ekrandan iki değişken ekleme, üçüncü satırı silme ve kalan iki değişkeni birlikte analiz etme.
+- Beş sütunlu Excel yükleme → otomatik sütun eşleştirme (düzenleme bölümü kapalı) → analiz ilerlemesi.
 - Sonuç tablosunda fiziksel kolon ile iş tanımı uyumunun ayrı görünmesi.
 - Detayda şema/tablo/kolon yolu, kolon ve tablo açıklaması, kaynak kanıtları.
+- Tarayıcı hata/uyarı kaydı boş; parola alanları form içinde; favicon mevcut. 390 px kontrolde yatay taşma yok.
 
 Bu tarayıcıda pointer otomasyonu bazı kontrolleri etkinleştirmedi; aynı kontroller klavyeyle doğrulandı. Uygulama içi tarayıcının indirme otomasyonu kendi aktarım hatasıyla kesildi. Rapor indirme HTTP uç noktası ve dönen XLSX içeriği otomatik testte başarıyla doğrulandı; bu, kurum tarayıcısında indirme testi yapıldığı anlamına gelmez.
 

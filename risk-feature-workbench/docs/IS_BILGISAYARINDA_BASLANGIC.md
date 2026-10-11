@@ -1,69 +1,69 @@
-# İş bilgisayarında web uygulamasını çalıştırma
+# İş bilgisayarında kullanım · 0.3.0
 
-Python 3.9.7 x64 kullanılır. Node.js, Tk veya masaüstü uygulama kurulumu gerekmez. Önceki kurulumu olan kullanıcı da web paketleri için setup.ps1 çalıştırmalıdır.
+Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Uygulama tarayıcıda çalışır. Demo seçeneği yoktur.
 
-## 1. Güncelleme ve kurulum
+## 1. Güncelle ve aç
 
-PowerShell'i `ykb-insource-projects\risk-feature-workbench` klasöründe açın:
+Önce uygulamanın açık PowerShell penceresinde **Ctrl+C** ile kapatın. `ykb-insource-projects\risk-feature-workbench` klasöründe:
 
 ```powershell
 git pull --ff-only
-$env:PIP_INDEX_URL = 'https://KURUM-ARTIFACTORY-ADRESI/api/pypi/REPO/simple'
-.\scripts\setup.ps1
 .\scripts\start.ps1
 ```
 
-İkinci satırdaki adresi kurumunuzda `pip install --index-url ...` için kullanılan gerçek adresle değiştirin. Aynı PowerShell oturumundaki bütün paket kurulumları bu aynayı kullanır. Mevcut PIP_INDEX_URL zaten doğruysa yeniden yazmanız gerekmez. Alternatif: `.\scripts\setup.ps1 -IndexUrl 'https://...'`.
+Önceki web sürümü kuruluysa tekrar paket kurmanız gerekmez. İlk kurulum veya eksik paket hatası için:
 
-Python otomatik bulunamazsa `.\scripts\setup.ps1 -Python 'C:\Python39\python.exe'` komutunda kendi Python yolunuzu belirtin. Eski `-Real` parametresi kabul edilir; artık her kurulum web + Oracle bağımlılıklarını yükler.
+```powershell
+.\scripts\setup.ps1 -IndexUrl 'https://sdlc.yapikredi.com.tr/artifactory/api/pypi/external-python/simple'
+.\scripts\start.ps1
+```
 
-Tarayıcı otomatik açılmazsa **http://127.0.0.1:8765** adresine gidin. PowerShell penceresini açık bırakın. Kapatmak için Ctrl+C. Adres yalnız kendi bilgisayarınızdan erişilir.
+Tarayıcı otomatik açılmazsa **http://127.0.0.1:8765** adresine gidin. PowerShell penceresini açık tutun. Eski ekran kalırsa tarayıcıda **Ctrl+F5** yapın. Python bulunamazsa setup komutuna `-Python 'C:\Python39\python.exe'` ekleyip gerçek Python yolunuzu kullanın.
 
-## 2. Oracle bilgileri nereye girilecek?
+## 2. Bağlan ve şemaları seç
 
-**Bağlantılar → Oracle veritabanı** bölümünü açın.
+1. Sayfanın üstündeki **EDWLIVE bağlantısı** alanına yalnız **Kullanıcı adı** ve **Parola** girin.
+2. **Bağlan ve şemaları getir** düğmesine basın.
+3. Açılan **Taranacak şemaları seçin** listesinden bir veya birden fazla şema işaretleyin. Arama kutusuyla listeyi süzebilirsiniz.
+4. **Seçimi tamamla** düğmesine basın. Seçili şemalar ekranda görünür.
 
-| Ekrandaki alan | Ne girilecek? |
-|---|---|
-| Bağlantı metni (DSN) | Kurum TNS bağlantısı. `ALIAS=(DESCRIPTION=...)` tamamını yapıştırabilirsiniz. `host:port/service_name` da kabul edilir. |
-| Kullanıcı adı | Oracle'a giriş yaptığınız kullanıcı. |
-| Parola | Aynı hesabın parolası. Sohbete veya Git'e yazmayın. |
-| Kaynak adı | Bağlantı testinden gelen veritabanı adı; sonuçlarda etiket olarak kullanılır. |
-| Ortam etiketi | Çalıştığınız ortamı tanımlayan etiket. |
-| Container | Bağlantı testinden otomatik gelir. Her analizde yeniden doğrulanır. |
-| Taranacak şemalar | Testin getirdiği listeden seçin veya virgülle yazın. İş alanınızla ilgili şemaları seçin. |
+DSN, sunucu, port, servis adı ve ortam uygulamada hazırdır. Ayar dosyası yüklemek, container veya şema adını elle yazmak gerekmez. Liste, bağlandığınız hesabın ALL_TAB_COLUMNS üzerinden görebildiği şemalardır; veritabanındaki bütün şemaların listesi olduğu varsayılmaz. Aynı analizde en fazla 30 şema seçilir.
 
-**Oracle bağlantısını dene** düğmesine basın. Başarılıysa veritabanı/container alanları dolar ve erişilebilir şemalar listelenir. Bu aşamada henüz Excel analizi yapılmaz.
+Parola sunucunun işlem belleğinde oturuma özel tutulur; tarayıcı çerezine, dosyaya veya rapora yazılmaz. **Bağlantıyı değiştir** oturumdaki parolayı siler. Bir saat kullanılmayan oturum sonraki istekte kapanır. Uygulamayı kapatmak bellekteki bağlantı bilgilerini temizler. Sayfa yenilenirse bağlantı durumunuz okunur; şemaları yeniden seçin.
 
-**Ayarları içe aktar** ile `.local.json` profilini yükleyebilirsiniz. **Ayarları indir** parola/API anahtarı içermeyen profil üretir. Bilgiler otomatik kalıcı kaydedilmez; sayfa yenilendiğinde yeniden profil yükleyin. Profili kurum bilgisayarınızda tutun.
+## 3. Ekrandan birden fazla değişken ekle
 
-## 3. Excel seçme
+**Ekrandan değişken ekle** seçeneğinde:
 
-**Değişken inceleme → Excel dosyasını seçin → Dosyayı oku**.
+1. İlk değişkenin **Alan / kolon adı** ve **Açıklama** bilgilerini girin.
+2. **+ Değişken ekle** ile istediğiniz kadar yeni satır açın (en fazla 100).
+3. İstemediğiniz satırı **Sil** ile kaldırın. En az bir satır kalır.
+4. **Değişkenleri ara** ile tüm satırları seçili şemalarda birlikte sorgulayın.
 
-Standart başlıklar: **Kategori | Alan Adı | Alan tipi | Açıklama | Halihazırda bildiriliyor mu**.
+Excel zorunlu değildir. Her satırın adı ve açıklaması zorunludur. Aynı analizde eklediğiniz tüm değişkenler ayrı ayrı sonuçlanır. Ad/açıklama bilgileri ile ayrı bir Excel raporu da üretilir.
 
-İlk 30 satırda başlık aranır. Farklı sütun adlarında karşılıkları açılır listeden seçin. **Alan adı** ve **Açıklama** zorunludur; diğerleri isteğe bağlıdır. İncelenecek sayfaları işaretleyin. Boş açıklama kanıt eksikliği yaratır; kesin anlam eşleştirmesi beklemeyin.
+## 4. Excel ile toplu ara
 
-Dosya `.xlsx`, en fazla 12 MB; sayfa başına 20.000 satır/300 sütun, inceleme başına 2.000 değişken. Görüş/hazırlama süresi varsa korunur. Kaynak dosyanın üzerine yazılmaz.
+1. **Excel ile toplu ara** seçeneğine geçin.
+2. `.xlsx` dosyanızı seçin. Dosya otomatik okunur; ikinci bir yükleme düğmesi yoktur.
+3. Standart başlıklar otomatik eşleştirilir:
+   **Kategori | Alan Adı | Alan tipi | Açıklama | Halihazırda bildiriliyor mu**.
+4. Gerekirse **Sayfa seçimini ve sütun eşleştirmesini düzenle** bölümünü açın. Farklı başlıklar için Alan adı ve Açıklama karşılıklarını seçin; incelenecek sayfaları işaretleyin.
+5. **Excel'deki değişkenleri ara** düğmesine basın.
 
-## 4. Gerçek inceleme ve sonuç
+Alan Adı ve Açıklama sütunları zorunludur; diğer alanlar isteğe bağlıdır. Başlıklar ilk 30 satırda aranır. Başlıkları tanınmayan sayfalar otomatik analize alınmaz; eşleştirme bölümü açılır ve seçim bekler. Dosya en fazla 12 MB, sayfa başına 20.000 satır/300 sütun ve analiz başına 2.000 değişken olabilir. Özgün dosyanın üzerine yazılmaz. Sekmeler arasında geçiş yaptığınızda elle girdikleriniz korunur.
 
-**İncelemeyi başlat** düğmesine basın. LLM desteği kapalı olsa da gerçek Oracle kataloğunda isim ve açıklama aranır.
+## 5. Sonuçları incele
 
-1. Değişkenin karşısında en güçlü adayın **şema.tablo.kolon** yolunu görün.
-2. **Fiziksel ad**, aynı isimli kolonun seçili kapsamda bulunup bulunmadığını anlatır.
-3. **İş tanımı uyumu** ayrı karardır. Aynı isim farklı anlam taşıyabilir; farklı isim doğru aday olabilir.
-4. **Detay**, alternatif adayların tam kaynak yolunu, kolon/tablo açıklamasını, gerekçesini ve kanıtını gösterir.
-5. **Excel sonucunu indir**, tüm adayları, kanıtları ve özgün girdileri içerir.
+Her değişkenin karşısında olası **şema.tablo.kolon** görünür. **Detay**, alternatif adayları, gerçek kolon/tablo açıklamalarını ve eşleşme gerekçelerini açar. **Excel sonucunu indir** tüm girdileri, adayları ve kanıtları ayrı rapora kaydeder.
 
-Kritik bilgi eksik sonucu, kolonun bulunmadığı anlamına gelmez; açıklama iş koşullarını doğrulamaya yetmiyor olabilir. Tamamlandı teknik işlem durumudur, bütün satırların onaylandığı anlamına gelmez.
+Fiziksel adın bulunması, iş tanımının aynı olduğunu tek başına kanıtlamaz. Benzer ad farklı anlam taşıyabilir. Arama skoru doğruluk yüzdesi değildir. Eksik metadata, bağlantı hatası veya 10.000 kolon sınırına ulaşılması durumunda tarama eksik gösterilir; “DB'de yok” sonucu verilmez. Sınır aşılırsa seçili şema sayısını azaltın.
 
-Katalog sınırı 10.000 kolondur. Aşılırsa şemaları daraltın. Eksik taramada yokluk doğrulanmaz. İnceleme sırasında sayfayı yenilemeyin. Tamamlanan raporlar `runtime/web/<iş-kimliği>/sonuclar.xlsx` altındadır. Webde yarım kalan işe devam henüz yoktur; yeni analiz başlatılır. CLI aynı state diziniyle checkpoint kullanabilir.
+İşlem sırasında sayfayı yenilemeyin. Tamamlanan raporlar `runtime/web/<iş-kimliği>/sonuclar.xlsx` altında kalır. Sonuçların aynı tarayıcı oturumuna ait olması gerekir. Müşteri kayıtları sorgulanmaz; yalnız katalog metadata'sı okunur.
 
-## 5. LLM ve embedding
+## 6. İsteğe bağlı LLM ve embedding
 
-**Bağlantılar → Model servisleri** bölümünde temel adresleri **Temel adres** alanına girin. Bunlar not olarak korunur; otomatik yol eklenip çağrı yapılmaz.
+**Bağlantılar → LLM ve embedding ayarlarını göster** bölümünü açın. Verdiğiniz iki kurum temel adresi hazır gelir. Tam çağrı yolu ve gerçek model kimliği yalnız temel adresten doğrulanamaz; servis sözleşmesini aşağıdaki alanlardan tamamlayın. Oracle araması için bu bölüm zorunlu değildir.
 
 Her servis için model ekibinden alınacak bilgiler:
 
@@ -87,16 +87,16 @@ Embedding sözleşme seçimi yalnız şablonu doldurur; URL'yi değiştirmez:
 
 Sonra inceleme sayfasında **LLM + embedding desteği** kutusunu açın. Bu seçenek Excel alan adı/açıklaması ile katalog metadata'sını seçilen kurum servislerine gönderir. Hata halinde dış servise geçilmez. TLS doğrulaması kapatılmaz.
 
-## 6. Sık hatalar
 
-- **PyPI / SSL WRONG_VERSION_NUMBER:** Artifactory adresini aynı terminalde PIP_INDEX_URL olarak tanımlayın. Yanlış proxy/TLS yolunu sertifika denetimini kapatarak çözmeyin.
-- **No matching distribution:** önce ağ/ayna hatasını kontrol edin. Sabit sürüm kurum aynasında yoksa paket ekibine iletin; hash kilidini rastgele değiştirmeyin.
-- **Oracle bağlantısı kurulamadı:** kurum ağı, DSN servis adı/port, kullanıcı/parola ve yetkileri kontrol edin. python-oracledb thin kullanılır; özel thick/client ihtiyacı varsa kurum desteği gerekir.
-- **Container uyuşmuyor:** bağlantı testini tekrarlayın, doğru ortamı doğrulayın.
-- **Şema listesi boş:** hesabın ALL_TAB_COLUMNS erişimi ilgili nesneleri göstermiyor olabilir.
-- **TLS/CA hatası:** model ayarlarında BT'nin sağladığı PEM dosyasının gerçek yolunu kullanın.
-- **Tam endpoint/model/sözleşme gerekli:** temel URL yetmez. Model desteğini kapatarak Oracle aramasını sürdürebilirsiniz.
-- **8765 portu dolu:** açık uygulamayı bulun veya `.\.venv\Scripts\python.exe -m riskmatch serve --port 8766` kullanın.
-- **PowerShell script politikası:** kurum politikasını değiştirmeden [alternatif komutları](WINDOWS.md) kullanın.
+## 7. Bağlantı hatası olursa
 
-Gerçek Excel, sonuç, profil, parola, anahtar ve kurum adreslerini açık GitHub reposuna eklemeyin. Gerçek Oracle/Qwen bağlantısı iş bilgisayarınızda sınanmalıdır.
+Hata mesajı artık hangi aşamanın başarısız olduğunu ve Oracle/driver kodunu gösterir: **oturum açma**, **veritabanı bağlamı okuma**, **erişilebilir şemaları listeleme**, **kolon ve açıklama kataloğu okuma** veya **anahtar kısıtları okuma**.
+
+- `ORA-01017`: kullanıcı/parola kontrolü.
+- `ORA-28000` / `ORA-28001`: hesap kilidi / parola süresi.
+- `ORA-00942` / `ORA-01031`: ilgili katalog görünümü ve erişim yetkisi kontrolü.
+- `DPY-3010` / `DPY-3015`: Oracle sunucusu veya parola doğrulayıcısının Thin sürücüyle uyumluluğu kontrolü.
+
+Ham hata metni parola veya bağlantı bilgisi içerebileceğinden gösterilmez. Destek için ekrandaki **aşama ve hata kodu** yeterlidir; parolanızı paylaşmayın. CON_NAME desteklemeyen eski bağlamlarda DB_NAME kullanılır. Yetki ve ağ hataları bu uyumluluk yoluyla gizlenmez.
+
+Kurum ağına ve gerçek kullanıcı hesabına geliştirme bilgisayarından erişilmedi. Bağlantının kurumda başarılı olduğu, yalnız iş bilgisayarındaki gerçek denemeyle doğrulanabilir.

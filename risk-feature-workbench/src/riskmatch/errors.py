@@ -4,6 +4,9 @@ class ConfigError(ValueError):
 class IntegrationError(RuntimeError):
     """Güvenli mesajla dış entegrasyon hatası."""
 
+class OracleOperationError(IntegrationError):
+    """Only a controlled phase, error code and guidance; never raw driver text."""
+
 class StaleIndexError(IntegrationError):
     """Katalog ve arama indeksi sürümleri farklı."""
 

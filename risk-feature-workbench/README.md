@@ -1,6 +1,6 @@
 # Risk Feature Workbench
 
-Excel'deki değişkenleri gerçek Oracle kataloğunda arayan **yerel web uygulaması**. Her satır için olası **şema, tablo, kolon, veritabanı açıklaması, alternatif adaylar ve gerekçeler** gösterilir. Aynı fiziksel adın varlığı ile iş tanımına uyum ayrı değerlendirilir. Sonuçlar Excel olarak indirilebilir.
+Ekrandan eklenen birden fazla değişkeni veya Excel sözlüğünü gerçek Oracle kataloğunda arayan **yerel web uygulaması**. Her satır için olası **şema, tablo, kolon, veritabanı açıklaması, alternatif adaylar ve gerekçeler** gösterilir. Aynı fiziksel adın varlığı ile iş tanımına uyum ayrı değerlendirilir. Sonuçlar Excel olarak indirilebilir.
 
 Uygulamada demo seçeneği yoktur. Graphify kurulmaz. Müşteri kayıtları sorgulanmaz; yalnız erişilebilir katalog metadata'sı okunur. Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Node.js, masaüstü GUI veya Tcl/Tk gerekmez.
 
@@ -11,7 +11,7 @@ Proje klasöründe:
 ```powershell
 git pull --ff-only
 # Kurumunuzdaki gerçek paket aynası adresini kullanın:
-$env:PIP_INDEX_URL = 'https://KURUM-ARTIFACTORY-ADRESI/api/pypi/REPO/simple'
+$env:PIP_INDEX_URL = 'https://sdlc.yapikredi.com.tr/artifactory/api/pypi/external-python/simple'
 .\scripts\setup.ps1
 .\scripts\start.ps1
 ```
@@ -22,11 +22,11 @@ Tarayıcıda **http://127.0.0.1:8765** açılır. PowerShell penceresi açık ka
 
 ## Kullanım
 
-1. **Bağlantılar** ekranında ayar profilinizi içe aktarın veya Oracle DSN, kullanıcı adı ve parolasını girin.
-2. **Oracle bağlantısını dene** ile kaynak/container ve erişilebilir şemaları alın. Taranacak şemaları seçin.
-3. **Değişken inceleme** ekranında kendi `.xlsx` dosyanızı seçip **Dosyayı oku** düğmesine basın. Sayfaları ve sütunları kontrol edin.
-4. **İncelemeyi başlat** ile gerçek katalogda arayın. **Detay** bütün adayların kaynak yolunu, açıklamasını ve kanıtlarını açar.
-5. **Excel sonucunu indir** ile kaynak dosyanızı koruyan ayrı rapor alın.
+1. **EDWLIVE bağlantısı** alanına yalnız kullanıcı adı ve parolayı girin. Kurum DSN'i uygulamada hazırdır.
+2. **Bağlan ve şemaları getir** sonrasında açılır listeden taranacak şemaları seçin.
+3. **Ekrandan değişken ekle** bölümünde alan adı/açıklama girin; **+ Değişken ekle** ile satırları çoğaltın. Alternatif olarak **Excel ile toplu ara** seçip dosyanızı yükleyin.
+4. Ekrandan eklenen değişkenler için **Değişkenleri ara**, Excel için **Excel'deki değişkenleri ara** düğmesine basın. Standart Excel başlıkları otomatik eşleştirilir; farklı başlıklar için eşleştirme bölümü açılır.
+5. **Detay** bütün adayların kaynak yolunu, açıklamasını ve kanıtlarını açar. **Excel sonucunu indir** ayrı rapor üretir.
 
 Standart başlıklar: `Kategori | Alan Adı | Alan tipi | Açıklama | Halihazırda bildiriliyor mu`. Yalnız **Alan Adı** ve **Açıklama** sütunları zorunludur; başka başlıklar ekrandan eşlenebilir. Görüş/hazırlama süresi varsa korunur, zorunlu değildir. Bildirim bilgisi kullanıcı beyanıdır, veritabanı kanıtı sayılmaz.
 
@@ -44,7 +44,7 @@ Bağlantı hatası veya katalog sınırı, veritabanında yok diye gösterilmez.
 
 ## Yerel veri ve geliştirme
 
-Parolalar/API anahtarları işlem belleğinde tutulur; indirilen `.local.json` profiline veya rapora kaydedilmez. Excel, rapor ve checkpoint bu bilgisayardaki `runtime/web/` dizinindedir. Gerçek dosyalar, profiller ve kurum sertifikaları Git dışında tutulur. Profil host/DSN içerebilir; kurum içinde saklayın.
+Parolalar/API anahtarları işlem belleğinde tutulur; tarayıcı çerezine veya rapora kaydedilmez. Oracle bağlantısı bir saat kullanılmadığında kapanır; Bağlantıyı değiştir oturumu temizler. Excel, rapor ve checkpoint bu bilgisayardaki `runtime/web/` dizinindedir. Gerçek dosyalar, profiller ve kurum sertifikaları Git dışında tutulur. Kurum bağlantı adresleri `src/riskmatch/deployment.py` içindedir; kullanıcı parolası ve servis anahtarı burada bulunmaz. Ayar profili yüklemek gerekmez.
 
 ```powershell
 .\scripts\test.ps1

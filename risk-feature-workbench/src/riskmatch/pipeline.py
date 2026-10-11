@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import load_config, signature_config
-from .errors import ConfigError, IntegrationError, StaleIndexError
+from .errors import ConfigError, IntegrationError, StaleIndexError, OracleOperationError
 from .excelio import read_requests, write_results
 
 def digest(value):
@@ -34,6 +34,8 @@ def _blank_result(req,snapshot):
 
 def _safe_error(error):
     # Never persist raw network, SQL, driver, credential or filesystem exception strings.
+    if isinstance(error,OracleOperationError):
+        return str(error)
     if isinstance(error,StaleIndexError):
         return "İndeks sürümü katalogla uyuşmuyor; yeniden indeksleme gerekli."
     if isinstance(error,ConfigError):

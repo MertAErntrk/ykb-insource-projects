@@ -16,7 +16,6 @@ test_oracle_read_only_inventory_and_bound_schema (test_adapters.AdapterTests) ..
 test_ids_persist_through_edit_of_prepared_copy (test_excelio.ExcelTests) ... ok
 test_preserves_all_values_sheets_order_and_neutralizes_formula (test_excelio.ExcelTests) ... ok
 test_unrecognized_sheet_and_formula_exposed (test_excelio.ExcelTests) ... ok
-test_worker_demo_and_error_paths_without_display (test_gui.GuiTests) ... ok
 test_changed_catalog_invalidates_resume_and_deleted_physical_column (test_pipeline.PipelineTests) ... ok
 test_checkpoint_recovers_after_interruption (test_pipeline.PipelineTests) ... ok
 test_embedding_timeout_never_becomes_not_found_and_resume_retries (test_pipeline.PipelineTests) ... ok
@@ -84,9 +83,39 @@ test_incompatible_keys_grain_reference_block (test_semantics.ProductionTests) ..
 test_production_candidate_with_verified_inputs (test_semantics.ProductionTests) ... ok
 test_unready_operand_blocks (test_semantics.ProductionTests) ... ok
 test_zero_without_null_blocks_production (test_semantics.ProductionTests) ... ok
+test_catalog_limit_prevents_absence_claim (test_web.WebTests) ... ok
+test_credentials_are_per_connection_not_global_environment (test_web.WebTests) ... ok
+test_csrf_and_cross_origin_rejected (test_web.WebTests) ... ok
+test_custom_headers_mapped_by_position (test_web.WebTests) ... ok
+test_dsn_alias_is_not_passed_to_driver (test_web.WebTests) ... ok
+test_embedding_probe_reads_dimension_and_root_response (test_web.WebTests) ... ok
+test_five_headers_auto_detect_and_optional_fields (test_web.WebTests) ... ok
+test_invalid_file_and_oversize_rejected (test_web.WebTests) ... ok
+test_live_pipeline_returns_source_and_download_without_secrets (test_web.WebTests) ... ok
+test_mapping_rejects_duplicate_or_missing_columns (test_web.WebTests) ... ok
+test_model_enabled_web_pipeline_uses_both_explicit_services (test_web.WebTests) ... ok
+test_models_require_explicit_contract (test_web.WebTests) ... ok
+test_oracle_failure_stays_incomplete (test_web.WebTests) ... ok
+test_oracle_probe_closes_and_finds_scope (test_web.WebTests) ... ok
+test_profile_omits_credentials_and_rejects_demo (test_web.WebTests) ... ok
+test_second_analysis_rejected_while_worker_active (test_web.WebTests) ... ok
+test_shell_real_only_and_security_headers (test_web.WebTests) ... ok
+test_upload_ownership_and_path_traversal (test_web.WebTests) ... ok
+test_context_privilege_error_is_not_hidden_by_fallback (test_web_workflow.OracleDiagnosticTests) ... ok
+test_legacy_context_falls_back_only_for_unsupported_parameter (test_web_workflow.OracleDiagnosticTests) ... ok
+test_schema_phase_has_its_own_code (test_web_workflow.OracleDiagnosticTests) ... ok
+test_connection_is_isolated_from_other_browser_session (test_web_workflow.WorkflowTests) ... ok
+test_login_uses_built_in_dsn_and_never_returns_password (test_web_workflow.WorkflowTests) ... ok
+test_logout_and_expiry_remove_credentials (test_web_workflow.WorkflowTests) ... ok
+test_manual_batch_returns_both_requests_and_sources (test_web_workflow.WorkflowTests) ... ok
+test_manual_batch_validates_every_row_and_limit (test_web_workflow.WorkflowTests) ... ok
+test_multiple_schemas_passed_to_scan_and_empty_scope_stays_incomplete (test_web_workflow.WorkflowTests) ... ok
+test_safe_error_code_survives_failed_scan_without_absence_claim (test_web_workflow.WorkflowTests) ... ok
+test_schema_selection_required_and_must_come_from_login (test_web_workflow.WorkflowTests) ... ok
+test_standard_excel_can_run_without_mapping_payload (test_web_workflow.WorkflowTests) ... ok
 
 ----------------------------------------------------------------------
-Ran 86 tests in 15.708s
+Ran 115 tests in 15.527s
 
 OK
 Yapılandırma biçimi doğrulandı. Ağ bağlantısı denenmedi.
