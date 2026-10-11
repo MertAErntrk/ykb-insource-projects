@@ -95,5 +95,6 @@
  "uzun_pencere": false,
  "ses_izi": false,
  "ses_izi_model": "",
- "ses_izi_esik": 0.75
+ "ses_izi_esik": 0.75,
+ "cihaz_otomatik": true
 }

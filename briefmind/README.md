@@ -31,6 +31,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 | `rag.py` | Toplantıya soru için hibrit arama: transkript pencereleri, BM25 (Türkçe kök), embedding, RRF; vektör önbelleği toplantı klasöründe (`rag_dizin.npz`) |
 | `metin.py` | Metin benzerliği (kelime kökü), Türkçe küçük harf, ad eşleşmesi, konuşmacı gösterim kuralı (`gorunen_ad`) |
 | `ses.py` | Ses yakalama (WASAPI loopback + mikrofon), VAD, STT istemcisi, tekrar/halüsinasyon filtreleri |
+| `cihaz.py` | Ses cihazlarının otomatik seçimi: mikrofonlar arasında ses veren/en net olanı seçer, tüm çıkışların loopback'ini karıştırır; tak-çıkar |
 | `yakalayici.py` | Teams altyazısını UI Automation ile okuma, toplantı adı, altyazıyı otomatik açma |
 | `outlook.py` | Takvimden toplantı eşleştirme, taslak e-posta, oturum kullanıcısı |
 | `terim.py` | Terim havuzu (`terimler/terimler.json`): davet, önceki notlar ve katılımcılardan aday; bağımsız kanıtla öğrenme, geri alma |
@@ -79,7 +80,8 @@ python app.py
 | `kesinti_devam` | (varsayılan `true`) Önceki oturumdan diskte kalan STT kesinti kuyruğu (`olcum/kesinti/`) açılışta (STT ayaktaysa) otomatik çözülür; Olaylar'a ilerleme yazılır, not yeniden üretilmez (Geçmiş → Yeniden özetle). `false`: kuyruk diskte beklemeye devam eder |
 | `esikler` | (isteğe bağlı) Konuşmacı atama eşikleri, ör. `{"baskin": 0.6, "ikinci": 0.25, "kesin": 0.7, "erteleme_sn": 15}` (tam liste: `konusmaci.VARSAYILAN_ESIKLER`). Halüsinasyon eşikleri de burada: `hal_supheli` (varsayılan 0,5; satır nota girmez, Belirsizler'e düşer), `hal_at` (0,9; satır silinir) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
-| `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
+| `mikrofon_cihaz` | (isteğe bağlı, **gerekmez**) Elle mikrofon: cihaz adı (ya da eski numara). Boş: otomatik seçim (bkz. [Ses cihazları](#ses-cihazları-otomatik)). Ayarlanan cihaz yoksa, çıkarılırsa ya da hiç ses vermiyorsa otomatiğe dönülür, ses verince ona geri geçilir (sessize alınınca bırakılmaz) |
+| `cihaz_otomatik` | (varsayılan `true`) `false`: eski yol — yalnız Windows varsayılan hoparlörü ve `mikrofon_cihaz`/varsayılan mikrofon (tak-çıkar izlenmez) |
 | `stt_ipucu` | (varsayılan `true`) Whisper'a prompt olarak katılımcı adları ve serinin en çok 20 terimi gider; düşük sesli kliplere gitmez. Ayarlar'dan açılıp kapatılır |
 | `stt_repetition_penalty` | (varsayılan boş) Boşken STT'ye gönderilmez; sayı (ör. `1.1`) yazılırsa `repetition_penalty` olarak gider. Deneme amaçlı |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
@@ -111,6 +113,30 @@ modülleri ve `veri\` dosyalarını açmayı dener; çıkış kodu `0` = tamam (
 döner). `ToplantiNotu.bat` ve `python tools\teshis.py` bu yolu kullanır. Paylaşmadan önce içeriğine bakın.
 
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`); `veri\` klasörü (yaygın kelime listesi) exe'ye eklenir.
+
+## Ses cihazları (otomatik)
+
+Kimsenin cihaz ayarlaması gerekmez; kulaklıkla, dizüstü hoparlör/mikrofonuyla ya da toplantı ortasında kulaklık takıp
+çıkararak çalışılabilir.
+
+- **Mikrofon:** açık tüm mikrofonlar (en fazla 4) dinlenir. Hiç ses vermeyen (−90 dB altı, ör. Windows izni kapalıyken
+  gelen −98 dB) cihaz 2 sn'de elenir. Windows varsayılanı ses veriyorsa o, vermiyorsa (ya da −80 dB'den kısıksa) ses
+  veren ilk mikrofon seçilir. Kullanıcı konuşurken başka bir mikrofon ≥ 6 dB daha net duyuyorsa (≥ 3 sn konuşma, iki
+  geçiş arası ≥ 10 sn, klip açabilecek seviyede) ona geçilir; karşı taraf konuşurken ölçüm yapılmaz (hoparlörden
+  mikrofona giren eko seçimi kazanamaz), klavye tıkırtıları sayılmaz. Geçiş klip sınırında yapılır; seçili cihaz
+  çıkarılır ya da blok vermezse hemen geçilir (açık klip önce kapanır). Çalışırken tam sıfıra düşen seçili mikrofon
+  (kulaklıkta sessize alma, gürültü kapısı) bırakılmaz: sessizdeyken odada konuşulan transkripte girmez; Canlı sekmesinde
+  "— sessizde" yazar. Bluetooth kulaklığın eller-serbest mikrofonu yalnız gerektiğinde açılır (varsayılansa, diğer
+  mikrofonlar tam sessizse ya da kulaklık zaten eller-serbest modundaysa). Canlı sekmesinde "Mikrofon: <ad> (otomatik)"
+  yazar, Olaylar'a her seçim düşer.
+- **Hoparlör (karşı taraf):** tüm çıkış cihazlarının (en fazla 4) loopback'i karıştırılır: Teams sesi hangi cihazdan
+  çıkarsa çıksın yakalanır. Cihaz listesi 3 sn'de bir yenilenir; 4'ten fazla cihaz varsa Windows varsayılanı ve yeni
+  takılan cihaz, hiç ses vermeyenin yerini alır.
+- **Uyarılar:** tüm mikrofonlar 10 sn tam sessizse (hiçbiri daha önce ses vermediyse) bir kez şerit + Olaylar uyarısı çıkar (Windows Ayarlar → Gizlilik ve
+  güvenlik → Mikrofon → "Masaüstü uygulamalarının mikrofonunuza erişmesine izin ver"); ses gelince kalkar. Altyazıda
+  karşı taraf konuşurken 20 sn hoparlör sesi yoksa da uyarı çıkar.
+- **Teşhis:** `python tools\ses_teshis.py --otomatik` (8 sn konuş, bir ses çal): cihaz başına seviye, tam sessizlik ve
+  uygulamanın seçeceği mikrofon.
 
 ## Kullanım
 

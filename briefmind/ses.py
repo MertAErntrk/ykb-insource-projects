@@ -19,7 +19,12 @@ olay_fn verilmezse eski yol: satir_fn(ts, konusmaci, metin, kaynak).
 
 Halusinasyon: klip metni stt.halusinasyon_puani ile puanlanir (klip olayinda hal_puani); >= hal_supheli 'supheli', >= hal_at atilir.
 Whisper prompt'u (ipucu_fn) yalniz yeterli RMS'li klipte gider; supheli sonuc promptsuz bir kez tekrar cozulur.
-Mikrofon 16 kHz disindaki cihaz hizinda acilirsa YenidenOrnekleyici (alcak geciren + secme; scipy varsa resample_poly) indirir.
+Cihazlar (cihaz.py): mikrofon akisi acik mikrofonlardan otomatik secilenin, loopback akisi tum cikis cihazlarinin
+loopback karisiminin bloklaridir (soundcard, 16 kHz; tak-cikar 3 sn'de gorulur). Cihaz degisiminde akisa Gecis isareti
+gelir: acik klip kapatilir, ornek sayaci surer, gerekirse saat capasi yenilenir ('capa' olayi). config 'mikrofon_cihaz'
+yalniz elle ayardir. soundcard yoksa / acilamazsa eski yol: varsayilan hoparlor + sounddevice mikrofonu.
+Eski yolda mikrofon 16 kHz disindaki cihaz hizinda acilirsa YenidenOrnekleyici (alcak geciren + secme; scipy varsa
+resample_poly) indirir.
 
 Halka tampon: her akisin son 10 dk'si float16 olarak bellekte; yeniden_kes(klip_no, an) klibi en sessiz blokta ikiye boler.
 
@@ -47,6 +52,7 @@ import time
 import numpy as np
 import requests
 
+import cihaz as cihaz_mod               # otomatik mikrofon secimi + loopback karisimi
 import saat as saat_mod                 # adima dayanikli zaman kaynagi (time.time yerine)
 import uzun as uzun_mod                 # Faz 3 uzun pencere hizalamasi (saf mantik)
 
@@ -60,7 +66,10 @@ __all__ = ["HAL_ESIKLER", "HALUSINASYON", "IPUCU_GONDER", "IPUCU_KR_TAVAN", "KIS
            "SttIstemci", "cumlelere_bol", "hal_esik", "halusinasyon_puani", "kesinti_hatasi_mi", "requests",
            "segment_ozeti", "sonuc_gecerli", "tekrar_temizle", "wav_bayt", "wav_oku",
            "AkisYakalayici", "HalkaTampon", "KulaklikTespit", "OlcumKaydi", "SesServisi", "UzunPencere",
-           "YenidenOrnekleyici", "bolme_noktasi", "cihazlari_listele", "normalize_et", "yeniden_ornekle", "zarf_hesapla"]
+           "YenidenOrnekleyici", "altyazi_son_fn", "bolme_noktasi", "cihazlari_listele", "normalize_et", "yeniden_ornekle",
+           "zarf_hesapla"]
+
+altyazi_son_fn = cihaz_mod.altyazi_son_fn      # isler/toplanti: SesServisi(altyazi_fn=ses.altyazi_son_fn(motor))
 
 MIN_SN = 1.5                 # bundan kisa "cumle" gonderilmez (cok kisa klipte Whisper tekrar uretir)
 CUMLE_SESSIZLIK = 0.55       # cumle sonu sayilan sessizlik (kisa: konusmaci degisimi ayni klibe dusmesin)
@@ -88,6 +97,7 @@ KES_KONTRAST = 0.4           # kesim blogu RMS'i klibin medyan blok RMS'inin bu 
                              # sinir ust uste binen konusmanin icinde, kesilmez ("A -> B" kalir)
 CAPA_ARALIK_SN = 60          # saat capasi bu sure aralikla (akis zamani) denetlenir
 CAPA_ESIK_SN = 0.3           # |simdi - t| bundan buyukse yeniden capalanir
+CAPA_GECIS_ESIK_SN = 0.05    # cihaz gecisinden sonraki ilk blokta bu esikle denetlenir (gecis boslugu/ortusmesi)
 HOL_SN = 60                  # sirada bekleyen sonuc icin: bastaki numara bu kadar gelmezse atlanir
 IPUCU_RMS = 0.015            # Whisper prompt'u yalniz sesli aralik RMS'i bundan buyuk klipte gider (config esikler 'ipucu_rms');
                              # sessiz/gurultulu klipte prompt kelimeleri ciktiya sizar (Faz 0 denemesi)
@@ -383,6 +393,15 @@ class KulaklikTespit:
         self.sabit = True
         self._degistir(durum, 1.0)
 
+    def sifirla(self):
+        """Mikrofon cihazi degisti: korelasyon penceresi bosaltilir (eski cihazin zarfi yeni karari bozmasin).
+        Izlenen durum korunur; yeni cihazla yeterli veri gelince yeniden degerlendirilir."""
+        with self._kilit:
+            for d in self._kareler.values():
+                d.clear()
+            self._son_deger = None
+            self.korelasyon = None
+
     def blok_ekle(self, akis, t_orta, rms):
         """Akis iplerinden: bir blogun orta epoch'u ve RMS'i. Degerlendirme 5 sn'de bir."""
         if akis not in self._kareler or self.sabit:
@@ -452,11 +471,18 @@ class AkisYakalayici(threading.Thread):
     """Tek bir ses akisini (loopback ya da mikrofon) klip klip boler, kuyruga koyar.
 
     Zaman tabani: epoch_capa (akisin sifirinci orneginin epoch'u) + toplam_ornek sayaci. ornek_epoch(n)/epoch_ornek(t)
-    capa gecmisini kullanir (yeniden capalamadan onceki orneklerin zamani degismez)."""
+    capa gecmisini kullanir (yeniden capalamadan onceki orneklerin zamani degismez).
+
+    secici (cihaz.py) verilirse bloklar ondan gelir; cihaz.Gecis isaretinde acik klip kapatilir (klip iki cihazin sesini
+    karistirmaz), gurultu tabani sifirlanir, sonraki ilk blokta saat capasi CAPA_GECIS_ESIK_SN ile denetlenir. Ornek sayaci
+    kesintisiz surer. Secici calismazsa (cihaz.ArkaYok) eski yola (sounddevice / varsayilan hoparlor) dusulur."""
 
     def __init__(self, kaynak, kuyruk, loopback=False, cihaz=None, olay=None, sayac=None, blok_fn=None, tasma_fn=None,
-                 saat=None, halka_sn=HALKA_SN, klip_fn=None):
+                 saat=None, halka_sn=HALKA_SN, klip_fn=None, secici=None, gecis_fn=None):
         super().__init__(daemon=True)
+        self.secici = secici                    # cihaz.MikrofonSecici / LoopbackSecici | None (eski yol)
+        self._gecis_fn = gecis_fn               # (akis, cihaz.Gecis): cihaz degisti (kulaklik tespiti sifirlanir)
+        self._capa_bekle = None                 # Gecis sonrasi ilk blokta capa denetimi: (an | None,)
         self._klip_fn = klip_fn                 # (akis, klip sozlugu): her olusan klip (Faz 3 uzun pencere kaydi)
         self._acik_ornek = None                 # acik (henuz kapanmamis) klibin ilk ornegi | None
         self.kaynak, self.kuyruk, self.loopback, self.cihaz = kaynak, kuyruk, loopback, cihaz
@@ -505,31 +531,52 @@ class AkisYakalayici(threading.Thread):
                 return n
         return (t - (self._capalar[0][1] if self._capalar else (self.epoch_capa or 0.0))) * ORNEK
 
-    def _capa_kur(self, blok_uzunluk):
-        self.epoch_capa = self._saat() - blok_uzunluk / ORNEK       # blok yeni bitti
+    def _capa_kur(self, blok_uzunluk, simdi=None):
+        self.epoch_capa = (self._saat() if simdi is None else simdi) - blok_uzunluk / ORNEK       # blok yeni bitti
         self._capalar = [(0, self.epoch_capa)]
 
-    def _capa_kontrol(self):
-        """Her CAPA_ARALIK_SN'de (akis zamani) sayac zamani ile saati karsilastirir; kayma > CAPA_ESIK_SN ise yeniden capalar."""
-        if self.toplam_ornek < self._sonraki_capa or not self._capalar:
+    def _capa_kontrol(self, simdi=None, gecis=False, ilk_ornek=None):
+        """Her CAPA_ARALIK_SN'de (akis zamani) sayac zamani ile saati karsilastirir; kayma > CAPA_ESIK_SN ise yeniden capalar.
+        gecis=True: cihaz gecisinden sonraki ilk blok; aralik beklenmez, esik CAPA_GECIS_ESIK_SN, simdi = blogun varis ani,
+        yeni capa ilk_ornek'ten (yeni cihazin ilk blogunun basi) gecerli: o blok da yeni zamanla damgalanir."""
+        if not self._capalar:
             return
-        while self._sonraki_capa <= self.toplam_ornek:
-            self._sonraki_capa += CAPA_ARALIK_SN * ORNEK
-        saat_mod.adim_denetle()                 # duvar saati adimi yalniz loglanir (simdi() etkilenmez)
-        simdi = self._saat()
+        if not gecis:
+            if self.toplam_ornek < self._sonraki_capa:
+                return
+            while self._sonraki_capa <= self.toplam_ornek:
+                self._sonraki_capa += CAPA_ARALIK_SN * ORNEK
+            saat_mod.adim_denetle()             # duvar saati adimi yalniz loglanir (simdi() etkilenmez)
+        simdi = self._saat() if simdi is None else simdi
         fark = simdi - self.ornek_epoch(self.toplam_ornek)
-        if abs(fark) <= CAPA_ESIK_SN:
+        if abs(fark) <= (CAPA_GECIS_ESIK_SN if gecis else CAPA_ESIK_SN):
             return
         yeni = simdi - self.toplam_ornek / ORNEK
-        self._capalar.append((self.toplam_ornek, yeni))
+        ob = self.toplam_ornek if ilk_ornek is None else max(int(ilk_ornek), self._capalar[-1][0])
+        self._capalar.append((ob, yeni))
         self.epoch_capa = yeni
         self.capa_sayisi += 1
-        self._olay("capa", {"akis": self.kaynak, "fark": round(fark, 3), "ornek": self.toplam_ornek,
-                            "epoch_capa": yeni, "saat": simdi})
-        self._olay("log", f"  · {self.kaynak} saat çapası yenilendi (fark {fark:+.2f} sn)")
+        self._olay("capa", {"akis": self.kaynak, "fark": round(fark, 3), "ornek": ob,
+                            "epoch_capa": yeni, "saat": simdi, **({"neden": "gecis"} if gecis else {})})
+        self._olay("log", f"  · {self.kaynak} saat çapası yenilendi (fark {fark:+.2f} sn{', cihaz geçişi' if gecis else ''})")
 
     # --- ses kaynaklari ---
+    def _klip_acik(self):
+        return self._acik_ornek is not None
+
+    def _secici_bloklari(self):
+        """Secicinin bloklari; secici calismazsa (ArkaYok) False dondurur (cagiran eski yola duser)."""
+        try:
+            yield from self.secici.bloklar(self._dur, klip_acik_fn=self._klip_acik)
+            return True
+        except cihaz_mod.ArkaYok as e:
+            self._olay("log", f"! {self.kaynak} otomatik cihaz seçimi çalışmadı ({e}); Windows varsayılanı kullanılıyor")
+            return False
+
     def _bloklar_loopback(self):
+        if self.secici is not None:
+            if (yield from self._secici_bloklari()):
+                return
         import soundcard as sc
         hoparlor = sc.default_speaker()
         mik = sc.get_microphone(str(hoparlor.name), include_loopback=True)
@@ -538,6 +585,13 @@ class AkisYakalayici(threading.Thread):
                 yield kayit.record(numframes=BLOK).reshape(-1)
 
     def _bloklar_mikrofon(self):
+        if self.secici is not None:
+            if (yield from self._secici_bloklari()):
+                return
+        yield from self._bloklar_sd()
+
+    def _bloklar_sd(self):
+        """Eski yol: sounddevice (config 'mikrofon_cihaz' ya da PortAudio varsayilani; tak-cikar gorulmez)."""
         import sounddevice as sd
         q = queue.Queue()
         # Cihaz kendi hizinda acilir, 16 kHz'e indirilir: WASAPI cihazlari 16 kHz'i reddeder, config'teki
@@ -577,15 +631,41 @@ class AkisYakalayici(threading.Thread):
         try:
             bloklar = self._bloklar_loopback() if self.loopback else self._bloklar_mikrofon()
             for blok in bloklar:
+                if isinstance(blok, cihaz_mod.Gecis):
+                    # cihaz degisti: acik klip once kapanir (iki cihazin sesi ayni klibe girmez), sayac surer
+                    if blok.kapat and tampon:
+                        self._gonder(tampon, None, sum(bayrak) / len(tampon), parca_ornek, enerji, bayrak)
+                        tampon, enerji, bayrak, sessiz_sn = [], [], [], 0.0
+                    if blok.kapat:
+                        self._acik_ornek = None
+                        onyuk, aday = [], []
+                        # yeni cihazin gurultu tabani (secici olctu); SESSIZ_ESIK'ten baslatmak konusma ortasinda
+                        # gecildiyse konusmayi taban sanip klibi hic acmayabilirdi
+                        taban = min(SESSIZ_ESIK, max(1e-6, blok.taban)) if blok.taban is not None else SESSIZ_ESIK
+                    self._capa_bekle = (blok.an,)
+                    if self._gecis_fn is not None:
+                        try:
+                            self._gecis_fn(self.kaynak, blok)
+                        except Exception:
+                            pass
+                    continue
                 if blok is None or not len(blok):
                     continue
                 sn = len(blok) / ORNEK
                 blok_ornek = self.toplam_ornek                  # bu blogun akis ornek numarasi
+                gecis_an = None
+                if self._capa_bekle is not None:
+                    gecis_an, self._capa_bekle = self._capa_bekle[0], None
+                    if self.epoch_capa is not None:
+                        gecis_an = gecis_an if gecis_an is not None else self._saat()
                 if self.epoch_capa is None:
-                    self._capa_kur(len(blok))
+                    self._capa_kur(len(blok), simdi=gecis_an)
+                    gecis_an = None
                 self.toplam_sn += sn
                 self.toplam_ornek += len(blok)
                 self.halka.ekle(blok_ornek, blok)
+                if gecis_an is not None:
+                    self._capa_kontrol(simdi=gecis_an, gecis=True, ilk_ornek=blok_ornek)
                 rms = float(np.sqrt(np.mean(np.square(blok))))
                 if self._blok_fn is not None:
                     try:
@@ -1284,12 +1364,20 @@ class SesServisi:
     Faz 3 uzun pencere (uzun_pencere=True; None: config.json 'uzun_pencere', varsayilan kapali): arka plan iscisi halka
     tampondan 20-28 sn'lik pencereleri yeniden cozer (UzunPencere); sonuc olayi {"tur": "uzun", ...} olay_fn'e gider (Motor
     klip metnini degistirir, konusmaciya dokunmaz). Baslarken {"tur": "uzun_durum", "acik": True}. GPU yuku: STT istek
-    sayisi (kisa + uzun, saatlik) UZUN_RAPOR_SN'de ve durdururken loglanir. Kapaliyken hicbir yol degismez."""
+    sayisi (kisa + uzun, saatlik) UZUN_RAPOR_SN'de ve durdururken loglanir. Kapaliyken hicbir yol degismez.
+
+    Cihazlar (cihaz.py; cihaz_otomatik=True, varsayilan): mikrofon acik mikrofonlardan otomatik secilir (mik_cihaz = config
+    'mikrofon_cihaz' yalniz elle ayar; sessiz/yoksa otomatige dusulur), loopback tum cikis cihazlarinin karisimidir.
+    Olaylar (olay(tip, veri)): 'mikrofon' {"kimlik","ad","otomatik","neden","sessizde"} her secim/geciste ve secili cihaz
+    sessize alininca / ses donunce; 'ses_uyari' {"tur":
+    'mikrofon'|'loopback', "var", "metin"} (tum mikrofonlar 10 sn tam sessiz / altyazida konusma varken 20 sn loopback
+    sesi yok; ses gelince var=False). secili_mikrofon() UI icin. arka: cihaz arka ucu (testler; None: soundcard).
+    altyazi_fn() -> uzak altyazi etkinliginin son ani (loopback uyarisi; ses.altyazi_son_fn(motor))."""
 
     def __init__(self, stt_adres, ipucu_fn=None, mod="otomatik", mik_cihaz=None, olay=None, satir_fn=None,
                  model="whisper", api_key="", proxy=True, verify=None, olcum_klasor=None, olay_fn=None,
                  kesinti_klasor=None, esikler=None, stt_ipucu=True, stt_repetition_penalty=None, cizelge_fn=None,
-                 uzun_pencere=None):
+                 uzun_pencere=None, cihaz_otomatik=True, arka=None, altyazi_fn=None):
         if uzun_pencere is None:                 # config.json 'uzun_pencere' (yalniz true acar)
             try:
                 import ayar as ayar_mod
@@ -1313,7 +1401,12 @@ class SesServisi:
         self.ipucu_yeniden = 0               # supheli prompt'lu sonucun promptsuz tekrarlandigi klip sayisi
         self.atilan_halusinasyon = 0         # puani 'at' esigini asip metni atilan klip sayisi
         self.mod = mod                       # otomatik | cift | tek
-        self.mik_cihaz = mik_cihaz
+        self.mik_cihaz = mik_cihaz           # config 'mikrofon_cihaz': elle ayar (yoksa otomatik secim)
+        self.cihaz_otomatik = cihaz_otomatik is not False
+        self._arka = arka
+        self._altyazi_fn = altyazi_fn
+        self.mik_secici = None               # cihaz.MikrofonSecici (baslat kurar)
+        self.loop_secici = None              # cihaz.LoopbackSecici
         self._olay = olay or (lambda t, v: None)
         self._olay_fn = olay_fn
         self._satir = satir_fn or (lambda *a: None)
@@ -1381,14 +1474,42 @@ class SesServisi:
             self._olay("log", f"✖ ses olayı işlenemedi: {e!r}")
 
     def _akis_olayi(self, tip, veri):
-        """Akis ipleri: saat capasi yenilemeyi olaylar.jsonl'e de yazar."""
-        if tip == "capa" and self._olcum is not None:
-            self._olcum.olay_yaz("capa", veri)
+        """Akis ipleri: saat capasi yenilemeyi ve mikrofon secimini olaylar.jsonl'e de yazar."""
+        if tip in ("capa", "mikrofon", "ses_uyari") and self._olcum is not None:
+            self._olcum.olay_yaz(tip, veri)
         self._olay(tip, veri)
         if tip == "capa" and isinstance(veri, dict):
             # motor -> konusmaci: o akisin klip epoch'lari sicradi (L capalari duzeltilir)
             with self._kilit:
                 self._olay_ver({"tur": "capa", "akis": veri.get("akis"), "fark": veri.get("fark")})
+
+    def _secicileri_kur(self):
+        """cihaz.py secicileri (soundcard yoksa ya da cihaz_otomatik kapaliysa None, None: eski yol)."""
+        if not self.cihaz_otomatik:
+            self._olay("log", "ses cihazları: otomatik seçim kapalı (config 'cihaz_otomatik': false) — Windows varsayılan "
+                              "hoparlörü ve " + (f"mikrofon {self.mik_cihaz!r}" if self.mik_cihaz not in (None, "")
+                                                 else "varsayılan mikrofon"))
+            return None, None
+        arka = self._arka if self._arka is not None else cihaz_mod.varsayilan_arka()
+        if arka is None:
+            self._olay("log", "! ses cihazları: soundcard kurulu değil, otomatik seçim yok — Windows varsayılanları kullanılıyor "
+                              "(pip install soundcard)")
+            return None, None
+        saat_fn = getattr(arka, "simdi", None)               # sahte arka ucun saati (testler)
+        loop = cihaz_mod.LoopbackSecici(arka, olay=self._akis_olayi, saat=saat_fn, altyazi_fn=self._altyazi_fn)
+        mik = cihaz_mod.MikrofonSecici(arka, elle=self.mik_cihaz, uzak_fn=loop.aktif_mi, olay=self._akis_olayi,
+                                       saat=saat_fn, hfp_fn=loop.hfp_aktif_mi)
+        return loop, mik
+
+    def secili_mikrofon(self):
+        """UI: {"kimlik","ad","otomatik","neden","sessizde"} | None (secilmedi ya da eski yol)."""
+        m = self.mik_secici
+        return m.secili_mikrofon() if m is not None else None
+
+    def _gecis(self, akis, g):
+        """Akis ipi: mantiksal akista cihaz degisti. Mikrofon degisince kulaklik korelasyon penceresi sifirlanir."""
+        if akis == "mikrofon" and getattr(g, "kapat", False) and self._kulaklik_tespit is not None:
+            self._kulaklik_tespit.sifirla()
 
     def _kulaklik_olayi(self, ev):
         self.kulaklik = ev["durum"]
@@ -1412,12 +1533,17 @@ class SesServisi:
         # Mikrofon HER ZAMAN yakalanir: yalniz toplantida ya da sadece sen konusurken
         # loopback'te ses olmaz. Hoparlorde ayni cumle iki akistan gelir -> konusmaci.py zamana bakip eler.
         ortak = dict(olay=self._akis_olayi, sayac=self._sayac, blok_fn=self._kulaklik_tespit.blok_ekle,
-                     tasma_fn=self._tasma)
+                     tasma_fn=self._tasma, gecis_fn=self._gecis)
         if self.uzun_pencere:
             self.uzun_ac()
             ortak["klip_fn"] = self._uzun_klip
-        self.akislar = [AkisYakalayici("loopback", self.kuyruk, loopback=True, **ortak),
-                        AkisYakalayici("mikrofon", self.kuyruk, cihaz=self.mik_cihaz, **ortak)]
+        # Cihazlar otomatik (cihaz.py): mikrofon = acik mikrofonlardan secilen, loopback = tum cikislarin karisimi
+        self.loop_secici, self.mik_secici = self._secicileri_kur()
+        saat_fn = getattr(self._arka, "simdi", None) if self._arka is not None else None
+        if saat_fn is not None:
+            ortak["saat"] = saat_fn
+        self.akislar = [AkisYakalayici("loopback", self.kuyruk, loopback=True, secici=self.loop_secici, **ortak),
+                        AkisYakalayici("mikrofon", self.kuyruk, cihaz=self.mik_cihaz, secici=self.mik_secici, **ortak)]
         for a in self.akislar:
             a.start()
         self._isciler = [threading.Thread(target=self._calis, daemon=True) for _ in range(ISCI_SAYISI)]

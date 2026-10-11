@@ -280,7 +280,20 @@ class Pencere(QtWidgets.QMainWindow):
         v.addLayout(kartlar)
         h = QtWidgets.QHBoxLayout()
         sol = QtWidgets.QVBoxLayout()
-        sol.addWidget(QtWidgets.QLabel("Konuşmalar"))
+        baslik = QtWidgets.QHBoxLayout()
+        baslik.addWidget(QtWidgets.QLabel("Konuşmalar"))
+        baslik.addStretch(1)
+        # aktif mikrofon (cihaz.py otomatik secer; SesServisi 'mikrofon' olayi)
+        self.mik_etiket = QtWidgets.QLabel("", objectName="alt_bilgi")
+        self.mik_etiket.hide()
+        baslik.addWidget(self.mik_etiket)
+        sol.addLayout(baslik)
+        # ses uyarisi: tum mikrofonlar tam sessiz / altyazida konusma var ama hoparlor sesi yok ('ses_uyari' olayi)
+        self.ses_serit = QtWidgets.QLabel("", objectName="uyari")
+        self.ses_serit.setWordWrap(True)
+        self.ses_serit.hide()
+        sol.addWidget(self.ses_serit)
+        self._ses_uyarilari = {}
         # durum seritleri: STT kesintisi (transkript eksik) ve konusmaci bilgisi yok (altyazi okunamiyor)
         self.stt_serit = QtWidgets.QLabel("", objectName="uyari")
         self.stt_serit.setWordWrap(True)
@@ -945,6 +958,9 @@ class Pencere(QtWidgets.QMainWindow):
         self._akis_satirlari = []
         self.stt_serit.hide()
         self.kapsama_serit.hide()
+        self.ses_serit.hide()
+        self._ses_uyarilari = {}
+        self.mik_etiket.hide()
         self.canli_not.clear()
         self._canli_sifirla()
         self.renkler = {}
@@ -1081,6 +1097,21 @@ class Pencere(QtWidgets.QMainWindow):
             self._akis_ciz()
         elif tip == "stt_durum":
             self._stt_serit_guncelle(v)
+        elif tip == "mikrofon":                       # otomatik secilen (ya da elle ayarli) mikrofon
+            if isinstance(v, dict) and v.get("ad"):
+                self.mik_etiket.setText(f"Mikrofon: {v['ad']} ({'otomatik' if v.get('otomatik', True) else 'elle ayarlı'})"
+                                        + (" — sessizde" if v.get("sessizde") else ""))
+                self.mik_etiket.setToolTip(v.get("neden") or "")
+                self.mik_etiket.show()
+        elif tip == "ses_uyari":                      # bir kez gelir; ses donunce var=False ile kalkar
+            if isinstance(v, dict):
+                if v.get("var"):
+                    self._ses_uyarilari[v.get("tur")] = v.get("metin") or ""
+                else:
+                    self._ses_uyarilari.pop(v.get("tur"), None)
+                metin = "\n".join(m for m in self._ses_uyarilari.values() if m)
+                self.ses_serit.setText(metin)
+                self.ses_serit.setVisible(bool(metin))
         elif tip == "kapsama":                        # konusmaci bilgisi 60 sn'den uzun yok / geri geldi
             self.kapsama_serit.setVisible(not (v or {}).get("var", True))
         elif tip == "log":
@@ -2186,7 +2217,7 @@ def duman_testi(pencere):
     kontrol("pencere kuruldu", isinstance(pencere, QtWidgets.QMainWindow) and pencere.sayfalar.count() == 4)
     kontrol("durum makinesi: bos", pencere._durum() == "bos" and pencere.b_ana.isEnabled(), pencere._durum())
     for ad in ("konusmaci", "stt", "ses", "saat", "terim", "duzelt", "kelime", "rag", "motor", "llm", "yakalayici",
-               "not_araclari", "outlook", "isler", "gorunum", "tarih", "metin", "uzun", "ses_izi"):
+               "not_araclari", "outlook", "isler", "gorunum", "tarih", "metin", "uzun", "ses_izi", "cihaz"):
         try:
             importlib.import_module(ad)
             kontrol(f"modül {ad}", True)

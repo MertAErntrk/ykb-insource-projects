@@ -169,7 +169,9 @@ class YakalamaIsi(QtCore.QThread):
                 self.ayar.get("stt_url", ""),
                 ipucu_fn=self._ipucu,                           # terim.prompt(seri, adlar): ad + <=20 ilgili terim
                 mod="otomatik",
-                mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
+                mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: elle ayar (numara ya da ad); yoksa otomatik seçim
+                cihaz_otomatik=self.ayar.get("cihaz_otomatik", True),   # false: eski yol (Windows varsayılanları)
+                altyazi_fn=ses_mod.altyazi_son_fn(self.motor),  # altyazıda konuşma var ama loopback sessiz: uyarı
                 olay=lambda t, v: self.olay.emit(t, v),
                 olay_fn=self.motor.ses_olayi,                   # C1: klip / bosluk / kulaklik -> motor
                 model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),

@@ -29,6 +29,7 @@ SEMA = {
     "kesinti_kaydi": ("bool", None, None), "kesinti_devam": ("bool", None, None),
     "stt_url": ("str", None, None), "stt_model": ("str", None, None), "stt_key": ("str", None, None),
     "stt_proxy": ("bool", None, None), "mikrofon_modu": ("str", None, None), "mikrofon_cihaz": ("cihaz", None, None),
+    "cihaz_otomatik": ("bool", None, None),
     "ben": ("str", None, None), "altyazi_otomatik": ("bool", None, None), "altyazi_turkce": ("bool", None, None),
     "olcum_kaydi": ("bool", None, None), "stt_ipucu": ("bool", None, None),
     "uzun_pencere": ("bool", None, None), "ses_izi": ("bool", None, None), "ses_izi_model": ("str", None, None),
@@ -67,6 +68,7 @@ def varsayilanlar():
             "stt_model": "whisper-large-v3-turbo-prod",     # ARGE GPU servisi (Turkce fine-tune)
             "stt_key": "EMPTY",                              # kendi CPU servisimiz icin: model "whisper", anahtar bos
             "mikrofon_modu": "otomatik",      # Faz1: kulaklik/hoparlor pasif tespit; 'cift'/'tek' goc eder
+            "cihaz_otomatik": True,           # mikrofon otomatik secilir, loopback tum cikislardan (mikrofon_cihaz: elle)
             "ben": "",
             "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
             "altyazi_turkce": True,           # altyazi bulununca konusulan dili Turkce yapmayi dene

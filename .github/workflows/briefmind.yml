@@ -81,13 +81,14 @@ jobs:
             --hidden-import PyQt5.QtSvg \
             --hidden-import konusmaci --hidden-import stt --hidden-import ses --hidden-import saat --hidden-import terim \
             --hidden-import duzelt --hidden-import kelime --hidden-import rag --hidden-import tarih --hidden-import metin \
+            --hidden-import uzun --hidden-import ses_izi --hidden-import cihaz \
             --add-data "veri;veri" \
             app.py
           cp config.example.json dist/BriefMind/
           mkdir -p dist/BriefMind/toplantilar
       - name: Duman testi (exe ekransiz acilir, cikis kodu 0)
         # app.py --duman: pencereyi offscreen kurar; paketlenen modulleri (konusmaci, stt, saat, terim, duzelt, kelime, rag,
-        # ses ...) ve veri/yaygin_kelimeler.txt'yi yoklar; sonuc %LOCALAPPDATA%\BriefMind\duman.txt
+        # ses, uzun, ses_izi ...) ve veri/yaygin_kelimeler.txt'yi yoklar; sonuc %LOCALAPPDATA%\BriefMind\duman.txt
         shell: pwsh
         timeout-minutes: 5
         working-directory: briefmind
