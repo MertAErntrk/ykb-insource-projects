@@ -35,7 +35,8 @@ SEMA = {
     "uzun_pencere": ("bool", None, None), "ses_izi": ("bool", None, None), "ses_izi_model": ("str", None, None),
     "ses_izi_esik": ("sayi_veya_yok", 0.0, 1.0),
     "stt_repetition_penalty": ("sayi_veya_yok", 0.1, 3.0), "ca_bundle": ("str", None, None),
-    "not_sablonu": ("str", None, None), "saklama_gun": ("int", 0, 3650), "esikler": ("dict", None, None),
+    "not_sablonu": ("str", None, None), "not_sablonu_surum": ("int", 0, 100), "birebir_taslak": ("bool", None, None),
+    "saklama_gun": ("int", 0, 3650), "esikler": ("dict", None, None),
     "llm_akis": ("bool", None, None), "llm_dusunme_butcesi": ("int", 0, 65536), "llm_proxy": ("bool", None, None), "llm_key": ("str", None, None),
     "api_key": ("str", None, None), "llm_zaman_asimi": ("int", 0, 86400), "llm_tekrar": ("int", 0, 20),
     "parca_token": ("int", 0, 1048576), "paralel": ("int", 0, 64),
@@ -47,6 +48,7 @@ _DOGRU = {"true", "evet", "1", "acik", "açık", "yes", "on"}
 _YANLIS = {"false", "hayir", "hayır", "0", "kapali", "kapalı", "no", "off"}
 # kaldirilan ozellik anahtarlari (sozluk / inceleme akisi): okununca atilir, dosyadan da silinir
 KALDIRILAN_ANAHTARLAR = ("otomatik_not", "inceleme", "inceleme_yok")
+SABLON_SURUM = 2                           # not_sablonu_surum: 'otomatik' varsayilanina gecilen ayar surumu
 
 
 def _kaldirildi_mi(anahtar):
@@ -77,6 +79,8 @@ def varsayilanlar():
             "ses_izi": False,                 # Faz 6: altyazisiz '?' satirlara ses izi (sherpa-onnx + model gerekir)
             "stt_ipucu": True,                # Whisper prompt'u: katilimci adlari + serinin <=20 terimi (dusuk RMS klibe gitmez)
             "stt_repetition_penalty": None,   # STT servisine repetition_penalty (None: gonderilmez; A/B icin 1.1 denenir)
+            "not_sablonu": "otomatik",        # toplanti davetinden (konu/metin) secilir; sabit deger o sablonu zorlar
+            "birebir_taslak": False,          # birebir toplantida kisiye ozel e-posta / Jira taslagi (varsayilan kapali)
             "ca_bundle": ""}                  # kurum kok sertifikasi (.cer, Base64); bos: TLS dogrulamasi kapali
 
 
@@ -197,6 +201,12 @@ def _goc_et(ham):
     if isinstance(mod, str) and mod not in ("otomatik", ""):
         notlar.append(f"mikrofon_modu '{mod}' artık yok: kulaklık/hoparlör otomatik algılanıyor")
         yeni["mikrofon_modu"] = "otomatik"
+    if yeni.get("not_sablonu") == "genel" and "not_sablonu_surum" not in yeni:
+        # eski varsayilan: Ayarlar her kayitta 'genel' yaziyordu (secim degil); yeni varsayilan otomatik. Surum isareti
+        # sonradan elle secilen 'genel'in yeniden goc edilmesini onler (Ayarlar kaydi da yazar).
+        yeni["not_sablonu"], yeni["not_sablonu_surum"] = "otomatik", SABLON_SURUM
+        notlar.append("not_sablonu 'genel' (eski varsayılan) 'otomatik' yapıldı: şablon toplantı davetinden seçilir; "
+                      "sabit şablon için Ayarlar → Not şablonu")
     for k in [k for k in yeni if _kaldirildi_mi(k)]:
         del yeni[k]
         notlar.append(f"'{k}' kaldırıldı (sözlük/inceleme akışı Faz 2'de kalktı)")

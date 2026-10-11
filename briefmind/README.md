@@ -86,7 +86,7 @@ python app.py
 | `stt_repetition_penalty` | (varsayılan boş) Boşken STT'ye gönderilmez; sayı (ör. `1.1`) yazılırsa `repetition_penalty` olarak gider. Deneme amaçlı |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
 | `not_sablonu` | `genel` / `haftalik` / `karar` / `birebir` / `calistay` (Ayarlar → Not şablonu) |
-| `saklama_gun` | Notu üretilmiş toplantıların transkripti bu kadar gün sonra silinir; `0` kapalı (Ayarlar → Transkript saklama süresi) |
+| `saklama_gun` | Toplantı tarihinden bu kadar gün sonra konuşma içeren her veri silinir: transkript, düzeltme günlüğü, parça satırları, `olcum/` (klip wav, ham STT, okumalar, `kesinti/`), ses dosyaları, `rag_dizin.npz`, replay çıktıları, `.yedek-*`; `llm_log.jsonl`'den serbest metin alanları çıkarılır. `not.md`, `meta.json` ve parça özetleri kalır. Notu üretilmemiş (yarım/hata) toplantılar da tarihe göre temizlenir; yalnız o an bir işin (kayıt, not üretimi, yeniden özetleme, soru) çalıştığı toplantı atlanır ve sonraki turda denenir (yalnız açık/görüntülenen toplantı korunmaz). Konuşma verisi silinmiş toplantının notu yeniden üretilmez ve şablonu değiştirilemez (transkript olmadan doğrulanamaz); not ve parça özetleri olduğu gibi kalır. Açılışta, her saat ve ayar kaydedilince çalışır; Olaylar'a yalnız sayılar yazılır. `0` kapalı (Ayarlar → Transkript saklama süresi) |
 | `embed_url` | (isteğe bağlı) Embedding servisi (OpenAI uyumlu `POST /v1/embeddings`, gövde `{"input": [...]}`). Doluysa "Toplantıya sor" hibrit arama yapar: kelime (BM25) + anlam (vektör), RRF ile birleştirilir. Boşsa ya da servis hata verirse yalnızca kelime araması. Servisin yollarını bulmak için: `python tools\servis_kesfet.py <adres>` |
 | `embed_boyut` / `embed_key` / `embed_proxy` | Vektör boyutu (varsayılan `1024`; 4096'lık Qwen3-Embedding vektörü kırpılıp normalize edilir), anahtar (gerekirse), Windows proxy'si |
 | `ca_bundle` | (isteğe bağlı) Kurum kök sertifikası dosyası (`.cer`, Base64). Doluysa LLM ve STT bağlantılarında TLS doğrulanır; boşsa doğrulama kapalıdır ve açılışta Olaylar'a bir kez yazılır. Aşağıdaki adımlara bakın. |
@@ -191,7 +191,7 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
   Planner: CSV Excel'de açılıp görevler kopyalanır. Doğrudan Jira'ya kayıt açılmaz (kimlik bilgisi gerekmez).
 - **Konuşma payı:** Geçmiş sekmesinde bir toplantı seçilince üstte "Konuşma payı: Selin %38, Emre %27, …"
   (satırın süresi = sonraki satıra kadar, en fazla 15 sn). Nota yazılmaz; `meta.json` → `konusma_paylari`.
-- **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi.
+- **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi (açılışta, saatte bir ve ayar kaydedilince uygulanır; ses ve ölçüm kayıtları dahil).
 - **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
 
 ## Ölçüm (Faz 0)

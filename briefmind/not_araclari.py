@@ -6,6 +6,7 @@ Word'e aktarma, Jira/Planner CSV'si, konusma paylari, katilimci bilgilendirme me
 Sahip durumu (MIMARI_v3 §6): nottaki Sorumlu hucresi 'Ad' -> kesin, 'Ad (?)' -> belirsiz, 'belirsiz'/'-' -> yok.
 E-posta taslagi ve Jira 'Assignee' yalniz kesin sahiplere gider; digerleri 'Sahibi belirsiz' blogunda kalir.
 Konusmaci adi her yuzeyde metin.gorunen_ad ile yazilir.
+Birebir (1:1) sablonunda kisiye ozel e-posta ve Jira taslagi varsayilan kapali (taslak_izni; ayar 'birebir_taslak').
 """
 import csv
 import json
@@ -21,6 +22,36 @@ BILGILENDIRME = ("Bilgi: Bu toplantıda BriefMind ile not alınmaktadır. Ses ka
                  "istemeyen katılımcı lütfen belirtsin.")
 SATIR_TAVAN_SN = 15             # konusma payi: bir satirin sayilabilecegi en uzun sure (araya giren sessizlik)
 JIRA_BASLIKLAR = ["Summary", "Assignee", "Due Date", "Description", "Issue Type"]
+
+
+BIREBIR_TASLAK_KAPALI = ("Birebir görüşmede kişiye özel e-posta ve Jira taslağı varsayılan olarak kapalı (konuşulanlar "
+                         "kişisel olabilir). Açmak için: Ayarlar → 'Birebir toplantıda da taslak'.")
+
+
+def taslak_izni(sablon, ayar=None):
+    """Kisiye ozel e-posta / Jira CSV taslagi bu toplantida acik mi? Birebir sablonda varsayilan KAPALI; ayar
+    'birebir_taslak': true ile acilir. Dondurur (izin, kisa aciklama)."""
+    if sablon == "birebir" and not bool((ayar or {}).get("birebir_taslak", False)):
+        return False, BIREBIR_TASLAK_KAPALI
+    return True, ""
+
+
+def sablon_canli_satirlari(ozet):
+    """Canli panel: dogrulanmis parca ozetindeki sablon maddeleri -> [(etiket, metin)] ('Fikir', 'Engel' ...)."""
+    import llm
+    etiket = {"ilerleme": "İlerleme", "engeller": "Engel", "gelecek_donem": "Gelecek dönem", "secenekler": "Seçenek",
+              "geri_bildirimler": "Geri bildirim", "anlasilanlar": "Anlaşılan", "fikirler": "Fikir"}
+    satirlar = []
+    for alan, tur in llm.ALAN_TURU.items():
+        for x in (ozet or {}).get(alan) or []:
+            if tur == "secenek":
+                metin = x.get("secenek", "") + {True: " — seçildi", "belirsiz": " — seçildi (?)"}.get(x.get("secildi"), "")
+            elif tur == "fikir":
+                metin = f"{x.get('fikir', '')} ({x.get('tema') or 'Diğer'})"
+            else:
+                metin = str(x)
+            satirlar.append((etiket.get(alan, alan), metin))
+    return satirlar
 
 
 def _sn(ts):

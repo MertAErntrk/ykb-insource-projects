@@ -154,7 +154,7 @@ class YakalamaIsi(QtCore.QThread):
                            self.ctx.get("gundem", ""), duzelt=self.duzelt, davet=self.ctx.get("davet"),
                            olay=lambda t, v: self.olay.emit(t, v),
                            kaynak="ses", ben=outlook.ben_adi(self.ayar),   # ayar bossa Outlook/Windows tam adi
-                           sablon=self.ayar.get("not_sablonu", "genel"),
+                           sablon=self.ayar.get("not_sablonu", "otomatik"),    # otomatik: davet konusu/metninden
                            esikler=self.ayar.get("esikler"),
                            altyazi_yedek=bool(self.ayar.get("altyazi_yedek", False)))
         self.olay.emit("log", f"Klasör: {klasor}")
@@ -292,7 +292,7 @@ class YakalamaIsi(QtCore.QThread):
 
 
 class TamamlamaIsi(QtCore.QThread):
-    """Notu uretir (toplanti bitince kullanici onayi beklenmez)."""
+    """Notu uretir (toplanti bitince kullanici onayi beklenmez). Var olan not.md degisecekse once yedeklenir."""
     olay = QtCore.pyqtSignal(str, object)
     bitti = QtCore.pyqtSignal(str)
     hata = QtCore.pyqtSignal(str)
@@ -304,7 +304,7 @@ class TamamlamaIsi(QtCore.QThread):
     def run(self):
         self.m._olay = lambda t, v: self.olay.emit(t, v)
         try:
-            md = self.m.notu_uret()
+            md = self.m.notu_uret(yedekle=True)       # 'Notu yeniden üret' / sablon degisimi: onceki not.md yedeklenir
             self.m.kapat()
         except Exception as e:
             hata_logla(traceback.format_exc())
@@ -360,7 +360,8 @@ class YenidenOzetlemeIsi(QtCore.QThread):
     bitti = QtCore.pyqtSignal(str)
     hata = QtCore.pyqtSignal(str)
 
-    def __init__(self, klasor, terimler, duzelt=True, ben=None, sablon="genel"):
+    def __init__(self, klasor, terimler, duzelt=True, ben=None, sablon="otomatik"):
+        """sablon: ayardaki deger; toplantinin kayitli sablonu (meta.json) varsa o kullanilir (Motor.yukle)."""
         super().__init__()
         self.klasor, self.terimler = klasor, terimler
         self.duzelt, self.ben, self.sablon = duzelt, ben, sablon
@@ -562,7 +563,7 @@ class KesintiDevamIsi(QtCore.QThread):
     def _bir(self, klasor, n):
         ad = os.path.basename(klasor)
         m = Motor.yukle(klasor, self.terimler, olay=lambda t, v: self.olay.emit(t, v), duzelt=self.duzelt,
-                        ben=outlook.ben_adi(self.ayar), sablon=self.ayar.get("not_sablonu", "genel"))
+                        ben=outlook.ben_adi(self.ayar), sablon=self.ayar.get("not_sablonu", "otomatik"))
         try:
             servis = self._servis_kur(m, klasor)
             self._servis = servis
