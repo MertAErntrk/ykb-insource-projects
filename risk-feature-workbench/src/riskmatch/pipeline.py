@@ -42,13 +42,16 @@ def _safe_error(error):
         return "Entegrasyon tamamlanamadı (erişim, süre aşımı veya geçersiz servis yanıtı)."
     return "Satır işlenirken teknik hata oluştu; ayrıntılar hassas veri koruması için kayda alınmadı."
 
-def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None,resume=True,strategy="hybrid"):
+def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None,resume=True,strategy="hybrid",config_data=None,credentials=None,column_mapping=None,progress=None):
     from .semantics import parse_definition,evaluate_candidate,build_dependencies,assess_production
     from .retrieval import HybridIndex
     from .demo import demo_snapshot,DemoEmbedding
     started=datetime.now(timezone.utc).isoformat()
-    config=load_config(config_path,mode)
-    requests=read_requests(input_path)
+    config=load_config(config_path,mode,**({"data":config_data} if config_data is not None else {}))
+    requests=read_requests(input_path,column_mapping)
+    def notify(stage,completed=0):
+        if progress:progress({"stage":stage,"completed":completed,"total":len(requests)})
+    notify("Oracle kataloğu okunuyor")
     for req in requests:
         req["definition"]=parse_definition(req["name"],req.get("description_for_parse",req["description"]),config["naming"])
     state_dir=Path(state_dir or Path(output_path).parent/"runtime")
@@ -60,10 +63,13 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
     else:
         from .adapters.oracle import OracleAdapter
         from .adapters.qwen import EmbeddingAdapter,LLMAdapter
-        embedding=EmbeddingAdapter(config["embedding"])
-        llm=LLMAdapter(config["llm"])
+        use_models=config.get("use_models",True)
+        keys=credentials or {}
+        embedding=EmbeddingAdapter(config["embedding"],**({"api_key":keys.get("embedding","")} if credentials is not None else {})) if use_models else None
+        llm=LLMAdapter(config["llm"],**({"api_key":keys.get("llm","")} if credentials is not None else {})) if use_models else None
+        if not use_models and strategy in {"hybrid","embedding"}:strategy="bm25"
         try:
-            snapshot=OracleAdapter(config["oracle"]).scan()
+            snapshot=OracleAdapter(config["oracle"],**({"credentials":keys.get("oracle",{})} if credentials is not None else {})).scan()
         except Exception as error:
             errors.append(_safe_error(error))
             oracle=config["oracle"]
@@ -90,6 +96,7 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
         except (OSError,ValueError,KeyError,TypeError):
             errors.append("Eski checkpoint okunamadı; satırlar yeniden işleniyor.")
     index=None
+    notify("Arama indeksi hazırlanıyor")
     try:
         index=HybridIndex(snapshot,embedding=embedding if strategy in {"hybrid","embedding"} else None,cache_dir=state_dir/"index")
         index.assert_fresh(snapshot)
@@ -115,6 +122,7 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
                             c=evaluate_candidate(req,record)
                             c["score"]=record.get("_score",0)
                             c["retrieval"]=record.get("_retrieval",[])
+                            c["source"]={k:record.get(k,"") for k in ("schema","object","column","data_type","column_comment","table_comment")}
                             candidates.append(c)
                         return candidates
                     candidates=evaluate(records)
@@ -152,6 +160,7 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
             else:
                 result["reasons"].append("Teknik sorun veya giriş hatası nedeniyle inceleme tamamlanamadı.")
         results.append(result)
+        notify("Değişkenler inceleniyor",len(results))
         atomic_json(checkpoint,{"key":state_key,"status":"running","results":results})
     results_by_id={r["row_id"]:r for r in results}
     for req in requests:
@@ -164,7 +173,7 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
         result["dependencies"]=production.get("dependencies",[])
         result["reasons"]=list(dict.fromkeys(result["reasons"]+production.get("reasons",[])+graph["issues"].get(req["row_id"],[])))
     complete=bool(snapshot["complete"] and not errors and all(not r["errors"] for r in results))
-    run_info={"Mod":"DEMO — sentetik, banka entegrasyonu doğrulanmadı" if mode=="demo" else "GERÇEK — yapılandırılmış kurum servisleri", "Tamamlanma":"Tamamlandı" if complete else "Eksik / teknik hata", "Uygulama sürümü":__version__,"Kod imzası":_source_version(),"Katalog sürümü":snapshot["version"],"Katalog içerik imzası":snapshot_signature,"Kapsam":scope,"Tarama tamamlandı":snapshot["complete"],"Metadata alım zamanı":snapshot["captured_at"],"Başlangıç UTC":started,"Bitiş UTC":datetime.now(timezone.utc).isoformat(),"Talep sayısı":len(requests),"Devam edilen satır":resumed,"Arama yaklaşımı":strategy,"Sonuç dağılımı":dict(Counter(r["semantic_status"] for r in results)),"Hatalar":errors+snapshot.get("errors",[]),"Model doğrulaması":"Sentetik embedding, Qwen çağrısı yok" if mode=="demo" else {k:{f:config[k].get(f) for f in ("model","model_version","dimensions")} for k in ("llm","embedding")},"Yorum":"Arama skorları doğruluk yüzdesi değildir. Uzman kararı kullanıcı tarafından doldurulur. Görüş ve hazırlama süresi korunur.","Girdi koruması":"Girdi sayfaları değer/metin ve hücre biçimleriyle kopyalandı. Formüller güvenli metin olarak tutulur; çalıştırılmaz. Grafik/makro/harici bağlantı yürütülmez."}
+    run_info={"Mod":"DEMO — sentetik, banka entegrasyonu doğrulanmadı" if mode=="demo" else "GERÇEK — yapılandırılmış kurum servisleri", "Tamamlanma":"Tamamlandı" if complete else "Eksik / teknik hata", "Uygulama sürümü":__version__,"Kod imzası":_source_version(),"Katalog sürümü":snapshot["version"],"Katalog içerik imzası":snapshot_signature,"Kapsam":scope,"Tarama tamamlandı":snapshot["complete"],"Metadata alım zamanı":snapshot["captured_at"],"Başlangıç UTC":started,"Bitiş UTC":datetime.now(timezone.utc).isoformat(),"Talep sayısı":len(requests),"Devam edilen satır":resumed,"Arama yaklaşımı":strategy,"Sonuç dağılımı":dict(Counter(r["semantic_status"] for r in results)),"Hatalar":errors+snapshot.get("errors",[]),"Model doğrulaması":"Sentetik embedding, Qwen çağrısı yok" if mode=="demo" else ({k:{f:config[k].get(f) for f in ("model","model_version","dimensions")} for k in ("llm","embedding")} if config.get("use_models",True) else "Model kullanılmadı; canlı Oracle kataloğunda ad ve metin araması"),"Yorum":"Arama skorları doğruluk yüzdesi değildir. Uzman kararı kullanıcı tarafından doldurulur. Görüş ve hazırlama süresi korunur.","Girdi koruması":"Girdi sayfaları değer/metin ve hücre biçimleriyle kopyalandı. Formüller güvenli metin olarak tutulur; çalıştırılmaz. Grafik/makro/harici bağlantı yürütülmez.","İşlenen sayfalar":list(dict.fromkeys(r["sheet"] for r in requests))}
     output=write_results(input_path,output_path,requests,results,run_info)
     atomic_json(state_dir/"feature_dependencies.json",graph)
     atomic_json(checkpoint,{"key":state_key,"status":"complete" if complete else "partial","results":results})

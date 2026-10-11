@@ -24,9 +24,10 @@ def _digest(value):
 
 
 class OracleAdapter:
-    def __init__(self, config, *, connector=None):
+    def __init__(self, config, *, connector=None, credentials=None):
         self.config = dict(config)
         self.connector = connector
+        self.credentials = dict(credentials) if credentials is not None else None
         for key in ("source_database", "environment", "container"):
             if not isinstance(self.config.get(key), str) or not self.config[key]:
                 raise ConfigError(f"Oracle {key} gerekli.")
@@ -48,7 +49,7 @@ class OracleAdapter:
                 raise ConfigError(f"Oracle {key} 0–{maximum} aralığında olmalı.")
 
     def _connect(self):
-        values = {key: os.environ.get(self.config[key]) for key in ("user_env", "password_env", "dsn_env")}
+        values = {key: (self.credentials.get(key.removesuffix("_env")) if self.credentials is not None else os.environ.get(self.config[key])) for key in ("user_env", "password_env", "dsn_env")}
         if not all(values.values()):
             raise ConfigError("Oracle kullanıcı, parola ve DSN ortam değişkenleri doldurulmalı.")
         kwargs = {"user": values["user_env"], "password": values["password_env"],
@@ -56,14 +57,14 @@ class OracleAdapter:
                   "tcp_connect_timeout": float(self.config.get("connect_timeout_seconds", 10))}
         wallet_name = self.config.get("wallet_dir_env")
         if wallet_name:
-            wallet = os.environ.get(wallet_name)
+            wallet = self.credentials.get("wallet_dir") if self.credentials is not None else os.environ.get(wallet_name)
             if not wallet:
                 raise ConfigError("Oracle wallet dizini ortam değişkeni boş.")
             kwargs["wallet_location"] = wallet
             kwargs["config_dir"] = wallet
         wallet_password_name = self.config.get("wallet_password_env")
         if wallet_password_name:
-            wallet_password = os.environ.get(wallet_password_name)
+            wallet_password = self.credentials.get("wallet_password") if self.credentials is not None else os.environ.get(wallet_password_name)
             if wallet_password:
                 kwargs["wallet_password"] = wallet_password
         connector = self.connector
@@ -110,8 +111,14 @@ class OracleAdapter:
                  WHERE {where}
                  ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID
             """
+            limit=self.config.get("max_records",10000)
+            if isinstance(limit,bool) or not isinstance(limit,int) or not 1 <= limit <= 10000:
+                raise ConfigError("Oracle kayıt sınırı 1–10000 arasında olmalı.")
             cursor.execute(sql, binds)
-            rows = cursor.fetchall()
+            # Real drivers fetch at most one extra row to detect truncation.
+            rows = cursor.fetchmany(limit+1) if hasattr(cursor,"fetchmany") else cursor.fetchall()
+            truncated=len(rows)>limit
+            rows=rows[:limit]
             records = []
             for row in rows:
                 (schema, obj, column, data_type, length, precision, scale, nullable,
@@ -138,6 +145,8 @@ class OracleAdapter:
             visible_schemas = {record["schema"] for record in records}
             errors = [f"Şema için erişilebilir kolon görülmedi: {schema}"
                       for schema in self.schemas if schema not in visible_schemas]
+            if truncated:
+                errors.append("Katalog kayıt sınırına ulaşıldı; kapsamı daraltın. Yokluk sonucu verilemez.")
             try:
                 key_sql = f"""
                     SELECT c.OWNER, c.TABLE_NAME, c.CONSTRAINT_TYPE, c.CONSTRAINT_NAME,

@@ -1,0 +1,183 @@
+"""Loopback-only web workspace. Credentials are passed in memory, never stored."""
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import secrets
+import threading
+import time
+
+from flask import Flask, jsonify, render_template, request, send_file, session
+from werkzeug.exceptions import HTTPException
+
+from .errors import ConfigError, InputError, IntegrationError
+from .excelio import LABELS, reason_text
+from .pipeline import analyze
+from . import web_services as services
+
+
+def create_app(runtime_dir=None, *, analyzer=None):
+    app=Flask(__name__)
+    app.config.update(SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=12*1024*1024,
+                      MAX_FORM_MEMORY_SIZE=100000, MAX_FORM_PARTS=10,
+                      SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
+                      TRUSTED_HOSTS=["localhost","127.0.0.1"])
+    root=Path(runtime_dir or "runtime/web").resolve()
+    root.mkdir(parents=True,exist_ok=True)
+    uploads,jobs={},{}
+    guard=threading.Lock()
+    executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix="riskmatch")
+    app.extensions["riskmatch"]={"executor":executor,"jobs":jobs,"uploads":uploads}
+    run=analyzer or analyze
+
+    @app.before_request
+    def protect():
+        if request.method not in ("GET","HEAD","OPTIONS"):
+            origin=request.headers.get("Origin")
+            if origin and origin!=request.host_url.rstrip("/"):
+                return jsonify(error="Bu sayfayı uygulamanın kendi adresinden açın."),403
+            if not session.get("csrf") or not secrets.compare_digest(request.headers.get("X-CSRF-Token",""),session["csrf"]):
+                return jsonify(error="Oturum doğrulanamadı. Sayfayı yenileyin."),403
+
+    @app.after_request
+    def headers(response):
+        response.headers.update({"Cache-Control":"no-store", "X-Content-Type-Options":"nosniff",
+            "Referrer-Policy":"no-referrer", "X-Frame-Options":"DENY",
+            "Content-Security-Policy":"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+        return response
+
+    @app.errorhandler(Exception)
+    def error_handler(error):
+        if isinstance(error,(ConfigError,InputError,IntegrationError)):
+            return jsonify(error=str(error)),400
+        if isinstance(error,HTTPException):
+            message="Dosya en fazla 12 MB olabilir." if error.code==413 else "İstek veya adres geçersiz."
+            return jsonify(error=message),error.code
+        # Raw driver / network exceptions can contain passwords or private URLs.
+        return jsonify(error="İşlem tamamlanamadı. Bağlantı ayarlarını ve dosyanızı kontrol edin."),500
+
+    def body():
+        if request.content_length and request.content_length>100000:raise InputError("Ayar isteği çok büyük.")
+        value=request.get_json()
+        if not isinstance(value,dict):raise InputError("İstek nesne olmalı.")
+        return value
+
+    def owned(items,identity):
+        value=items.get(identity)
+        if not value or value["owner"]!=session.get("owner"):
+            from flask import abort
+            abort(404)
+        return value
+
+    @app.get("/")
+    def home():
+        session.setdefault("owner",secrets.token_hex(24))
+        session.setdefault("csrf",secrets.token_hex(32))
+        return render_template("index.html",csrf=session["csrf"])
+
+    @app.post("/api/profile")
+    def profile():return jsonify(services.clean_profile(body()))
+
+    @app.post("/api/probe/<name>")
+    def probe(name):
+        data=body()
+        if name=="oracle":return jsonify(services.probe_oracle(data))
+        if name in ("llm","embedding"):return jsonify(services.probe_model(data,name))
+        raise InputError("Bilinmeyen bağlantı türü.")
+
+    @app.post("/api/models/<name>")
+    def models(name):
+        if name not in ("llm","embedding"):raise InputError("Bilinmeyen model türü.")
+        return jsonify(services.list_models(body(),name))
+
+    @app.post("/api/upload")
+    def upload():
+        file=request.files.get("file")
+        if not file or not file.filename.lower().endswith(".xlsx"):raise InputError(".xlsx uzantılı Excel dosyası seçin.")
+        with guard:
+            if len(uploads)>=30:raise InputError("Bu oturumdaki dosya sınırına ulaşıldı. Uygulamayı yeniden başlatın.")
+            identity=secrets.token_hex(16)
+            path=root/"uploads"/(identity+".xlsx")
+            path.parent.mkdir(exist_ok=True)
+            file.save(path)
+            try:sheets=services.inspect_workbook(path)
+            except Exception:
+                path.unlink(missing_ok=True)
+                raise
+            uploads[identity]={"owner":session["owner"],"path":path,"filename":Path(file.filename).name}
+        return jsonify(id=identity,filename=Path(file.filename).name,sheets=sheets)
+
+    def worker(identity,path,mapping,config,credentials,requests):
+        job=jobs[identity]
+        def progress(value):
+            with guard:job["progress"]=value
+        try:
+            result=run(path,root/identity/"sonuclar.xlsx",mode="real",config_data=config,
+                       credentials=credentials,column_mapping=mapping,state_dir=root/identity/"state",progress=progress)
+            request_map={r["row_id"]:r for r in requests}
+            for row in result["results"]:
+                original=request_map[row["row_id"]]
+                row["request"]={k:original.get(k,"") for k in ("name","description","category","data_type","reported","sheet","excel_row")}
+                row["labels"]={k:LABELS.get(row[k],row[k]) for k in ("physical_name","semantic_status","production_status")}
+                row["reason_texts"]=[reason_text(v) for v in row["reasons"]]
+                for candidate in row["candidates"]:
+                    candidate["label"]=LABELS.get(candidate["status"],candidate["status"])
+                    candidate["reason_texts"]=[reason_text(v) for v in candidate.get("reasons",[])]
+            with guard:
+                job.update(status="complete",result=result,finished=time.time())
+        except Exception:
+            with guard:job.update(status="failed",error="Analiz tamamlanamadı. Dosya erişimini ve bağlantı ayarlarını kontrol edin.",finished=time.time())
+        finally:
+            for value in credentials.values():
+                if isinstance(value,dict):value.clear()
+            credentials.clear()
+
+    @app.post("/api/analyze")
+    def start():
+        data=body()
+        upload=owned(uploads,data.get("upload_id"))
+        mapping=data.get("mapping")
+        requests=services.validate_mapping(upload["path"],mapping)
+        config,credentials=services.build_run(data.get("settings",{}))
+        with guard:
+            if any(j["status"]=="running" for j in jobs.values()):
+                return jsonify(error="Bir analiz devam ediyor. Tamamlandıktan sonra yeniden deneyin."),409
+            if len(jobs)>=20:raise InputError("Analiz sınırına ulaşıldı. Uygulamayı yeniden başlatın.")
+            identity=secrets.token_hex(16)
+            jobs[identity]={"id":identity,"owner":session["owner"],"status":"running",
+                "filename":upload["filename"],"progress":{"stage":"Analiz hazırlanıyor","completed":0,"total":len(requests)}}
+        executor.submit(worker,identity,upload["path"],mapping,config,credentials,requests)
+        return jsonify(id=identity),202
+
+    @app.get("/api/jobs/<identity>")
+    def status(identity):
+        with guard:
+            job=owned(jobs,identity)
+            data={k:v for k,v in job.items() if k not in ("owner","result")}
+            if job.get("result"):
+                data.update(results=job["result"]["results"],run_info=job["result"]["run_info"])
+        return jsonify(data)
+
+    @app.get("/api/jobs/<identity>/download")
+    def download(identity):
+        job=owned(jobs,identity)
+        if job["status"]!="complete":raise InputError("Sonuç henüz hazır değil.")
+        return send_file(root/identity/"sonuclar.xlsx",as_attachment=True,download_name="degisken-inceleme-sonuclari.xlsx")
+
+    return app
+
+
+def serve(port=8765,open_browser=True):
+    import webbrowser
+    from waitress import create_server
+    app=create_app()
+    try:
+        server=create_server(app,host="127.0.0.1",port=port,threads=6,max_request_body_size=12*1024*1024)
+    except OSError:
+        raise ConfigError("Web portu kullanılıyor veya erişilemiyor. Açık uygulamayı kontrol edin ya da serve --port 8766 kullanın.") from None
+    url="http://127.0.0.1:"+str(port)
+    print("Risk Feature Workbench: "+url+"\nKapatmak için Ctrl+C. Kurum bağlantısı yalnız ekrandan başlatılır.",flush=True)
+    if open_browser:webbrowser.open(url)
+    try:server.run()
+    except KeyboardInterrupt:pass
+    finally:
+        server.close()
+        app.extensions["riskmatch"]["executor"].shutdown(wait=True)

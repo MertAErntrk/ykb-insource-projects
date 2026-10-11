@@ -32,8 +32,9 @@ def _has_placeholder(value, placeholder):
 
 
 class EmbeddingAdapter:
-    def __init__(self, config, *, transport=None):
+    def __init__(self, config, *, transport=None, api_key=None):
         self.config = dict(config)
+        self.api_key = api_key
         validate_endpoint(self.config)
         _bounded_timeout(self.config)
         _bounded_int(self.config.get("max_retries"), 1, 0, 2, "max_retries")
@@ -68,7 +69,7 @@ class EmbeddingAdapter:
                 self.config["request_template"],
                 {"texts": batch, "model": self.model, "model_version": self.model_version},
             )
-            response = post_json(self.config, payload, transport=self.transport)
+            response = post_json(self.config, payload, transport=self.transport,api_key=self.api_key)
             output = response_path(response, self.config["response_path"])
             if not isinstance(output, list) or len(output) != len(batch):
                 raise IntegrationError("Embedding yanıtındaki vektör sayısı istekle uyuşmuyor.")
@@ -84,8 +85,9 @@ class EmbeddingAdapter:
 class LLMAdapter:
     """Returns checked suggestions only. Deterministic support remains elsewhere."""
 
-    def __init__(self, config, *, transport=None):
+    def __init__(self, config, *, transport=None, api_key=None):
         self.config = dict(config)
+        self.api_key = api_key
         validate_endpoint(self.config)
         _bounded_timeout(self.config)
         _bounded_int(self.config.get("max_retries"), 1, 0, 2, "max_retries")
@@ -146,7 +148,7 @@ class LLMAdapter:
         else:
             payload = render_template(self.config["request_template"], values)
             path = self.config["response_path"]
-        response = post_json(self.config, payload, transport=self.transport)
+        response = post_json(self.config, payload, transport=self.transport,api_key=self.api_key)
         raw = response_path(response, path)
         if isinstance(raw, str):
             try:

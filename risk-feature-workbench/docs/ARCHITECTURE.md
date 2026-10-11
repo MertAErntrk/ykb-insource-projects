@@ -1,5 +1,13 @@
 # Mimari değerlendirme ve karar kaydı
 
+## 0.2 web sürümü
+
+Güncel kullanıcı arayüzü Flask + Waitress üzerinde, yalnız 127.0.0.1 adresine bağlı yerel web uygulamasıdır. HTML/CSS/JavaScript paket içindedir; CDN, Node veya Tk gerekmez. Kullanıcı Oracle ve isteğe bağlı model bağlantılarını formdan girer, kendi Excel'ini yükler ve sayfa/sütun eşler. Tek arka plan worker ilerlemeyi raporlar; kaynak konumu/kolon açıklaması adaylarda ve Excel'de taşınır. Fiziksel varlık ve semantik destek ayrımı korunur.
+
+Web API gerçek bağlantı yolunu kullanır; demo modu reddedilir. Parola ve API anahtarı iş belleğinde aktarılır, global ortam değişkenine veya profile yazılmaz. Host doğrulama, aynı origin kontrolü, oturum bağlı CSRF, HttpOnly/SameSite cookie, CSP, dosya ve iş sahipliği, dosya/boyut/kayıt sınırları uygulanır. Dosyalar runtime/web altında kalır. Bu sürüm tek kullanıcı yerel kullanım içindir; paylaşımlı ağa açılan sunucu değildir.
+
+Aşağıdaki bölümler ilk semantik motorun tasarım gerekçelerini korur. Güncel kullanım rehberi IS_BILGISAYARINDA_BASLANGIC.md dosyasıdır.
+
 Bu MVP metadata üzerinden kanıt arar; müşteri verisini hesaplamaz ve üretim veritabanına yazmaz. Sentetik örneklerin başarısı banka ortamının veya semantik doğruluk oranının doğrulandığı anlamına gelmez.
 
 ## Başlangıç tasarımına eleştiri

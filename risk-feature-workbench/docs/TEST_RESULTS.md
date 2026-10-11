@@ -1,48 +1,44 @@
-# Doğrulama — 11 Ekim 2026
+# Web sürümü doğrulaması — 0.2.0
 
-## Son uygulama testleri
+2026-10-11 tarihinde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 üzerinde doğrulandı. Kurum Oracle/Qwen servislerine bağlanılmadı; test bağlantıları kontrollü taklit adapter'lardır.
 
-**86 uygulama testi geçti; hata veya başarısızlık yok.** Son repo doğrulaması: Windows x64 / **Python 3.9.7**, openpyxl 3.1.5; 15,708 saniye. Aynı 86 test önce Python 3.12.14 ile de geçti. İş bilgisayarı için teslim edilen kurulum 3.9.7 sürümüne göre düzenlendi. Koşu komutu:
+## Kurulum
 
-```powershell
-$env:PYTHONPATH = (Resolve-Path src).Path
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
+- Windows PowerShell 5.1 ile scripts/setup.ps1 tamamlandı; proje 0.2.0 olarak kuruldu.
+- 18 çalışma bağımlılığı gerçek Python 3.9.7 resolver'ıyla sabitlenip SHA256 hash denetimiyle kuruldu. Flask 3.1.3, Waitress 3.0.2, oracledb 4.0.2, openpyxl 3.1.5 dahil.
+- Python <3.10 için gereken importlib_metadata ve zipp kilit dosyasında yer alır. Python 3.12 üzerinde varsayımsal çözümle yetinilmedi.
+- pip check: bağımlılık çakışması yok. JavaScript sözdizimi kontrolü başarılı.
+- PowerShell tırnak aktarımı düzeltmesi ve Türkçe mesajlar için UTF-8 BOM korundu. Tk arayüzü kaldırıldı; start.ps1 web uygulamasını başlatır.
 
-`test-results.txt` bu son koşunun çıktısını içerir. Uygulama testlerine Graphify dahil değildir. Harici geliştirme analizinde ayrıca **7 Graphify testi geçti**; bu harici araç ve çıktıları repoya dahil değildir.
+## Otomatik kontroller
 
-| Kapsam | Gerçekten çalıştırılan kanıt |
+103 test: 85 semantik/Excel/adapter/retrieval/checkpoint kontrolü ve 18 web kontrolü.
+
+| Alan | Kapsam |
 |---|---|
-| Semantik | Aynı isim/farklı anlam; farklı isim/tam tanım; açıklamasız metadata; max/sum/order; kişi/hesap/işlem; yön; pencere ve ters oran; yanlış grain/tarih; faiz türü/oranı; başvurulan/onaylanan; net/brüt ve ürün kapsamı; boş/yanlış fact tipleri |
-| Bağımlılık | Eksik Havale_L3M, duplicate ad, belirsiz referans, bütün SCC döngü üyeleri ve büyük graph; sıfır ve NULL ayrımı; günlük distinct toplamama |
-| Üretim | Geçici gerçek .xlsx + config-relative onaylı sidecar + sentetik katalog üzerinden iki supported operand ve production candidate; anahtar eksik olunca engel; kaynak facts/formül silinemiyor |
-| Oracle | Sahte read-only connector ile ALL_* SQL, bound şema parametreleri, boş yorumların korunması, yanlış container, boş görünür şema, yorumun semantiğe akışı, validated/enabled P/U, timeout parametreleri |
-| Qwen | Sahte transport ile ayrı LLM/embedding sözleşmeleri; model/endpoint/boyut doğrulama; uydurma kolon/kanıt/şema reddi; bozuk cevap ve timeout; TLS/allowlist/redirect sınırı |
-| Retrieval/cache | Kesin ad, BM25, embedding, RRF; Türkçe normalizasyon; kapsam filtresi; stale/deleted kayıt; model ve endpoint/sözleşme değişiminde cache ayrımı; zorla aday seçmeme |
-| İş akışı | Tüm çalışma kitabı, gerçek mod hatasında demo fallback olmaması, eksik kapsamda yokluk iddiası vermeme, satır hatası gizli değerlerinin loga çıkmaması |
-| Devam | 4. satırda KeyboardInterrupt ile gerçek kesinti, aynı komutla 4 satırdan devam; hatalı satırlar yeniden denendi; içerik değişince invalidation, salt alım saati değişince 28 satır reuse |
-| Excel | 2 sayfa/28 demo satırı; özgün Görüş/Hazırlama süresi; HTML/br/çok satır/Türkçe; duplicate adlar; boş kaynak satırları; formüllerin güvenli metin oluşu; kalıcı kimlikli kopya düzenleme |
+| Web akışı | Gerçek-mode pipeline üzerinden Excel yükleme, otomatik beş başlık eşlemesi, özel başlık eşlemesi, Oracle taraması, kaynak tablo/kolon çıktısı, rapor indirme ve özgün hücre koruması |
+| Gerçek bağlantı hatası | Eksik kapsam, unknown fiziksel yokluk; ham hata ve sırlar kullanıcıya/rapora taşınmaz |
+| Model desteği | Açık endpoint/model/sözleşme gerekliliği, ayrı LLM ve embedding çağrıları, boyut kontrolü, kök liste ve data[*].embedding yolları |
+| Parolalar | Profilde dışlama, iki bağlantıda ayrı credential aktarımı, global ortamı değiştirmeme, checkpoint ve sonuç JSON'larında secret sentinel bulunmaması |
+| Web sınırları | CSRF, Origin, Host, dosya/iş sahipliği, bozuk/büyük dosya, eksik/çift sütun, eşzamanlı ikinci işin reddi |
+| Kapsam | Oracle kayıt sınırında tarama eksik; yokluk iddiası engellenir |
+| Semantik | Aynı isim farklı anlam, eksik kritik bilgi, farklı kişi/işlem/grain, pencere/referans/NULL/sıfır ayrımı, güvenilir kaynaksız destek engeli |
+| Excel/bağımlılık | Tüm sayfaları koruma, formula metni, sabit kimlik, belirsiz/eksik/döngülü bağımlılıklar, doğrulanmamış join engeli |
+| Devam/cache | Kesinti sonrası devam, hatalı satırı yeniden deneme, içerik/model/kapsam değişiminde eski cache kararını reddetme |
 
-## Demo ve arayüz
+## Tarayıcı kontrolü
 
-`python -m riskmatch demo` gerçekten çalıştırıldı: **28 satır**, çalışma tamamlandı. Demo sonucu **2 metadata ile desteklenen, 9 çelişkili, 17 kritik bilgi eksik**. Bunlar sentetik senaryo sayılarıdır, banka başarı oranı değildir. Hazır dosya `examples/demo_run/demo_sonuclar.xlsx`.
+Paketin gerçek web sunucusu localhost'ta HTTP 200 verdi. 1280 px masaüstü ve 390 px dar ekran düzeni görsel olarak kontrol edildi. Ayrı, repoya dahil olmayan test sunucusunda yalnız Oracle bağlantısı taklit edildi; gerçek web/pipeline kodu kullanıldı:
 
-Sonuç kitabının altı sayfası render edildi ve görsel olarak kontrol edildi; tablolar, orijinal metin, kanıtlar ve tamamlanma alanları mevcut. Aktif Excel formülü sayısı **0**; kaynak formül metni aynen korunur. Kaynak örnek workbook `@oai/artifact-tool` ile oluşturuldu; uygulamanın yerel Excel okuma/yazma katmanı openpyxl'dir.
+- Oracle formu → bağlantı testi → container/şema listesi.
+- Beş sütunlu Excel yükleme → otomatik sütun eşleştirme → analiz ilerlemesi.
+- Sonuç tablosunda fiziksel kolon ile iş tanımı uyumunun ayrı görünmesi.
+- Detayda şema/tablo/kolon yolu, kolon ve tablo açıklaması, kaynak kanıtları.
 
-Python 3.9.7 ile gerçek Tk gizli penceresi oluşturuldu; **Sentetik örneği kullan → Analiz et → 28 satırlı, 6 sayfalı dosyayı kaydet → düğmeyi yeniden etkinleştir** akışı çalıştırıldı. Dosya kaydetme diyaloğunun seçimi otomatik testte taklit edildi. İnsanla görsel erişilebilirlik/ölçeklendirme kontrolü yapılmış sayılmaz. Kalıcı sistem ayarı değiştirilmedi.
+Bu tarayıcıda pointer otomasyonu bazı kontrolleri etkinleştirmedi; aynı kontroller klavyeyle doğrulandı. Uygulama içi tarayıcının indirme otomasyonu kendi aktarım hatasıyla kesildi. Rapor indirme HTTP uç noktası ve dönen XLSX içeriği otomatik testte başarıyla doğrulandı; bu, kurum tarayıcısında indirme testi yapıldığı anlamına gelmez.
 
-## Kurulum kanıtı
+## Kurumda doğrulanacaklar
 
-- `scripts/setup.ps1 -Real -Python <Python-3.9.7-yolu>` gerçek 3.9.7 çalıştırıcısıyla proje sanal ortamında tamamlandı. Paket editable wheel olarak derlenip kuruldu; kurulu paket üzerinden 28 satırlı demo tekrar çalıştı. Python dosyaları resmi, imzalı Windows dağıtımından yalnız test klasörüne çıkarıldı.
-- Windows x64/Python 3.9.7 için resmî PyPI resolver sonucu 7 gerçek-mod bağımlılığı sabit sürüm ve SHA256 hash'leriyle kilitlendi. `requirements-real.lock` gerçekten kurulabildi; sistem Python bağımlılıkları değiştirilmedi. Kurulum araçları da `requirements-build.lock` ile pip 25.3 ve setuptools 80.9.0 olarak sabitlendi.
-- `oracledb==4.0.2` gerçek modülü Python 3.9.7'de import edildi, `ConnectParams(tcp_connect_timeout=10, ssl_server_dn_match=True)` bağlantısız kabul edildi. **Oracle connect veya gerçek Qwen inference çağrısı yapılmadı.**
-- `requirements-demo.lock` yalnız openpyxl 3.1.5 ve et_xmlfile 2.0.0 içerir. Graphify hiçbir requirements/pyproject bağımlılığında bulunmaz.
-- GitHub Actions için Windows / Python 3.9.7 kurulum, 86 test ve demo Excel akışı eklendi. Bu testler sentetik veri ve taklit servis kullanır; kurum erişim bilgisi gerekmez.
+Oracle DNS/port/service/container, kullanıcı yetkileri, taranacak gerçek şemalar, thin driver uyumluluğu, kurumsal paket aynası erişimi, CA/proxy, Qwen tam endpoint/model/yanıt sözleşmesi ve gerçek değişken eşleştirme doğruluğu. Bunlar iş bilgisayarında gerçek Excel ile sınanmalıdır.
 
-Windows PowerShell 5.1 uyumluluk düzeltmesi: `struct.calcsize("P")` içindeki tırnakların native komuta aktarımında kaybolmasıyla oluşan `NameError` yeniden üretildi. Sürüm/mimari kontrolü iç içe tırnak gerektirmeyen `sys.maxsize` kontrolüne çevrildi. Gerçek Windows PowerShell 5.1 ve Python 3.9.7 ile boş klasörden demo kurulumu, mevcut ortamda `-Real` kurulumu ve 28 satırlı demo Excel üretimi başarıyla çalıştı. Kurulum betiğinin Türkçe mesajları için UTF-8 BOM kullanıldı. GitHub Actions aynı hatayı yakalayabilmek için `powershell` kabuğuna geçirildi.
-
-## Canlı doğrulanmayanlar
-
-Kurum DNS/TLS/wallet, Oracle görünürlük ve performansı, yerel Qwen endpoint/protokol/model/boyutu, gerçek risk feature doğruluğu, kurum Windows kurulum politikası. Kullanıcı gerçek ayarları iş bilgisayarında doldurup `docs/WINDOWS.md` pilot listesini tamamlamalıdır. Bu sınırlar demo başarısıyla kapanmaz.
-
-LLM'ye sıfır hata garantisi verilmez. Serbest iş tanımları sınırlı parser dışında kalabilir; kanıt eksikse kesin eşleşme verilmemesi tasarlanan davranıştır. Metin referansının geçerliliği tek başına semantik doğruluğu kanıtlamaz.
+İsim veya benzerlik skoru tek başına iş anlamı kanıtı değildir. Serbest iş tanımı parser'ı sınırlıdır; eksik veya anlaşılmayan tanımda çekimser sonuç tasarlanmış davranıştır. Çok kullanıcılı ağ sunucusu ve web arayüzünde kesintiden devam bu sürümün kapsamında değildir.

@@ -39,16 +39,21 @@ def _load(path):
     except Exception:
         raise InputError("Excel dosyası okunamadı. Dosya türünü ve erişim iznini kontrol edin.") from None
 
-def read_requests(path):
+def read_requests(path, column_mapping=None):
     wb = _load(path)
     requests, seen_ids = [], set()
     workbook_id = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     for sheet in wb:
+        selected=column_mapping.get(sheet.title) if column_mapping is not None else None
+        if column_mapping is not None and selected is None:
+            continue
         header_row = None
         headers = []
-        for cells in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 30)):
+        first=selected["header_row"] if selected else 1
+        last=first if selected else min(sheet.max_row,30)
+        for cells in sheet.iter_rows(min_row=first, max_row=last):
             values = [str(c.value or "") for c in cells]
-            if norm("Alan Adı") in [norm(v) for v in values]:
+            if selected or norm("Alan Adı") in [norm(v) for v in values]:
                 headers, header_row = values, cells[0].row
                 break
         if header_row is None:
@@ -60,9 +65,14 @@ def read_requests(path):
                         requests.append({"row_id":rid,"sheet":sheet.title,"excel_row":row[0].row,"name":"","description":"","data_type":"","category":"","original":{c.column_letter:serial(c.value) for c in row},"input_errors":["Alan Adı başlığı bulunamadı; satır incelenemedi."]})
             continue
         normalized = [norm(v) for v in headers]
-        missing = [h for h in HEADERS if norm(h) not in normalized]
+        missing = [h for h in ("Alan Adı","Açıklama") if norm(h) not in normalized]
         duplicates = {h for h in normalized if h and normalized.count(h) > 1}
         mapping = {h:i for i,h in enumerate(normalized)}
+        if selected:
+            field_names={"name":"Alan Adı","description":"Açıklama","category":"Kategori","data_type":"Alan tipi","reported":"Halihazırda bildiriliyor mu","row_id":"Talep Kimliği"}
+            mapping={norm(field_names[key]):index-1 for key,index in selected["columns"].items() if key in field_names and index is not None}
+            missing=[h for h in ("Alan Adı","Açıklama") if norm(h) not in mapping]
+            duplicates=set()  # Explicit column positions resolve duplicate header labels.
         for cells in sheet.iter_rows(min_row=header_row+1):
             values = [serial(c.value) for c in cells]
             if all(v is None for v in values):
@@ -172,12 +182,14 @@ def write_results(input_path, output_path, requests, results, run_info):
     wb=Workbook()
     wb.remove(wb.active)
     original_headers=list(dict.fromkeys(k for r in requests for k in r["original"] if norm(k)!=norm("Talep Kimliği")))
-    headers=["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"]+original_headers+["Fiziksel ad kontrolü","Semantik uyum","Üretim ihtimali","Gerekçe","Satır hataları","Bağımlılıklar","Uzman kararı"]
+    headers=["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"]+original_headers+["Olası şema","Olası tablo","Olası kolon","Katalog kolon açıklaması","Fiziksel ad kontrolü","Semantik uyum","Üretim ihtimali","Gerekçe","Satır hataları","Bağımlılıklar","Uzman kararı"]
     result_map={r["row_id"]:r for r in results}
     rows=[]
     for req in requests:
         r=result_map[req["row_id"]]
-        rows.append([req["row_id"],req["sheet"],req["excel_row"]]+[req["original"].get(h) for h in original_headers]+[LABELS.get(r["physical_name"],r["physical_name"]),LABELS.get(r["semantic_status"],r["semantic_status"]),LABELS.get(r["production_status"],r["production_status"]),"\n".join(reason_text(v) for v in r["reasons"]),"\n".join(r["errors"]),r.get("dependencies",[]),r.get("expert_decision","")])
+        best=next((c for c in r["candidates"] if c["status"]=="supported"),r["candidates"][0] if r["candidates"] else {})
+        source=best.get("source",{})
+        rows.append([req["row_id"],req["sheet"],req["excel_row"]]+[req["original"].get(h) for h in original_headers]+[source.get(k,"") for k in ("schema","object","column","column_comment")]+[LABELS.get(r["physical_name"],r["physical_name"]),LABELS.get(r["semantic_status"],r["semantic_status"]),LABELS.get(r["production_status"],r["production_status"]),"\n".join(reason_text(v) for v in r["reasons"]),"\n".join(r["errors"]),r.get("dependencies",[]),r.get("expert_decision","")])
     ws=_table(wb,"Sonuçlar",headers,rows)
     for h in ("Açıklama","Gerekçe","Satır hataları"):
         if h in headers:
@@ -193,11 +205,11 @@ def write_results(input_path, output_path, requests, results, run_info):
         reviews={a["catalog_id"]:a for a in r.get("model_review",{}).get("assessments",[])}
         for c in r["candidates"]:
             advice=reviews.get(c["catalog_id"],{})
-            candidates.append([r["row_id"],c["catalog_id"],c.get("path",""),LABELS.get(c["status"],c["status"]),c.get("score",0),", ".join(c.get("retrieval",[])),"\n".join(f"{DIMENSION_LABELS.get(x['dimension'],x['dimension'])}: {CHECK_LABELS.get(x['status'],x['status'])}" for x in c.get("checks",[])),"\n".join(reason_text(v) for v in c.get("reasons",[])),advice.get("note",""),advice.get("evidence","")])
+            candidates.append([r["row_id"],c["catalog_id"],c.get("path","")]+[c.get("source",{}).get(k,"") for k in ("schema","object","column","data_type","column_comment","table_comment")]+[LABELS.get(c["status"],c["status"]),c.get("score",0),", ".join(c.get("retrieval",[])),"\n".join(f"{DIMENSION_LABELS.get(x['dimension'],x['dimension'])}: {CHECK_LABELS.get(x['status'],x['status'])}" for x in c.get("checks",[])),"\n".join(reason_text(v) for v in c.get("reasons",[])),advice.get("note",""),advice.get("evidence","")])
             for check in c.get("checks",[]):
                 proof=check.get("evidence",{})
                 evidence_rows.append([r["row_id"],c["catalog_id"],DIMENSION_LABELS.get(check["dimension"],check["dimension"]),CHECK_LABELS.get(check["status"],check["status"]),check.get("requested"),check.get("actual"),proof.get("request",""),proof.get("candidate",""),proof.get("request_source",""),proof.get("candidate_source","")])
-    _table(wb,"Adaylar",["Talep Kimliği","Katalog Kimliği","Tam kaynak yolu","Semantik durum","Arama skoru (olasılık değil)","Arama yöntemleri","Boyut bazında kanıt, çelişki ve eksik","Gerekçe","Model yorumu (doğrulanmış karar değil)","Modelin alıntıladığı kaynak"],candidates)
+    _table(wb,"Adaylar",["Talep Kimliği","Katalog Kimliği","Tam kaynak yolu","Şema","Tablo","Kolon","Veri tipi","Kolon açıklaması","Tablo açıklaması","Semantik durum","Arama skoru (olasılık değil)","Arama yöntemleri","Boyut bazında kanıt, çelişki ve eksik","Gerekçe","Model yorumu (doğrulanmış karar değil)","Modelin alıntıladığı kaynak"],candidates)
     _table(wb,"Çalışma bilgisi",["Bilgi","Değer"],list(run_info.items()))
     _table(wb,"Kanıtlar",["Talep Kimliği","Katalog Kimliği","Boyut","Uyum","Talep değeri","Katalog değeri","Talebin kaynak metni","Katalog kaynak metni","Talep kanıt türü","Katalog kanıt türü"],evidence_rows)
     # Preserve all original rows, sheets, ordering, formulas-as-text, styles, and supplied user fields.

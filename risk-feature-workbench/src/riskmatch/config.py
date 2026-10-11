@@ -11,13 +11,13 @@ DEFAULTS = {
     "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}},
 }
 
-def load_config(path=None, mode="demo"):
+def load_config(path=None, mode="demo", *, data=None):
     if mode not in {"demo", "real"}:
         raise ConfigError("Mod demo veya real olmalı.")
     config = deepcopy(DEFAULTS)
-    if path:
+    if path or data is not None:
         try:
-            supplied = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+            supplied = deepcopy(data) if data is not None else json.loads(Path(path).read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             raise ConfigError("Yapılandırma dosyası okunamadı veya JSON geçersiz.") from None
         if not isinstance(supplied, dict):
@@ -36,7 +36,8 @@ def load_config(path=None, mode="demo"):
         raise ConfigError("naming.windows metin anahtar/değer sözlüğü olmalı.")
     if config.get("reviewed_definitions_path"):
         reviewed_path=Path(config["reviewed_definitions_path"])
-        config["reviewed_definitions_path"]=str((Path(path).resolve().parent/reviewed_path).resolve()) if not reviewed_path.is_absolute() else str(reviewed_path)
+        base=Path(path).resolve().parent if path else Path.cwd()
+        config["reviewed_definitions_path"]=str((base/reviewed_path).resolve()) if not reviewed_path.is_absolute() else str(reviewed_path)
     for field in ("limit", "expanded_limit"):
         value = retrieval.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 100:
@@ -49,15 +50,19 @@ def load_config(path=None, mode="demo"):
                 raise ConfigError("Sırlar yapılandırma dosyasına yazılmamalı; *_env alanlarını kullanın.")
         if config.get("allow_real_connections") is not True:
             raise ConfigError("Gerçek bağlantılar kapalı. İş bilgisayarında allow_real_connections=true ayarlayın.")
-        for section in ("oracle", "llm", "embedding"):
+        use_models=config.get("use_models",True)
+        if not isinstance(use_models,bool):
+            raise ConfigError("use_models true veya false olmalı.")
+        for section in (("oracle", "llm", "embedding") if use_models else ("oracle",)):
             if not isinstance(config.get(section), dict):
                 raise ConfigError(f"Gerçek mod için {section} ayarları gerekli.")
         # Validate both model contracts before Oracle can initiate a connection.
         from .adapters.qwen import EmbeddingAdapter, LLMAdapter
         from .adapters.oracle import OracleAdapter
         OracleAdapter(config["oracle"])
-        EmbeddingAdapter(config["embedding"])
-        LLMAdapter(config["llm"])
+        if use_models:
+            EmbeddingAdapter(config["embedding"])
+            LLMAdapter(config["llm"])
     return config
 
 def signature_config(config):

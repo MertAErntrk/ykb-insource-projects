@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -45,13 +46,16 @@ def _bounded_timeout(config):
     return float(value)
 
 
-def post_json(config, payload, *, transport=None):
+def post_json(config, payload, *, transport=None, api_key=None):
     endpoint = validate_endpoint(config)
     timeout = _bounded_timeout(config)
     retries = _bounded_int(config.get("max_retries"), 1, 0, 2, "max_retries")
     key_name = config.get("api_key_env")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if key_name:
+    if api_key is not None:
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    elif key_name:
         if not isinstance(key_name, str) or not key_name:
             raise ConfigError("api_key_env ortam değişkeni adı olmalı.")
         secret = os.environ.get(key_name)
@@ -65,7 +69,11 @@ def post_json(config, payload, *, transport=None):
     if len(body) > 512_000:
         raise ConfigError("Servis isteği boyut sınırını aşıyor.")
     request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-    opener = transport or urllib.request.build_opener(_NoRedirect())
+    try:
+        context=ssl.create_default_context(cafile=config.get("ca_file") or None)
+    except (OSError,ssl.SSLError):
+        raise ConfigError("Kurum CA dosyası okunamadı; PEM dosyasının yolunu kontrol edin.") from None
+    opener = transport or urllib.request.build_opener(_NoRedirect(),urllib.request.HTTPSHandler(context=context))
     for attempt in range(retries + 1):
         try:
             with opener.open(request, timeout=timeout) as response:
@@ -108,6 +116,8 @@ def response_path(value, path):
     """Explicit dotted JSON path, with [*] for one or more arrays."""
     if not isinstance(path, str) or not path:
         raise ConfigError("response_path gerekli.")
+    if path == "$":
+        return value
     values = [value]
     try:
         for part in path.split("."):

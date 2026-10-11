@@ -10,7 +10,7 @@ YKB'de insource olarak geliştirilen projelerin reposudur.
 | [`mrm-ai/`](mrm-ai/) | MRM AI | MRM AI projesi |
 | [`laya/`](laya/) | Laya | Laya projesi |
 | [`strateji-cevap/`](strateji-cevap/) | Strateji Cevap Motoru | Strateji çıktıları hakkındaki Smile çağrılarına otomatik cevap taslağı üreten motor |
-| [`risk-feature-workbench/`](risk-feature-workbench/) | Risk Feature Workbench | Excel risk alanı taleplerini Oracle katalog kanıtlarıyla inceleyen yerel masaüstü uygulaması; [iş bilgisayarı rehberi](risk-feature-workbench/docs/IS_BILGISAYARINDA_BASLANGIC.md) |
+| [`risk-feature-workbench/`](risk-feature-workbench/) | Risk Feature Workbench | Excel değişkenlerinden gerçek Oracle şema/tablo/kolon adaylarını bulan yerel web uygulaması; [iş bilgisayarı rehberi](risk-feature-workbench/docs/IS_BILGISAYARINDA_BASLANGIC.md) |
 
 Her proje kendi klasöründe durur. Yeni proje eklerken kök dizinde yeni bir klasör açıp bu tabloya bir satır ekle.
 
