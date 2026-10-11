@@ -39,6 +39,8 @@ Python 3.9.7 ile gerçek Tk gizli penceresi oluşturuldu; **Sentetik örneği ku
 - `requirements-demo.lock` yalnız openpyxl 3.1.5 ve et_xmlfile 2.0.0 içerir. Graphify hiçbir requirements/pyproject bağımlılığında bulunmaz.
 - GitHub Actions için Windows / Python 3.9.7 kurulum, 86 test ve demo Excel akışı eklendi. Bu testler sentetik veri ve taklit servis kullanır; kurum erişim bilgisi gerekmez.
 
+Windows PowerShell 5.1 uyumluluk düzeltmesi: `struct.calcsize("P")` içindeki tırnakların native komuta aktarımında kaybolmasıyla oluşan `NameError` yeniden üretildi. Sürüm/mimari kontrolü iç içe tırnak gerektirmeyen `sys.maxsize` kontrolüne çevrildi. Gerçek Windows PowerShell 5.1 ve Python 3.9.7 ile boş klasörden demo kurulumu, mevcut ortamda `-Real` kurulumu ve 28 satırlı demo Excel üretimi başarıyla çalıştı. Kurulum betiğinin Türkçe mesajları için UTF-8 BOM kullanıldı. GitHub Actions aynı hatayı yakalayabilmek için `powershell` kabuğuna geçirildi.
+
 ## Canlı doğrulanmayanlar
 
 Kurum DNS/TLS/wallet, Oracle görünürlük ve performansı, yerel Qwen endpoint/protokol/model/boyutu, gerçek risk feature doğruluğu, kurum Windows kurulum politikası. Kullanıcı gerçek ayarları iş bilgisayarında doldurup `docs/WINDOWS.md` pilot listesini tamamlamalıdır. Bu sınırlar demo başarısıyla kapanmaz.

@@ -238,6 +238,7 @@ Yalnız demo kullanıyorsanız `-Real` olmadan kurun. Yerel `config.local.json`,
 
 | Belirti | Bakılacak yer / sonraki adım |
 |---|---|
+| Kurulumda `NameError: name 'P' is not defined` | Eski kurulum betiğinin Windows PowerShell 5.1 tırnak aktarımı hatasıdır. Repo klasöründe `git pull --ff-only origin main` çalıştırıp `scripts\setup.ps1` komutunu tekrar deneyin. Python'u yeniden kurmanız gerekmez. |
 | `py` veya Python bulunamıyor | `python --version` ile kontrol edin; betiğe `-Python` ile Python 3.9.7 çalıştırıcısının tam yolunu verin. |
 | Betik çalıştırılması engellendi | 3. ve 6. adımdaki doğrudan Python komutlarını kullanın. |
 | pip indirme/sertifika hatası | Kurumun paket aynası, proxy ve onaylı CA ayarlarını kontrol edin; hash doğrulamasını kapatmayın. |

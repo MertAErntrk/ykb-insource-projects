@@ -12,14 +12,14 @@ permissions:
 
 jobs:
   test:
-    name: Windows / Python 3.9.7
+    name: Windows PowerShell 5.1 / Python 3.9.7
     runs-on: windows-latest
     env:
       PYTHONUTF8: '1'
     defaults:
       run:
         working-directory: risk-feature-workbench
-        shell: pwsh
+        shell: powershell
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
