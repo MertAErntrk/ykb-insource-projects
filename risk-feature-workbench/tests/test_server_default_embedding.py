@@ -153,7 +153,7 @@ class DefaultEmbeddingRuntimeTests(unittest.TestCase):
             with patch("riskmatch.pipeline.read_requests", side_effect=lambda *_: copy.deepcopy(requests)), \
                  patch("riskmatch.pipeline.write_results", return_value=str(folder / "output.xlsx")), \
                  patch("riskmatch.pipeline._source_version", return_value="fixed-test-source"), \
-                 patch("riskmatch.adapters.oracle.OracleAdapter.scan", side_effect=lambda: snapshot()), \
+                 patch("riskmatch.adapters.oracle.OracleAdapter.scan", side_effect=lambda *_, **kwargs: snapshot()), \
                  patch("riskmatch.adapters.qwen.post_json", side_effect=response):
                 first = analyze(source, folder / "output.xlsx", mode="real", config_data=config,
                                 state_dir=folder / "runtime")

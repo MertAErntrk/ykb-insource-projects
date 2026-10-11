@@ -2,7 +2,7 @@ test_check_config_never_calls_database_or_service (test_adapter_integration.Inte
 test_embedding_contract_changes_cache_identity (test_adapter_integration.IntegrationTests) ... ok
 test_llm_rejects_injected_schema_and_omits_unknown_fields (test_adapter_integration.IntegrationTests) ... ok
 test_real_config_requires_explicit_flag_and_contract (test_adapter_integration.IntegrationTests) ... ok
-test_real_oracle_failure_is_incomplete_without_demo_fallback (test_adapter_integration.IntegrationTests) ... ok
+test_real_oracle_failure_stops_without_output_or_demo_fallback (test_adapter_integration.IntegrationTests) ... ok
 test_embedding_explicit_contract_and_dimensions (test_adapters.AdapterTests) ... ok
 test_embedding_rejects_bad_shape_and_timeout (test_adapters.AdapterTests) ... ok
 test_host_allowlist_and_undocumented_model_rejected (test_adapters.AdapterTests) ... ok
@@ -13,6 +13,8 @@ test_oracle_comment_flows_to_semantic_evidence (test_adapters.AdapterTests) ... 
 test_oracle_empty_visible_schema_is_incomplete (test_adapters.AdapterTests) ... ok
 test_oracle_missing_env_and_wrong_container (test_adapters.AdapterTests) ... ok
 test_oracle_read_only_inventory_and_bound_schema (test_adapters.AdapterTests) ... ok
+test_bulk_excel_runs_all_rows_through_both_real_adapters (test_catalog_failure_web.CatalogFailureWebTests) ... ok
+test_catalog_timeout_keeps_valid_workbook_at_zero_analyzed_rows (test_catalog_failure_web.CatalogFailureWebTests) ... ok
 test_diagnostics_require_csrf_and_connection (test_diagnostics_web.DiagnosticsWebTests) ... ok
 test_model_endpoint_uses_discovery_even_without_full_url (test_diagnostics_web.DiagnosticsWebTests) ... ok
 test_selected_schema_endpoint_uses_session_credentials_and_validates_selection (test_diagnostics_web.DiagnosticsWebTests) ... ok
@@ -20,6 +22,7 @@ test_timeout_returns_prior_passed_steps_without_accepting_login (test_diagnostic
 test_ids_persist_through_edit_of_prepared_copy (test_excelio.ExcelTests) ... ok
 test_preserves_all_values_sheets_order_and_neutralizes_formula (test_excelio.ExcelTests) ... ok
 test_unrecognized_sheet_and_formula_exposed (test_excelio.ExcelTests) ... ok
+test_alternative_inference_success_does_not_hide_failed_post (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_bad_ca_file_is_reported_without_network (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_default_built_in_addresses_are_available_without_endpoint_fields (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_embedding_base_root_probes_openai_and_reads_dimension (test_model_diagnostics.ModelDiagnosticsTests) ... ok
@@ -32,11 +35,14 @@ test_explicit_named_custom_and_tei_templates_remain_supported (test_model_diagno
 test_explicit_named_model_placeholder_contract_remains_supported (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_explicit_server_default_base_only_does_not_need_metadata (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_explicit_template_can_be_verified_without_discovery (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_failed_inference_does_not_soften_discovery_or_final_post_errors (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_fundamental_network_auth_errors_stop_without_fallback_or_raw_details (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_invalid_embedding_vector_and_dimension_mismatch_fail (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_invalid_urls_foreign_hosts_and_embedded_secret_templates_do_not_connect (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_list_success_is_not_inference_success (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_llm_base_discovers_one_model_and_validates_actual_application_contract (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_llm_success_also_labels_missing_optional_model_list_neutrally (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_malformed_metadata_remains_failed_even_if_tei_inference_succeeds (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_metadata_auth_failure_prevents_model_free_fallback (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_metadata_verified_named_model_can_keep_input_only_contract (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_model_free_404_or_bad_vector_does_not_claim_success_or_repeat_metadata (test_model_diagnostics.ModelDiagnosticsTests) ... ok
@@ -48,10 +54,23 @@ test_openai_models_but_no_embeddings_route_can_verify_tei (test_model_diagnostic
 test_server_default_cannot_sneak_model_identity_or_model_parameter (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_server_default_custom_template_and_response_path_are_preserved (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_server_default_explicit_retest_goes_directly_to_inference (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_successful_inference_marks_optional_metadata_404_405_as_unsupported (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_tei_route_fallback_does_not_replace_explicit_custom_contract (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_total_deadline_bounds_later_calls (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_unknown_selected_model_is_not_silently_substituted (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_wrong_explicit_response_path_is_not_silently_overridden (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_all_schema_timeouts_return_zero_records_and_safe_phase_evidence (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_comment_timeout_retains_physical_columns_without_inventing_comments (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_exact_last_batch_record_limit_can_still_be_complete (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_fetch_timeout_keeps_rows_already_received (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_invalid_limits_rejected_and_scope_mismatch_aborts (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_listed_object_without_visible_columns_prevents_complete_scope (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_object_batches_are_small_and_mview_duplicates_are_deduplicated (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_record_cap_prevents_absence_and_skips_remaining_schemas (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_three_schemas_have_scoped_separate_queries_and_bound_parameters (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_time_budget_skips_more_work_and_preserves_existing_rows (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_timeout_in_middle_schema_keeps_earlier_and_later_evidence (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
+test_truncated_key_query_never_presents_partial_composite_key_as_verified (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
 test_context_failure_is_not_reported_as_schema_failure (test_oracle_diagnostics.OracleDiagnosticsTests) ... ok
 test_discovery_does_not_scan_column_catalog (test_oracle_diagnostics.OracleDiagnosticsTests) ... ok
 test_login_failure_skips_all_queries (test_oracle_diagnostics.OracleDiagnosticsTests) ... ok
@@ -152,7 +171,7 @@ test_live_pipeline_returns_source_and_download_without_secrets (test_web.WebTest
 test_mapping_rejects_duplicate_or_missing_columns (test_web.WebTests) ... ok
 test_model_enabled_web_pipeline_uses_both_explicit_services (test_web.WebTests) ... ok
 test_models_require_explicit_contract (test_web.WebTests) ... ok
-test_oracle_failure_stays_incomplete (test_web.WebTests) ... ok
+test_oracle_failure_stops_before_any_analysis_or_download (test_web.WebTests) ... ok
 test_oracle_probe_closes_and_finds_scope (test_web.WebTests) ... ok
 test_profile_omits_credentials_and_rejects_demo (test_web.WebTests) ... ok
 test_second_analysis_rejected_while_worker_active (test_web.WebTests) ... ok
@@ -172,7 +191,7 @@ test_schema_selection_required_and_must_come_from_login (test_web_workflow.Workf
 test_standard_excel_can_run_without_mapping_payload (test_web_workflow.WorkflowTests) ... ok
 
 ----------------------------------------------------------------------
-Ran 172 tests in 14.705s
+Ran 191 tests in 28.448s
 
 OK
 Yapılandırma biçimi doğrulandı. Ağ bağlantısı denenmedi.

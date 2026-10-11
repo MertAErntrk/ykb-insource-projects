@@ -9,7 +9,7 @@ import time
 from flask import Flask, jsonify, render_template, request, send_file, session
 from werkzeug.exceptions import HTTPException
 
-from .errors import ConfigError, InputError, IntegrationError
+from .errors import ConfigError, InputError, IntegrationError, CatalogScanError
 from .excelio import LABELS, reason_text
 from .pipeline import analyze
 from . import web_services as services
@@ -189,6 +189,14 @@ def create_app(runtime_dir=None, *, analyzer=None):
                     candidate["reason_texts"]=[reason_text(v) for v in candidate.get("reasons",[])]
             with guard:
                 job.update(status="complete",result=result,finished=time.time())
+        except CatalogScanError as error:
+            source="Excel okundu" if job["input_type"]=="excel" else "Girdi alındı"
+            with guard:
+                job.update(status="failed",failure_stage="catalog",code=error.code,
+                           error=source+"; "+str(len(requests))+" değişken hazır. Katalog okunamadığı için arama başlatılamadı. "+str(error),
+                           catalog_diagnostics=error.diagnostics,
+                           progress={"stage":"Oracle kataloğu okunamadı","phase":"catalog","completed":0,"total":len(requests)},
+                           finished=time.time())
         except Exception:
             with guard:job.update(status="failed",error="Analiz tamamlanamadı. Dosya erişimini ve bağlantı ayarlarını kontrol edin.",finished=time.time())
         finally:
@@ -218,7 +226,8 @@ def create_app(runtime_dir=None, *, analyzer=None):
                 return jsonify(error="Bir analiz devam ediyor. Tamamlandıktan sonra yeniden deneyin."),409
             if len(jobs)>=20:raise InputError("Analiz sınırına ulaşıldı. Uygulamayı yeniden başlatın.")
             jobs[identity]={"id":identity,"owner":session["owner"],"status":"running",
-                "filename":filename,"progress":{"stage":"Analiz hazırlanıyor","completed":0,"total":len(requests)}}
+                "filename":filename,"input_type":"manual" if manual else "excel",
+                "progress":{"stage":"Analiz hazırlanıyor","completed":0,"total":len(requests)}}
         executor.submit(worker,identity,path,mapping,config,credentials,requests)
         return jsonify(id=identity),202
 

@@ -1,10 +1,22 @@
-# Web sürümü doğrulaması — 0.3.2
+# Web sürümü doğrulaması — 0.3.3
 
 2026-10-11 tarihinde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 üzerinde doğrulandı. Kurum Oracle/Qwen servislerine bağlanılmadı; otomatik ve tarayıcı testlerinde Oracle bağlantısı ile model HTTP taşıması kontrollü olarak taklit edildi.
 
-## 0.3.2 doğrulaması
+## 0.3.3 doğrulaması
 
-**172 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **14,705 saniyede geçti**. Güncel çıktı: [test-results.txt](test-results.txt). JavaScript sözdizimi ve aşağıda açıklanan 17 arayüz regresyon senaryosu da geçti. Yeni çalışma bağımlılığı yoktur.
+**191 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **28,448 saniyede geçti**. Güncel çıktı: [test-results.txt](test-results.txt). JavaScript sözdizimi ve 17 arayüz regresyon senaryosu da geçti. Yeni çalışma bağımlılığı yoktur.
+
+- İsteğe bağlı model listesi ve TEI bilgi yollarının 404/405 yanıtı, yalnız gerçek model çağrısı doğrulanmışsa nötr **Desteklenmiyor** olarak gösterilir. Hata kodu ve süre raporda korunur. Başarısız gerçek çağrı, yetki/TLS sorunu ve bozuk vektör başarıya çevrilmez.
+- Oracle taraması seçili şemaları ve en fazla 25 nesnelik grupları ayrı sorgular. Kolon, kolon açıklaması, tablo açıklaması ve anahtar bilgileri ayrı okunur. Bağlı parametreler, kayıt/süre sınırı, eksik görünürlük, kısmi kayıtların korunması, zaman aşımından sonra yeni bağlantı ve veritabanı/bağlam tutarlılığı test edilir.
+- Aynı standart beş başlıkla oluşturulan **273 satırlık Excel** web üzerinden yüklenir. Başarılı senaryoda gerçek uygulama pipeline'ı, embedding/LLM adapter'ları, 273 sonuç, Excel indirme ve özgün hücrelerin korunması doğrulanır. Yalnız Oracle ve model HTTP taşıması taklit edilir; bu kullanıcının kurum Excel'i değildir.
+- Üç şemada DPY-4024 üretilen senaryoda Excel okunur, ancak katalog alınamazsa iş katalog aşamasında durur: 0/273 işlenmiş satır, model çağrısı yok, sonuç satırı/raporu yok. Güvenli şema ve aşama tanılaması korunur; parola ham hata metnine veya yanıta sızmaz.
+- Tarayıcıda 273 satırlık Excel ile katalog zaman aşımı ekranı görüldü. Şema seçimine dönüldüğünde dosya ve sütun eşlemesi korundu. Bağlantı düzeltildikten sonra aynı dosya yeniden yüklenmeden LLM+embedding açık analiz 273 sonuçla tamamlandı. İsteğe bağlı 404 satırlarının nötr gösterimi ve başarılı POST satırı görsel olarak doğrulandı; konsol hata/uyarı kaydı boştu.
+
+Bu kontroller kurum veritabanının gerçek yük altındaki süresini doğrulamaz. Kurumda yeniden denemede sorun sürerse **Bağlantılar → Bağlantı test sonuçları → Analiz için katalog taraması** raporu hangi şema/aşamada zaman aşımı olduğunu gösterir. Uygulamada demo veri kullanılmaz.
+
+## Önceki 0.3.2 doğrulaması
+
+**172 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **14,705 saniyede geçti**. Bu önceki sürümün sonucudur; güncel çıktı ve sayı yukarıdadır. JavaScript sözdizimi ve aşağıda açıklanan 17 arayüz regresyon senaryosu da geçti. Yeni çalışma bağımlılığı yoktur.
 
 - Kullanıcının kurumdan verdiği gerçek çıktı: embedding model listesi ve `/info` yolları 404; model adı içermeyen `POST /v1/embeddings` 200 ve 4096 boyutlu geçerli vektör. LLM `qwen38-27b` ile `/v1/chat/completions` çağrısı ve JSON yanıtı başarılı. Bu kanıt küçük script çağrılarına aittir; kurumda tam uygulama analizi doğrulaması değildir.
 - Regresyonlar, bu desenin uygulama keşfi → ayar aktarımı → iki değişkenli gerçek-mod analiz boyunca çalıştığını doğrular. Yalnız Oracle ve HTTP taşıması taklit edilir. Kök vektör dizisi ve `data[*].embedding` yanıtlarının ikisi de kapsanır; 4096 boyut yanıttan okunur. İstekler yalnız `input` içerir ve tek metinliktir; gerçek analizde LLM çağrısı ve kaynak kanıtları da doğrulanır.

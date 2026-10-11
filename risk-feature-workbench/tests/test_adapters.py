@@ -54,19 +54,46 @@ class FakeCursor:
     def __init__(self):
         self.sql = ""
         self.calls = []
+        self.binds = {}
+        self.position = 0
+        self.fetch_sizes = []
 
     def execute(self, sql, binds=None):
         self.sql = sql
+        self.binds = binds or {}
+        self.position = 0
         self.calls.append((sql, binds))
 
     def fetchone(self):
         return ("RISK", "PDB1")
 
-    def fetchall(self):
+    def rows_for_query(self):
+        if self.binds.get("schema_name", "RISK_DWH") != "RISK_DWH":
+            return []
+        if "ALL_OBJECTS" in self.sql:
+            return [("CUSTOMER_METRIC", "TABLE")]
         if "ALL_TAB_COLUMNS" in self.sql:
-            return [("RISK_DWH", "CUSTOMER_METRIC", "HAV_LM", "NUMBER", 22, 10, 0, "Y",
-                     None, "Synthetic metrics", "TABLE")]
-        return [("RISK_DWH", "CUSTOMER_METRIC", "P", "PK_METRIC", "HAV_LM", 1)]
+            return [("RISK_DWH", "CUSTOMER_METRIC", "HAV_LM", "NUMBER", 22, 10, 0, "Y")]
+        if "ALL_COL_COMMENTS" in self.sql:
+            return [("CUSTOMER_METRIC", "HAV_LM", None)]
+        if "ALL_TAB_COMMENTS" in self.sql:
+            return [("CUSTOMER_METRIC", "Synthetic metrics")]
+        if "ALL_CONSTRAINTS" in self.sql:
+            return [("CUSTOMER_METRIC", "P", "PK_METRIC", "HAV_LM", 1)]
+        return []
+
+    def fetchmany(self, count=200):
+        self.fetch_sizes.append(count)
+        rows = self.rows_for_query()
+        chunk = rows[self.position:self.position + count]
+        self.position += len(chunk)
+        return chunk
+
+    def fetchall(self):
+        rows = self.rows_for_query()
+        chunk = rows[self.position:]
+        self.position = len(rows)
+        return chunk
 
 
 class FakeConnection:
@@ -82,7 +109,7 @@ class FakeConnection:
 
 
 class EmptyCursor(FakeCursor):
-    def fetchall(self):
+    def rows_for_query(self):
         return []
 
 
@@ -152,25 +179,44 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(snapshot["complete"])
         self.assertEqual(len(snapshot["records"]), 1)
         self.assertIn("column_comment", snapshot["records"][0]["missing"])
-        inventory_sql, binds = connection.cur.calls[1]
-        self.assertIn("LEFT JOIN ALL_COL_COMMENTS", inventory_sql)
-        self.assertIn("LEFT JOIN ALL_TAB_COMMENTS", inventory_sql)
-        self.assertIn(":schema_0", inventory_sql)
-        self.assertNotIn("'RISK_DWH'", inventory_sql)
-        self.assertEqual(binds, {"schema_0": "RISK_DWH"})
+        catalog_calls = [(sql, binds) for sql, binds in connection.cur.calls if "FROM DUAL" not in sql]
+        self.assertTrue(catalog_calls)
+        object_sql, object_binds = next((sql, binds) for sql, binds in catalog_calls if "ALL_OBJECTS" in sql)
+        self.assertIn(":schema_name", object_sql)
+        self.assertIn(":row_limit", object_sql)
+        self.assertEqual(object_binds["schema_name"], "RISK_DWH")
+        self.assertLessEqual(object_binds["row_limit"], 10001)
+        for sql, binds in catalog_calls:
+            self.assertTrue(sql.lstrip().upper().startswith("SELECT"))
+            self.assertNotIn("'RISK_DWH'", sql)
+            self.assertEqual(binds["schema_name"], "RISK_DWH")
+        columns_sql = next(sql for sql, _ in catalog_calls if "ALL_TAB_COLUMNS" in sql)
+        self.assertNotIn("ALL_COL_COMMENTS", columns_sql)
+        self.assertNotIn("ALL_TAB_COMMENTS", columns_sql)
+        self.assertIn(":row_limit", columns_sql)
         self.assertEqual(snapshot["records"][0]["key_columns"][0]["type"], "P")
-        self.assertEqual(connection.call_timeout, 30000)
-        self.assertIn("c.STATUS = 'ENABLED'", connection.cur.calls[2][0])
-        self.assertIn("c.VALIDATED = 'VALIDATED'", connection.cur.calls[2][0])
+        self.assertGreater(connection.call_timeout, 0)
+        self.assertLessEqual(connection.call_timeout, 30000)
+        key_sql = next(sql for sql, _ in catalog_calls if "ALL_CONSTRAINTS" in sql)
+        self.assertRegex(key_sql, r"STATUS\s*=\s*'ENABLED'")
+        self.assertRegex(key_sql, r"VALIDATED\s*=\s*'VALIDATED'")
+        self.assertTrue(connection.cur.fetch_sizes)
+        self.assertTrue(all(0 < size <= 200 for size in connection.cur.fetch_sizes))
 
     def test_oracle_comment_flows_to_semantic_evidence(self):
         comment = "Başvuru bazında faiz türü. 1 sabit faiz, 2 değişken faiz."
 
         class CommentCursor(FakeCursor):
-            def fetchall(self):
+            def rows_for_query(self):
+                if "ALL_OBJECTS" in self.sql:
+                    return [("APPLICATION", "TABLE")]
                 if "ALL_TAB_COLUMNS" in self.sql:
                     return [("RISK_DWH", "APPLICATION", "INTEREST_TYPE_CODE", "NUMBER", 22, 1, 0,
-                             "Y", comment, "", "TABLE")]
+                             "Y")]
+                if "ALL_COL_COMMENTS" in self.sql:
+                    return [("APPLICATION", "INTEREST_TYPE_CODE", comment)]
+                if "ALL_TAB_COMMENTS" in self.sql:
+                    return [("APPLICATION", "")]
                 return []
 
         connection = FakeConnection()
@@ -189,8 +235,13 @@ class AdapterTests(unittest.TestCase):
 
     def test_oracle_missing_env_and_wrong_container(self):
         with patch.dict(os.environ, {}, clear=True):
+            adapter = OracleAdapter(ORACLE, connector=lambda **_: FakeConnection())
             with self.assertRaises(ConfigError):
-                OracleAdapter(ORACLE, connector=lambda **_: FakeConnection()).scan()
+                adapter._connect()
+            snapshot = adapter.scan()
+            self.assertFalse(snapshot["complete"])
+            self.assertEqual(snapshot["records"], [])
+            self.assertEqual(snapshot["checks"][0]["status"], "failed")
         with patch.dict(os.environ, {"TEST_ORACLE_USER": "u", "TEST_ORACLE_PASSWORD": "p", "TEST_ORACLE_DSN": "d"}):
             with self.assertRaises(IntegrationError):
                 OracleAdapter({**ORACLE, "container": "OTHER"}, connector=lambda **_: FakeConnection()).scan()

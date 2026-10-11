@@ -1,4 +1,4 @@
-# Kurumda bağlantı test senaryosu · 0.3.2
+# Kurumda bağlantı test senaryosu · 0.3.3
 
 Bu senaryo iş bilgisayarında **gerçek Oracle hesabınız ve kurum servislerinizle** uygulanır. Amaç, hangi bağlantı adımının çalıştığını ve hangisinin hata verdiğini ayırmaktır. Geliştirme bilgisayarındaki otomatik testler gerçek kurum erişiminin yerine geçmez.
 
@@ -62,7 +62,7 @@ Her şema için **en fazla bir katalog satırı** okunur. Çağrı başına en f
 | LLM gerçek denemesi | Küçük istek yanıtlanır ve uygulamanın beklediği JSON yanıt sözleşmesi doğrulanır. |
 | Embedding gerçek denemesi | Küçük metinden geçerli sayısal vektör alınır; boyutu gerçek yanıttan okunur. |
 
-Standart model listesi için `/v1/models`, embedding servis türüne göre `/info` gibi yollar denenir. Denenen bir yolun `404` olması, sonrasında başka uyumlu yol doğrulandıysa bütün testin başarısız olduğu anlamına gelmez. Servisin genel sonucu ile son gerçek çağrı sonucuna bakın. Yalnız model listesinin okunması da başarılı inference testi sayılmaz.
+Standart model listesi için `/v1/models`, embedding servis türüne göre `/info` gibi yollar denenir. Başarılı gerçek çağrıya ulaşıldığında isteğe bağlı bilgi yollarının `GET 404/405` sonuçları **Desteklenmiyor** olarak gösterilir. Bu satırlar bütün testin başarısız olduğu anlamına gelmez. Gerçek üretim çağrısının (`POST`) başarısızlığı ise kırmızı hata olarak kalır; bu hata isteğe bağlı bilgi yolu gibi işaretlenmez. Servisin genel sonucu ile son gerçek çağrı sonucuna bakın. Yalnız model listesinin okunması da başarılı inference testi sayılmaz.
 
 Başarıda doğrulanan çağrı adresi ve sözleşme alanları otomatik doldurulur. Gerçek model sürümü bildirilmemişse `deployment:` etiketi doğrulanmış bir sürüm numarası sayılmaz. Standart sözleşme bulunamazsa **Gelişmiş / özel servis ayarları** altında servis ekibinin verdiği tam çağrı adresi ve sözleşme kullanılabilir.
 
@@ -74,6 +74,8 @@ Başarıda doğrulanan çağrı adresi ve sözleşme alanları otomatik doldurul
 | Embedding | `POST /v1/embeddings`, yalnız `input` alanı; model gönderilmedi | Gerçek çağrı başarılı; 4096 boyut; model kimliği ve sürümü boş |
 
 Embedding için `/v1/models`, `/models` ve `/info` adreslerindeki `404`, başarılı `/v1/embeddings` sonucunu geçersiz kılmaz. Gelişmiş ayarlardaki şablon `{"input":"{texts}"}` olur; yanıt yolu gerçek yanıta göre doldurulur. Uygulama bu sözleşmeyi asıl analizde de kullanır. Model kimliği bilinmediği için kalıcı vektör önbelleği ve eski sonuçtan devam kullanılmaz. Bu script çıktısı küçük bağlantı çağrılarını doğrular; gerçek Excel ve Oracle ile tam analizi ayrıca aşağıdaki adımlarla sınayın.
+
+Kullanıcının daha sonra paylaştığı uygulama ekranlarında da embedding gerçek çağrısı başarılıdır. Bu kanıt model bağlantısı içindir; Oracle'ın bütün kolon kataloğunu okuyabildiğini göstermez.
 
 | Kod / durum | Yapılacak kontrol |
 |---|---|
@@ -101,8 +103,23 @@ Embedding için `/v1/models`, `/models` ve `/info` adreslerindeki `404`, başar�
 
 Bir kolonun aynı adla bulunması, iş tanımının aynı olduğunu kanıtlamaz. Tarama eksikse “DB'de yok” sonucunu kabul etmeyin. 10.000 kolon sınırı veya zaman aşımı görülürse şema kapsamını daraltın. Başarılı tek satırlık erişim testi, tam katalog taramasının tamamlanacağını garanti etmez.
 
-## 6. Hata sürerse paylaşılacak bilgi
+## 6. Excel okunduğu halde katalog taraması kalırsa
 
-**Tanılama raporunu indir** düğmesiyle o denemeye ait JSON raporunu kaydedin. Raporda test adımı, durum, süre ve güvenli hata kodu bulunur; parola, API anahtarı ve ham servis yanıtı bulunmaz. Bu rapor bağlantı denemelerini kapsar; arama sırasında oluşan bir hata için ayrıca ekrandaki analiz durumunu ve hata aşamasını belirtin.
+Örneğin **273 satır** ve doğru sütun eşleşmeleri görünüyorsa yükleme adımı başarılıdır. Analiz başlatıldığında önce Oracle metadata'sı okunur. Bu aşamada alınan `DPY-4024`, Excel biçimi veya embedding hatası değildir; ilgili veritabanı çağrısı süre sınırını aşmıştır.
+
+0.3.3 sürümünde tam katalog taraması şema bazında yapılır. Tablolar/görünümler en fazla 25 nesnelik gruplarla işlenir; kolon, kolon açıklaması, tablo açıklaması ve anahtar sorguları ayrıdır. Böylece büyük kolon/açıklama görünümlerini birleştirip bütün kapsamı sıralayan önceki sorgu kullanılmaz. Her alımda en fazla 200 kayıt çekilir ve toplam kolon sınırı 10.000'dir. Varsayılan Oracle çağrı sınırı 30 saniye, katalog tarama bütçesi 300 saniyedir. Bu değişiklik gerçek kurum veritabanının performansını burada doğruladığımız anlamına gelmez.
+
+| Kontrol | Beklenen davranış |
+|---|---|
+| Excel okundu, katalog sürüyor | Şema, katalog aşaması ve okunan kolon sayısı gösterilir. Değişken sayacı tamamlandı gibi ilerlemez. |
+| Katalogdan hiç kolon alınamadan hata | **Katalog okunamadı; arama başlatılamadı** mesajı, hata kodu ve hazır girdi sayısı görünür. İşlenen değişken sayısı sıfırdır; incelenmeyen değişkenler için sonuç satırı veya indirilecek sonuç dosyası oluşturulmaz. Model çağrıları başlatılmaz. |
+| Bazı kayıtlar okunduktan sonra hata | Okunan katalog kayıtları korunur. Üretilen sonuçlarda kapsamın eksik olduğu belirtilir; bulunmayan alan için kesin yokluk sonucu çıkarılmaz. |
+| Tam katalog ve modeller çalışıyor | Her Excel satırı ayrı incelenir; sonuçlar ve indirilen rapor girdi sayısıyla eşleşir. |
+
+Hata durumunda **Şema seçimine ve girdilere dön** düğmesine basın, seçili üç şema yerine önce **tek şema** seçin ve aynı analizi tekrar başlatın. Excel dosyası ve eşleşmeleri aynı sayfa oturumunda korunur. Sayfayı yenilemeyin. Tek şemada da hata sürerse **Bağlantı test sonuçları → Analiz için katalog taraması** bölümünde hangi şema ve sorgu aşamasının kaldığını inceleyin; tanılama raporunu indirin. Başarılı tek satırlık şema erişim testi tam katalog taramasının tamamlanacağını garanti etmez.
+
+## 7. Hata sürerse paylaşılacak bilgi
+
+**Tanılama raporunu indir** düğmesiyle o denemeye ait JSON raporunu kaydedin. Raporda test adımı, durum, süre ve güvenli hata kodu bulunur; parola, API anahtarı ve ham servis yanıtı bulunmaz. Analiz sırasında okunan katalog tanılaması da **Analiz için katalog taraması** adıyla rapora eklenir. Arama hatası için ekrandaki hazır değişken sayısını ve ilk başarısız katalog aşamasını da belirtin.
 
 Tekrar tekrar bütün şemaları denemek yerine **hangi adım geçti, ilk hangi adım kaldı, hangi kod ve sürede kaldı** bilgisini kullanın. Başarı ölçütü, kurumda Oracle oturumunun açılması, seçtiğiniz şemaların erişim testinin geçmesi ve kullanacaksanız her iki modelin gerçek denemesinin doğrulanmasıdır.

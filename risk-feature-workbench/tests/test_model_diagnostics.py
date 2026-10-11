@@ -39,7 +39,7 @@ class ModelDiagnosticsTests(unittest.TestCase):
         opener = Opener(routes)
         with patch("riskmatch.model_diagnostics.urllib.request.build_opener", return_value=opener):
             report = discover_model(raw, name)
-        self.assertTrue(all("elapsed_ms" in step and step["status"] in {"passed", "failed", "skipped"} for step in report["checks"]))
+        self.assertTrue(all("elapsed_ms" in step and step["status"] in {"passed", "failed", "skipped", "unsupported"} for step in report["checks"]))
         return report, opener.calls
 
     def test_llm_base_discovers_one_model_and_validates_actual_application_contract(self):
@@ -414,6 +414,68 @@ class ModelDiagnosticsTests(unittest.TestCase):
                 self.assertTrue(report["ok"], report)
                 self.assertEqual(report["settings"]["request_template"], template)
                 self.assertEqual(len(calls), 1)
+
+    def test_successful_inference_marks_optional_metadata_404_405_as_unsupported(self):
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): http_error(404),
+            ("GET", "https://embed.invalid/info"): http_error(405),
+            ("POST", "https://embed.invalid/v1/embeddings"): [[.1] * 4096],
+        })
+        self.assertTrue(report["ok"], report)
+        discovery = [step for step in report["checks"] if step["name"].startswith("GET ")]
+        self.assertEqual([step["status"] for step in discovery], ["unsupported", "unsupported"])
+        self.assertEqual([step["code"] for step in discovery], ["HTTP_404", "HTTP_405"])
+        self.assertTrue(all("isteğe bağlı" in step["message"] and step["elapsed_ms"] >= 0 for step in discovery))
+        self.assertEqual(report["checks"][-1]["status"], "passed")
+        self.assertEqual(report["settings"]["dimensions"], 4096)
+        self.assertEqual(len(calls), 3)
+
+    def test_failed_inference_does_not_soften_discovery_or_final_post_errors(self):
+        for result, expected in [(http_error(404), "HTTP_404"), (http_error(401), "HTTP_401"),
+                                 (urllib.error.URLError(ssl.SSLCertVerificationError(1, "PRIVATE")), "TLS_CERTIFICATE"),
+                                 ([[True]], "INVALID_VECTOR")]:
+            with self.subTest(expected=expected):
+                report, _ = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+                    ("GET", "https://embed.invalid/v1/models"): http_error(404),
+                    ("GET", "https://embed.invalid/info"): http_error(405),
+                    ("POST", "https://embed.invalid/v1/embeddings"): result,
+                })
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["checks"][-1]["status"], "failed")
+                self.assertEqual(report["code"], expected)
+                self.assertFalse(any(step["status"] == "unsupported" for step in report["checks"]))
+                self.assertTrue(all(step["status"] == "failed" for step in report["checks"] if step["name"].startswith("GET ")))
+
+    def test_llm_success_also_labels_missing_optional_model_list_neutrally(self):
+        report, _ = self.run_report({"llm": {"base_url": "https://model.invalid/v1", "model": "known"}}, "llm", {
+            ("GET", "https://model.invalid/v1/models"): http_error(404),
+            ("POST", "https://model.invalid/v1/chat/completions"): {"choices": [{"message": {"content": '{"assessments":[]}'}}]},
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["checks"][1]["status"], "unsupported")
+        self.assertEqual(report["checks"][1]["code"], "HTTP_404")
+
+    def test_alternative_inference_success_does_not_hide_failed_post(self):
+        report, _ = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): {"data": [{"id": "known"}]},
+            ("POST", "https://embed.invalid/v1/embeddings"): http_error(404),
+            ("GET", "https://embed.invalid/info"): {"model_id": "known"},
+            ("POST", "https://embed.invalid/embed"): [[.3, .6]],
+        })
+        self.assertTrue(report["ok"], report)
+        missing_post = next(step for step in report["checks"] if step.get("code") == "HTTP_404")
+        self.assertTrue(missing_post["name"].startswith("POST "))
+        self.assertEqual(missing_post["status"], "failed")
+
+    def test_malformed_metadata_remains_failed_even_if_tei_inference_succeeds(self):
+        report, _ = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): {"unexpected": "shape"},
+            ("GET", "https://embed.invalid/info"): {"model_id": "known"},
+            ("POST", "https://embed.invalid/embed"): [[.3, .6]],
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["checks"][1]["code"], "MODEL_LIST_FORMAT")
+        self.assertEqual(report["checks"][1]["status"], "failed")
 
 
 if __name__ == "__main__":

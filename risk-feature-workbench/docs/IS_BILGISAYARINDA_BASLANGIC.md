@@ -1,4 +1,4 @@
-# İş bilgisayarında kullanım · 0.3.2
+# İş bilgisayarında kullanım · 0.3.3
 
 Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Uygulama tarayıcıda çalışır. Demo seçeneği yoktur.
 
@@ -56,11 +56,17 @@ Excel zorunlu değildir. Her satırın adı ve açıklaması zorunludur. Aynı a
 
 Alan Adı ve Açıklama sütunları zorunludur; diğer alanlar isteğe bağlıdır. Başlıklar ilk 30 satırda aranır. Başlıkları tanınmayan sayfalar otomatik analize alınmaz; eşleştirme bölümü açılır ve seçim bekler. Dosya en fazla 12 MB, sayfa başına 20.000 satır/300 sütun ve analiz başına 2.000 değişken olabilir. Özgün dosyanın üzerine yazılmaz. Sekmeler arasında geçiş yaptığınızda elle girdikleriniz korunur.
 
+Dosyanın yüklenmesi ve satır sayısının görünmesi, Excel'in okunabildiğini gösterir. Ardından ayrı bir işlem olarak **Oracle kataloğu taranır**. Bu sırada ekranda şema, tarama aşaması ve okunan kolon sayısı görünür; henüz değişkenlerin tamamlandığı gösterilmez.
+
+Katalogdan hiç kayıt alınamazsa **“Katalog okunamadı; arama başlatılamadı”** mesajı gelir. Örneğin 273 satırlı Excel için **273 değişken hazır, sonuç üretilmedi** denir; incelenmeyen değişkenler için sonuç satırı veya indirilecek sonuç dosyası oluşturulmaz. Excel ve sütun eşleştirmeniz aynı sayfa oturumunda korunur. **Şema seçimine ve girdilere dön** düğmesiyle yalnız bir şema seçerek tekrar başlatın; dosyayı tekrar yüklemeniz gerekmez.
+
 ## 5. Sonuçları incele
 
 Her değişkenin karşısında olası **şema.tablo.kolon** görünür. **Detay**, alternatif adayları, gerçek kolon/tablo açıklamalarını ve eşleşme gerekçelerini açar. **Excel sonucunu indir** tüm girdileri, adayları ve kanıtları ayrı rapora kaydeder.
 
 Fiziksel adın bulunması, iş tanımının aynı olduğunu tek başına kanıtlamaz. Benzer ad farklı anlam taşıyabilir. Arama skoru doğruluk yüzdesi değildir. Eksik metadata, bağlantı hatası veya 10.000 kolon sınırına ulaşılması durumunda tarama eksik gösterilir; “DB'de yok” sonucu verilmez. Sınır aşılırsa seçili şema sayısını azaltın.
+
+Katalog taraması artık şema bazında, en fazla 25 tablo/görünüm içeren gruplarla yapılır. Kolonlar, açıklamalar ve anahtar bilgileri ayrı sorgulanır; büyük kolon/açıklama görünümleri tek sorguda birleştirilmez. Kayıtlar 200'lük alım parçalarıyla okunur. Varsayılan çağrı sınırı 30 saniye, toplam katalog tarama bütçesi 300 saniyedir. Daha önce okunmuş kayıtlar sonraki hatada korunur; kısmi katalogla üretilen sonuçlar eksik kapsam uyarısı taşır.
 
 İşlem sırasında sayfayı yenilemeyin. Tamamlanan raporlar `runtime/web/<iş-kimliği>/sonuclar.xlsx` altında kalır. Sonuçların aynı tarayıcı oturumuna ait olması gerekir. Müşteri kayıtları sorgulanmaz; yalnız katalog metadata'sı okunur.
 
@@ -78,6 +84,8 @@ Test, standart servislerin model listesi veya servis bilgisi uçlarını kontrol
 
 Kurumdaki 11.10.2026 tanılama çıktısında embedding `/v1/embeddings` yolu model adı olmadan **4096 boyutlu vektör** üretti. Bu nedenle embedding model listesi ve `/info` adımlarının `404` olması testi durdurmaz. Son gerçek çağrının başarılı olması beklenir. Model kimliği/sürümü boş kalabilir; ekranda **sunucunun varsayılan embedding modeli** kullanıldığı belirtilir. Boyut ve yanıt yolu yine gerçek yanıttan okunur. Aynı doğrulanmış sözleşme analizde de kullanılır. Model kimliği bilinmediği için kalıcı vektör önbelleği ve eski analiz sonucundan devam kapalıdır; yeni analizde vektörler yeniden üretilir.
 
+Başarılı gerçek çağrıya ulaşılırsa isteğe bağlı model bilgisi yollarındaki `GET 404/405` satırları **Desteklenmiyor** olarak gösterilir. Bu, embedding üretiminin başarısız olduğu anlamına gelmez. Gerçek üretim çağrısı (`POST`) başarısızsa hata kırmızı kalır; yalnız bilgi yollarının isteğe bağlı olması bu hatayı gizlemez. Kullanıcının paylaştığı sonraki ekranlarda da embedding gerçek çağrısının başarılı olduğu görüldü; Oracle katalog taraması ayrıca değerlendirilir.
+
 **Gelişmiş / özel servis ayarları** bölümünü yalnız standart test servis biçimini tanımazsa veya kurumunuz özel bir sözleşme kullanıyorsa açın. Buradan model ekibinin verdiği tam çağrı adresi, sürüm, JSON şablonu ve yanıt yolunu girebilirsiniz. Kurum CA sertifikası gerekiyorsa PEM dosyasını da bu bölümden seçilen servisin alanına yazın. TLS doğrulaması kapatılmaz. [Adapter ayrıntıları](ADAPTERS.md).
 
 Model desteği açık analiz, değişken adı/açıklaması ile katalog metadata'sını seçilen kurum servislerine gönderir. Hata halinde dış servise geçilmez. LLM yorumu bir adayın iş tanımına kesin uyduğunu tek başına kanıtlamaz.
@@ -87,17 +95,17 @@ Model desteği açık analiz, değişken adı/açıklaması ile katalog metadata
 
 **Bağlantı test sonuçları** bölümünü açın. Hangi adımın geçtiğini, hangisinin başarısız olduğunu, süresini ve Oracle/driver veya HTTP kodunu görebilirsiniz. **Tanılama raporunu indir** ile yerel JSON raporunu alın. Rapor parola, API anahtarı ve ham sunucu yanıtı içermez.
 
-- `DPY-4024`: Oracle çağrısı zaman sınırını aştı. Şema listeleme aşamasında görülmesi tek başına kullanıcı/parola veya yetki hatası demek değildir. Bir veya iki şema seçerek erişim testini çalıştırın; zaman aşımı sürerse rapordaki aşama ve süreyle inceleyin.
+- `DPY-4024`: Oracle çağrısı zaman sınırını aştı. Hata şema listeleme, tek kolon erişim testi veya tam katalog taraması sırasında oluşabilir; rapordaki aşamaya bakın. Excel 273 satır olarak okunmuşken katalog aşamasında oluşan hata Excel'in bozuk olduğunu göstermez. Tek şema seçerek tekrar deneyin; sürerse **Analiz için katalog taraması** raporundaki şema, aşama ve süreyle inceleyin.
 - `ORA-01017`: kullanıcı/parola kontrolü.
 - `ORA-28000` / `ORA-28001`: hesap kilidi / parola süresi.
 - `ORA-00942` / `ORA-01031`: ilgili katalog görünümü ve erişim yetkisi kontrolü.
 - `DPY-3010` / `DPY-3015`: Oracle sunucusu veya parola doğrulayıcısının Thin sürücüyle uyumluluğu kontrolü.
 - Model testinde `401` / `403`: servis anahtarı veya erişim izni kontrolü.
-- Model testinde `404`: denenen standart yol serviste yok; diğer tanılama adımlarını da kontrol edin. Tüm keşif yolları başarısızsa model ekibinden gerçek çağrı sözleşmesini alın.
+- Model testinde `404/405`: isteğe bağlı bilgi yolu ve ardından başarılı gerçek çağrı varsa **Desteklenmiyor** normaldir. Gerçek `POST` çağrısında hata varsa servis ekibinin çağrı sözleşmesini kontrol edin.
 - Sertifika hatası: kurumun sağladığı CA PEM dosyasını ilgili servisin gelişmiş ayarına girin.
 
 Önceki sürümde görülen **“LLM/Embedding tam çağrı adresi gerekli”**, servis çağrısından önceki eksik form doğrulamasıydı. Yeni standart test temel adresle başlayabilir; bu mesaj tek başına servislerin kapalı olduğunu göstermiyordu.
 
 Sıralı gerçek ortam denemesi için **[Kurumda bağlantı test senaryosu](BAGLANTI_TEST_SENARYOSU.md)** belgesini izleyin. Ham hata metni parola veya bağlantı bilgisi içerebileceğinden gösterilmez. Destek için aşama, hata kodu ve tanılama raporunu kullanın; parolanızı paylaşmayın. CON_NAME desteklemeyen eski bağlamlarda DB_NAME kullanılır. Yetki ve ağ hataları bu uyumluluk yoluyla gizlenmez.
 
-Kurum ağına ve gerçek kullanıcı hesabına geliştirme bilgisayarından erişilmedi. Bağlantının kurumda başarılı olduğu, yalnız iş bilgisayarındaki gerçek denemeyle doğrulanabilir.
+Kurum ağına ve gerçek kullanıcı hesabına geliştirme bilgisayarından erişilmedi. Kullanıcının çıktıları küçük LLM/embedding çağrılarının kurumda çalıştığını doğruladı. Tam Oracle katalog taramasının ve Excel analizinin kurumda tamamlanması ayrıca doğrulanmalıdır; sorguların küçültülmesi gerçek ortamda her zaman aşımının giderildiği garantisi değildir.

@@ -162,6 +162,20 @@ class _Report:
                             "message": "Doğrulandı.", "code": "OK"})
         return value
 
+    def explain_optional_discovery(self):
+        """Only call after inference and response validation have succeeded.
+
+        Missing optional GET routes do not make a working service unhealthy.
+        Keep the observed HTTP code and timing; never soften a POST failure or
+        an authentication, certificate, malformed-response or transport error.
+        """
+        for check in self.checks:
+            if (check["status"] == "failed" and check["name"].startswith("GET ")
+                    and check.get("code") in {"HTTP_404", "HTTP_405"}):
+                check["status"] = "unsupported"
+                check["message"] = ("Servis bu isteğe bağlı keşif isteğini desteklemiyor. "
+                                    "Gerçek model çağrısı doğrulandı; bu adım bağlantıyı engellemiyor.")
+
 
 def _models(client, endpoint):
     body = client.get(endpoint)
@@ -417,6 +431,7 @@ def discover_model(raw, name):
             message += " Sunucunun varsayılan embedding modeli kullanılıyor; servis model kimliği ve sürümü bildirmiyor. İstekler tek metinlik gruplarla gönderilecek."
         elif settings["model_version"].startswith("deployment:"):
             message += " Servis model sürümü bildirmedi; deployment etiketi yalnız dağıtım kimliğidir. Model değişirse yeniden doğrulayın."
+        report.explain_optional_discovery()
         return {"ok": True, "checks": report.checks, "message": message, "settings": settings, "models": report.models,
                 **({"dimensions": settings["dimensions"]} if name == "embedding" else {})}
     except Exception as error:

@@ -120,7 +120,12 @@ class WorkflowTests(unittest.TestCase):
             result=self.finish(response.json["id"])
         self.assertIn("ORA-01017",json.dumps(result))
         self.assertNotIn("RAW_SECRET",json.dumps(result))
-        self.assertEqual(result["results"][0]["physical_name"],"unknown")
+        self.assertEqual(result["status"],"failed")
+        self.assertEqual(result["failure_stage"],"catalog")
+        self.assertEqual(result["code"],"ORA-01017")
+        self.assertEqual(result["progress"]["completed"],0)
+        self.assertFalse(result.get("results"))
+        self.assertEqual(self.client.get("/api/jobs/"+result["id"]+"/download").status_code,400)
 
 
 class OracleDiagnosticTests(unittest.TestCase):
