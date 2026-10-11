@@ -251,11 +251,14 @@ def kayit_istatistikleri(son=10, kok="toplantilar"):
 
 
 def hata_logu():
+    import ayar
+    yol = ayar.hata_log_yolu()                       # %LOCALAPPDATA%\BriefMind\hata.log (yoksa uygulama klasörü)
     baslik("6) hata.log (son 15 satır — paylaşmadan önce içeriğine bak)")
-    if not os.path.exists("hata.log"):
+    yaz(f"yol: {yol}")
+    if not os.path.exists(yol):
         yaz("hata.log yok")
         return
-    satirlar = open("hata.log", encoding="utf-8", errors="replace").read().splitlines()
+    satirlar = open(yol, encoding="utf-8", errors="replace").read().splitlines()
     yaz(f"toplam {len(satirlar)} satır")
     for s in satirlar[-15:]:
         yaz("  " + s[:200])

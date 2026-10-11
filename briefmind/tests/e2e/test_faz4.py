@@ -27,24 +27,6 @@ KATILIMCILAR = {D.A, D.B, D.C, D.BEN}
 KARAR_BOLUMLERI = {"Kararlar", "Aksiyonlar", "Açık sorular"}
 CAPACITY_KENARI = ("not_cok_uzun", 7)
 
-# ---------------- bilinen kod eksikleri (xfail strict) ----------------
-OZET_NEDEN = ("Özet paragrafi ⟨⟩ (A / B ayni anda) satirindaki TUTARI tasiyor: DusmanLLM bolum ozetini (tutar dahil) kopyalar; "
-              "motor.dayanak_kontrolu ozet cumlelerini ozet_zemin = _kokler(transkript) ile -- ⟨⟩ DAHIL -- denetler, sayi / tutar "
-              "icin ⟨⟩ korumasi yok. Ornek not_temiz/7: '... kayitlari ve 23 madde konusuldu. 667 bin lira tutari da ele alindi' "
-              "(167 numarali soz yalniz ⟨⟩ icinde)")
-KISIYE_NEDEN = ("'Kişiye göre iş listesi' dayanak_kontrolu'nun denetlemedigi baslik (llm.not_markdown 'aksiyon/karar/soru' "
-                "sozcuklerinden bilerek kacinir): Aksiyonlar tablosundan dayanaksiz diye atilan ⟨⟩ maddeleri bu listede "
-                "'(aday: Ad)' ile kaliyor. Ornek not_temiz/7: kayit 118, 150, 152, 181 (hepsi yalniz ⟨⟩ icinde)")
-SONRAKI_NEDEN = ("'Bir sonraki adım' cumlesi yalniz kok ortusmesiyle (esik 0.34) denetlenir ve katilimci adi transkript "
-                 "etiketlerinde gectigi icin ⟨⟩ kaynakli maddeyi SAHIBIYLE tasiyan cumle geciyor. Ornek not_temiz/7: 'Melek Taslak "
-                 "... 181 ... işini tamamlayacak.' (181 yalniz 'Melek Taslak / Kaan Uydurma (aynı anda)' ⟨⟩ satirinda)")
-SONRAKI_BELIRSIZ_NEDEN = ("'Bir sonraki adım' kaynagi 'Ad?' / 'A → B' / 'Bilinmeyen' olan bir isi SAHIBIYLE yaziyor (genel asama "
-                          "listeleri sorumlu (?) isaretiyle alir; kod cumlede sahip adini denetlemez). Ornek not_temiz/7: kayit 206")
-CAPACITY_NEDEN = ("Toplam madde tek istek kapasitesini birkac madde asinca (not_cok_uzun/7: 268 madde, kapasite ~262; tur 2 "
-                  "gruplari [258, 10]) gruplar kuculmedigi icin dongu birakilir ve TUM liste yerel birlestirmeye duser "
-                  "('kademeli birleştirmeye de sığmadı'; LOGLU, sessiz degil). Kalan kucuk grup yeniden dagitilmiyor")
-
-
 @pytest.fixture(autouse=True)
 def _agsiz(monkeypatch):
     def yasak(*_a, **_k):
@@ -193,24 +175,20 @@ def test_sarmal_karar_ve_tutar_cogu_kosumda_cikarilmaya_calisildi():
     assert sum(s["n_sarmal_karar_soz"] for s in t) >= 8, "⟨⟩ icinde tutarli karar sozu yetersiz"
 
 
-# ---------------- kapi 3b: ⟨⟩ / belirsiz kaynak notun diger bolumlerinde (bilinen eksikler) ----------------
+# ---------------- kapi 3b: ⟨⟩ / belirsiz kaynak notun diger bolumlerinde (motor.not_son_denetim) ----------------
 
-@pytest.mark.xfail(strict=True, reason=OZET_NEDEN)
 def test_sarmal_tutari_ozette_yok():
     assert [x for s in _hepsi() for x in _sizinti(s, {"Özet"})] == []
 
 
-@pytest.mark.xfail(strict=True, reason=KISIYE_NEDEN)
 def test_sarmal_maddesi_kisiye_gore_listede_yok():
     assert [x for s in _hepsi() for x in _sizinti(s, {"Kişiye göre iş listesi"})] == []
 
 
-@pytest.mark.xfail(strict=True, reason=SONRAKI_NEDEN)
 def test_sarmal_maddesi_sonraki_adimda_yok():
     assert [x for s in _hepsi() for x in _sizinti(s, {"Bir sonraki adım"})] == []
 
 
-@pytest.mark.xfail(strict=True, reason=SONRAKI_BELIRSIZ_NEDEN)
 def test_belirsiz_kaynakli_is_sonraki_adimda_sahipli_yazilmaz():
     assert [x for s in _hepsi() for x in s["n_sonraki_belirsiz"]] == []
 
@@ -261,14 +239,11 @@ def test_konusma_payi_altyazi_kapaliyken_belirsiz_pay_buyuk():
 
 # ---------------- kapi 6: 170+ madde LLM gruplariyla birlesir, sessiz yedek yok ----------------
 
-def _uzun(kenar_xfail=False, adlar=("not_uzun", "not_cok_uzun")):
-    return [pytest.param(ad, sd, id=f"{ad}-{sd}",
-                         marks=[pytest.mark.xfail(strict=True, reason=CAPACITY_NEDEN)]
-                         if kenar_xfail and (ad, sd) == CAPACITY_KENARI else [])
-            for ad in adlar for sd in SEEDLER[ad]]
+def _uzun(adlar=("not_uzun", "not_cok_uzun")):
+    return [pytest.param(ad, sd, id=f"{ad}-{sd}") for ad in adlar for sd in SEEDLER[ad]]
 
 
-@pytest.mark.parametrize("ad,seed", _uzun(kenar_xfail=True))
+@pytest.mark.parametrize("ad,seed", _uzun())
 def test_170_arti_madde_llm_gruplariyla_birlesir_yedege_dusmez(ad, seed):
     s = olc(ad, seed)
     girdi = s["n_liste_girdi"]

@@ -76,6 +76,7 @@ python app.py
 | `altyazi_yedek` | (varsayılan `false`) `true`: STT yokken Teams altyazı metni yedek olarak girer (`kaynak: altyazi-yedek`, şüpheli; notta "altyazıdan, düşük güven"; sahip/aksiyon üretmez). Ayarlar → "STT yokken Teams altyazı metnini yedek olarak nota al" |
 | `altyazi_goster` | (varsayılan `false`) Canlı ekranda Teams altyazısı da `[altyazı]` etiketiyle görünür; transkripte girmez |
 | `kesinti_kaydi` | (varsayılan `false`) STT yokken klipler toplantı klasörüne (`olcum/kesinti/`) yazılır, STT dönünce sırayla çözülür (`olcum_kaydi` açıkken zaten açık) |
+| `kesinti_devam` | (varsayılan `true`) Önceki oturumdan diskte kalan STT kesinti kuyruğu (`olcum/kesinti/`) açılışta (STT ayaktaysa) otomatik çözülür; Olaylar'a ilerleme yazılır, not yeniden üretilmez (Geçmiş → Yeniden özetle). `false`: kuyruk diskte beklemeye devam eder |
 | `esikler` | (isteğe bağlı) Konuşmacı atama eşikleri, ör. `{"baskin": 0.6, "ikinci": 0.25, "kesin": 0.7, "erteleme_sn": 15}` (tam liste: `konusmaci.VARSAYILAN_ESIKLER`). Halüsinasyon eşikleri de burada: `hal_supheli` (varsayılan 0,5; satır nota girmez, Belirsizler'e düşer), `hal_at` (0,9; satır silinir) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
 | `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
@@ -101,6 +102,13 @@ Kurum içi sunucuların sertifikası kurumun kendi kök sertifikasıyla imzalıd
    uygulamayı yeniden başlatın. Olaylar'da "TLS doğrulaması kapalı" satırı görünmüyorsa doğrulama açıktır;
    `python tools\teshis.py` çıktısında da "TLS doğrulaması: açık" yazar. STT başka bir kökle imzalıysa
    iki sertifika aynı `.cer` dosyasına alt alta kopyalanabilir.
+
+**Duman testi:** `python app.py --duman` pencereyi ekransız kurar (ağ, Outlook, UIA ve zamanlayıcı yok), paketlenen
+modülleri ve `veri\` dosyalarını açmayı dener; çıkış kodu `0` = tamam (derlenmiş exe için de geçerli: `BriefMind.exe --duman`). Sonuç satırları konsol yoksa
+`hata.log`'un yanındaki `duman.txt`'ye de yazılır.
+
+**hata.log konumu:** `%LOCALAPPDATA%\BriefMind\hata.log` (yazılamazsa uygulama klasörü; 1 MB'ı aşınca `hata.log.1`'e
+döner). `ToplantiNotu.bat` ve `python tools\teshis.py` bu yolu kullanır. Paylaşmadan önce içeriğine bakın.
 
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`); `veri\` klasörü (yaygın kelime listesi) exe'ye eklenir.
 
@@ -172,6 +180,24 @@ python tools\etiketle.py toplantilar\<klasor> --bas 0 --bit 10   # ilk 10 dk'yı
 python tools\olcum.py toplantilar\<klasor> --token               # WER, SER-kesin, belirsiz oran, halüsinasyon (yalnız sayı) + karakter/token
 python tools\replay.py toplantilar\<klasor> [--stt] [--bas 0 --bit 10]   # kaydı bugünkü hattan çevrimdışı geçirip metrikleri hesapla
 ```
+
+## Ses izi (Faz 6 spike, isteğe bağlı, varsayılan kapalı)
+
+Teams altyazısı kapalıyken konuşmacısı `?` kalan satırlara **yalnızca ad adayı** vermek için deneme: `config.json` →
+`"ses_izi": true`, `"ses_izi_model": "<gömme modeli>.onnx"` (isteğe bağlı `"ses_izi_esik": 0.75`). `sherpa-onnx`
+zorunlu bağımlılık değildir (`pip install sherpa-onnx`); paket ya da model yoksa özellik tek log satırıyla kapanır, not hattı
+etkilenmez. Parça kapanınca (arka planda) kesin loopback satırlarından (`spk_guven` ≥ 0.9, çakışma yok, ≥ 2 sn; ses halka
+tampondan) kişi başı centroid kurulur; altyazısız (`kapsama_yok`) `?` satırı yalnız en iyi kosinüs ≥ eşik **ve** ikinciye
+fark ≥ 0.10 **ve** kişinin ≥ 5 centroid klibi varsa atanır. Atanan satırın `spk_guven` değeri en çok 0.6'dır: her yerde `Ad?`
+görünür, sahip/katılımcı üretmez, `kaynak_konusmaci: "ses_izi"`. Altyazı kararı olan satırlara dokunulmaz. Ses izi (centroid)
+yalnız toplantı süresince bellekte tutulur, diske yazılmaz. Kapı ölçümü Faz 0 kaydında (RTF < 0.3, `?`'lerin ≥ %50'si doğru,
+yanlış 0):
+
+```powershell
+python tools\ses_izi_dene.py toplantilar\<klasor> --model gomme.onnx   # RTF, kapsama, doğru/yanlış, eşik önerisi
+```
+
+Motor bağlantısı: `Motor.ses_izi_kur(ayar, ses_al_fn)` (`ses_al_fn(akis, bas, bit)` → 16 kHz ses, halka tampon).
 
 ## Test
 

@@ -692,3 +692,81 @@ def test_kaynak_satiri_bulucu_sorumlu_bonusu_esigin_altini_gecirmez():
     bul3 = motor_mod.kaynak_satiri_bulucu([{"ts": "10:00:00", "speaker": "Selin Kara", "text": "rapor taslağı"}], esik=0.3)
     assert bul3("rapor sunumu hazırlığı toplantısı", "Selin Kara") is None
     assert bul3("rapor taslağı", "Selin Kara")["ts"] == "10:00:00"
+
+
+# ---------------------------------------------------------------- 5) kapasite kenari: sinir birlestirmesi
+
+def test_toplam_tek_istek_kapasitesini_asinca_kalan_grup_sinirdan_birlesir_yedege_dusmez(monkeypatch):
+    """Bulgu (not_cok_uzun/7): 268 madde, kapasite ~262; tur 2 gruplari [258, 10] kuculmedigi icin TUM liste yerel
+    birlestirmeye dusuyordu. Artik kucuk grup onceki grubun kuyruguyla LLM'e gider: yerel yedek yok, madde kaybi yok,
+    kronoloji korunur, hicbir istek kapasiteyi asmaz."""
+    monkeypatch.setattr(llm, "BAGLAM_PENCERESI", 32768)
+    gunluk = []
+    monkeypatch.setattr(llm, "GUNLUK_FN", gunluk.append)
+    fake = SahteBirlestirici()
+    monkeypatch.setattr(llm, "sor", fake)
+    bolumler = _uzun_toplanti(36, 10)                                         # 360 madde > tek istek kapasitesi
+    ust = llm._liste_girdi_ust("Toplantı: test")
+    assert llm.token_say(llm._liste_girdisi(bolumler)[0]) > ust               # fixture: tek istege sigmiyor
+    log = []
+    sonuc = llm.listeleri_birlestir(bolumler, "Toplantı: test", log.append)
+    assert [a["madde"] for a in sonuc["aksiyonlar"]] == [a["madde"] for b in bolumler for a in b["aksiyonlar"]]
+    assert not any("yerel birleştirme" in m for m in log), log
+    assert not [g for g in gunluk if g.get("olay") == "liste_yedek"]
+    assert [g for g in gunluk if g.get("olay") == "liste_sinir"]
+    assert any("sınırlarından birleştiriliyor" in m for m in log)
+    for c in fake.cagrilar:
+        girdi = c[1]["content"].split("Bölümlerden gelen maddeler:\n\n", 1)[1]
+        assert llm.token_say(girdi) <= ust
+    # ust turda tek basina kalan grup sonucu ayni listeyle yeniden istenmez: ayni girdi iki kez gonderilmez
+    girdiler = [c[1]["content"].split("Bölümlerden gelen maddeler:", 1)[1] for c in fake.cagrilar]
+    assert len(set(girdiler)) == len(girdiler)
+
+
+def test_kuyruk_ayir_kronolojiyi_korur_ve_tavani_asmaz():
+    v = {"kararlar": [f"karar {i}" for i in range(10)],
+         "aksiyonlar": [{"madde": _kalem(i), "sorumlu": "Selin Kara", "tarih": "-"} for i in range(40)],
+         "acik_sorular": ["soru 1?"]}
+    tavan = llm.token_say(llm._liste_girdisi([v])[0]) // 3
+    sabit, kuyruk = llm._liste_kuyruk_ayir(v, tavan)
+    assert llm.token_say(llm._liste_girdisi([kuyruk])[0]) <= tavan
+    for alan in ("kararlar", "aksiyonlar", "acik_sorular"):
+        assert sabit[alan] + kuyruk[alan] == v[alan]                          # bas + son = asil sira
+    assert kuyruk["aksiyonlar"] and kuyruk["aksiyonlar"][-1] == v["aksiyonlar"][-1]
+    assert llm._liste_kuyruk_ayir(v, 1) == (v, None)                          # tek madde bile sigmiyor
+
+
+# ---------------------------------------------------------------- 6) kucuk hatalar: soru cevabi kesilmesi, BOM'lu config
+
+def test_toplantiya_sor_dusunmesiz_tekrar_da_kesilirse_uyari_doner(monkeypatch):
+    cagrilar = []
+
+    def sahte(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
+        cagrilar.append(dusunme)
+        return "Selin bütçe tablosunu", "length"
+    monkeypatch.setattr(llm, "sor", sahte)
+    bolumler = [("10:00–10:05", "[10:00:00] Selin Kara: Bütçe tablosunu cuma paylaşırım.")]
+    cevap = llm.toplantiya_sor("Bütçeyi kim paylaşacak?", bolumler, "Toplantı: x")
+    assert cagrilar == [True, False]
+    assert cevap.startswith("Selin bütçe tablosunu") and llm.KESIK_CEVAP_UYARISI in cevap
+    # tekrar tamamlanirsa uyari yok
+    yanit = iter([("", "length"), ("Selin Kara paylaşacak ⏱10:00:00", "stop")])
+    monkeypatch.setattr(llm, "sor", lambda *a, **k: next(yanit))
+    cevap = llm.toplantiya_sor("Bütçeyi kim paylaşacak?", bolumler, "Toplantı: x")
+    assert cevap == "Selin Kara paylaşacak ⏱10:00:00"
+    # bos ve kesik: yalniz uyari
+    monkeypatch.setattr(llm, "sor", lambda *a, **k: ("", "length"))
+    assert llm.toplantiya_sor("Bütçe?", bolumler, "Toplantı: x") == llm.KESIK_CEVAP_UYARISI
+
+
+def test_llm_ve_rag_acilis_ayari_bomlu_config_okur(tmp_path, monkeypatch):
+    import ayar
+    import rag
+    yol = tmp_path / "config.json"
+    yol.write_bytes(b"\xef\xbb\xbf" + json.dumps({"route": "http://localhost:9/v1", "embed_url": ""}).encode("utf-8"))
+    monkeypatch.setattr(llm, "CONFIG", str(yol))
+    monkeypatch.setattr(ayar, "AYAR_DOSYA", str(yol))
+    assert llm._ilk_ayar()["route"] == "http://localhost:9/v1"
+    assert rag._ilk_ayar() == {"route": "http://localhost:9/v1", "embed_url": ""}
+    yol.write_text("{bozuk", encoding="utf-8")
+    assert llm._ilk_ayar() == {} and rag._ilk_ayar() == {}

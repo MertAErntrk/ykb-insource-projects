@@ -166,8 +166,18 @@ SENARYOLAR_FAZ4 = {
 }
 SEDLER_FAZ4 = {"not_temiz": SEDLER, "not_kapali": SEDLER, "not_ust_uste": SEDLER, "not_uzun": (7, 11),
                "not_cok_uzun": (7, 11), "not_korumasiz": (7, 11), "not_komsu_sarmal": SEDLER}
+# Faz 3 uzun pencere senaryolari (MIMARI_v3 §9 Faz 3): tur="faz3" (uzun, kesintisiz konusma; benzersiz uydurma kelimeler:
+# cift / kayip kelime birebir sayilir). sinir_kes: kisa klip sinirinda (ZORLA / nefes kesimi) Whisper kelimeyi yarim duyar,
+# uzun pencere dogru duyar. uzun: config uzun_pencere. *_kisa: ayni kosum bayrak kapali (karsilastirma tabani).
+SENARYOLAR_FAZ3 = {
+    "uzun_sinir": dict(tur="faz3", sinir_kes=True, uzun=True),
+    "uzun_sinir_kisa": dict(tur="faz3", sinir_kes=True, uzun=False),
+    "uzun_surekli": dict(tur="faz3", sinir_kes=True, uzun=True, surekli=True),
+    "uzun_surekli_kisa": dict(tur="faz3", sinir_kes=True, uzun=False, surekli=True),
+}
+SEDLER_FAZ3 = SEDLER
 SURELER = {"karisik": 900.0, "hizli_devir": 420.0, "klip_ici_devir": 420.0, "araya_girme": 420.0, "ayni_anda": 320.0,
-           "ben_uzak": 480.0, "yanki": 480.0, "not_faz4": 600.0}
+           "ben_uzak": 480.0, "yanki": 480.0, "not_faz4": 600.0, "faz3": 480.0}
 
 # ---------------- Faz 2: terim havuzu, davet, Whisper hatalari, halusinasyon cesitleri ----------------
 TERIM_VARSAYILAN = ("Kubernetes", "commit", "pipeline", "Mikroservisler", "Jenkins", "Jira", "Kampanya Modülü")   # elle / davet
@@ -469,8 +479,61 @@ def uret_not(r, sure, ayni=0.10, devir=0.10, bilgi=0.2, aralik=(0.9, 3.0), komsu
     return g.ut
 
 
+# Faz 3: benzersiz uydurma kelimeler (hece birlesimi) + tekrarlanan kisa dolgu ('evet evet': <= 2 kelime, tekrar suzgecine
+# girmez) + arada benzersiz sayi. Her benzersiz kelime nihai transkriptte tam bir kez gecmeli (cift / kayip sayimi).
+FAZ3_HECE = ("ba", "be", "bo", "da", "de", "di", "ka", "ke", "ko", "la", "le", "lu", "ma", "me", "mo", "na", "ne", "ra",
+             "re", "ru", "sa", "se", "ta", "te", "tu", "ya", "ye", "za")
+FAZ3_SON = ("", "r", "n", "l", "k", "m", "s", "t")
+FAZ3_DOLGU = ("evet evet", "tamam tamam", "evet")
+FAZ3_KELIME_SN = 0.38                     # kelime basina konusma suresi
+
+
+def uret_faz3(r, sure, kisiler=(A, B, C, BEN), surekli=False):
+    """Uzun, kesintisiz konusma: her soz 3-6 cumle, cumle arasi cogu 0-0.2 sn (VAD tek klip; 12 sn'de ZORLA ile kelime
+    ortasinda kesilir), bazen 0.3-0.5 sn (8 sn'den sonra nefes payinda kesilir). Konusmaci degisiminde 0.8-3 sn, arada
+    4-6 sn sessizlik (pencere sessizlikte bolunur). surekli: konusmaci degisimi de 0.05-0.5 sn (sessizlik yok: pencere
+    konusmanin icinde bolunur, ortusmede kelime vardir; dikis gercekten sinanir)."""
+    g = _Uretici(r)
+    gorulen, sayilar = set(), list(range(11, 999))
+    r.shuffle(sayilar)
+
+    def kelime():
+        while True:
+            w = "".join(r.choice(FAZ3_HECE) for _ in range(r.choice((2, 3)))) + r.choice(FAZ3_SON)
+            if len(w) >= 4 and w not in gorulen:
+                gorulen.add(w)
+                return w
+
+    def cumle():
+        k = [kelime() for _ in range(r.randint(6, 10))]
+        if r.random() < 0.15 and sayilar:
+            k.insert(r.randrange(1, len(k)), str(sayilar.pop()))
+        if r.random() < 0.12:
+            k.insert(r.randrange(1, len(k)), r.choice(FAZ3_DOLGU))
+        return k[0].capitalize() + " " + " ".join(k[1:]) + "."
+
+    t, son = 2.0, None
+    while t < sure:
+        kim = r.choice([k for k in kisiler if k != son])
+        for j in range(r.randint(3, 6)):
+            m = cumle()
+            d = len(m.split()) * FAZ3_KELIME_SN
+            if j:
+                t += r.uniform(0.0, 0.2) if r.random() < 0.7 else r.uniform(0.3, 0.5)
+            u = g.ekle(kim, t, d, m)
+            t = u["bit"]
+        if surekli:
+            t += r.uniform(0.05, 0.5)
+        else:
+            t += r.uniform(4.0, 6.0) if r.random() < 0.2 else r.uniform(0.8, 3.0)
+        son = kim
+    return g.ut
+
+
 def uret(tur, r, sec):
     sure = sec.get("sure", SURELER[tur])
+    if tur == "faz3":
+        return uret_faz3(r, sure, surekli=bool(sec.get("surekli")))
     if tur == "karisik":
         hal = sec.get("halusinasyon")
         faz2 = sec.get("cumleler") == "faz2"
@@ -669,6 +732,43 @@ def klip_metni(c):
     return " ".join(k[3] for k in c["kelimeler"])
 
 
+def kisa_stt_metni(c):
+    """Sahte Whisper'in kisa klipte duydugu metin: Faz 3 sinir kesimi (sinir_kes) kelimeyi yarim duyurur (c['yarim'])."""
+    yarim = c.get("yarim") or {}
+    return " ".join(yarim.get((k[0], k[1]), k[3]) for k in c["kelimeler"])
+
+
+def sinir_kes(klipler, r):
+    """Faz 3: ayni akista bosluksuz (ZORLA) ya da nefes payli (< CUMLE_SESSIZLIK) bitisik iki klibin sinirinda Whisper
+    kelimeyi yarim duyar: siniri kesen kelime, merkezinin dustugu klipte payi kadar harfle (soldaki klipte bas harfleri, sagda
+    son harfleri) yazilir; nefes kesiminde soldaki klibin son kelimesi (yari olasilikla) son iki harfini yitirir. Uzun
+    pencere sesi sinir icermedigi icin bu kelimeleri dogru duyar. c['yarim']: {(soz id, kelime no): duyulan}."""
+    sirali = sorted(klipler, key=lambda c: c["bas"])
+    for c1, c2 in zip(sirali, sirali[1:]):
+        bosluk = c2["bas"] - c1["bit"]
+        if bosluk >= ses.CUMLE_SESSIZLIK or c1["hayalet"] or c2["hayalet"]:
+            continue
+        sinir = (c1["bit"] + c2["bas"]) / 2.0
+        for c in (c1, c2):
+            for kel in c["kelimeler"]:
+                u = next((x for x in c["sozler"] if x["id"] == kel[0]), None)
+                if u is None:
+                    continue
+                h = (u["bit"] - u["bas"]) / (2.0 * len(u["slot"]))
+                a, b = kel[5] - h, kel[5] + h
+                if not (a < sinir < b):
+                    continue
+                pay = (sinir - a) / (b - a) if c is c1 else (b - sinir) / (b - a)
+                w = kel[3]
+                n = max(1, min(len(w) - 1, int(round(len(w) * pay))))
+                if pay < 0.9 and len(w) >= 2:
+                    c.setdefault("yarim", {})[(kel[0], kel[1])] = w[:n] if c is c1 else w[-n:]
+        if bosluk > 0.05 and c1["kelimeler"] and r.random() < 0.5:     # nefes kesimi: klip sonu kelime kirpilir
+            kel = c1["kelimeler"][-1]
+            if len(kel[3].strip(".,")) >= 5 and (kel[0], kel[1]) not in c1.get("yarim", {}):
+                c1.setdefault("yarim", {})[(kel[0], kel[1])] = kel[3].strip(".,")[:-2]
+
+
 # ======================================================================================================
 # kosum: olay yigini
 # ======================================================================================================
@@ -680,16 +780,20 @@ class SahteStt:
 
     def __init__(self):
         self.cagrilar = []
+        self.uzun_cagri = []                 # Faz 3 uzun pencere istekleri (GPU yuku)
         self.ornek_ipucu = ""                # gorulen ilk prompt (icerik / uzunluk kapilari)
 
     def coz(self, ses_, ipucu=""):
         c = ses_
         if ipucu and not self.ornek_ipucu and not c.get("sizinti"):
             self.ornek_ipucu = ipucu
+        if c.get("uzun"):                                    # Faz 3 uzun pencere (Kosum._uzun_ses): sinir kesimi yok
+            self.uzun_cagri.append({"ipucu_kr": len(ipucu or ""), "sure": round(c["bit"] - c["bas"], 2)})
+            return [{"id": 0, "text": " ".join(c["kelimeler"]), "tokens": [], "temperature": 0.0}]
         rms = sum(c["zarf"]) / max(1, len(c["zarf"]))
         self.cagrilar.append({"rms": rms, "ipucu_kr": len(ipucu or ""), "sizinti": bool(c.get("sizinti")),
                               "hayalet": bool(c["hayalet"])})
-        metin = (ipucu or "") if c.get("sizinti") else klip_metni(c)
+        metin = (ipucu or "") if c.get("sizinti") else kisa_stt_metni(c)
         return [{"id": 0, "text": metin, "tokens": [], "temperature": 0.0}]
 
 
@@ -720,9 +824,16 @@ class Kosum:
         self.yakalayici = yakalayici.Yakalayici()
         self.adim = bool(sec.get("saat_adimlari"))             # saat adimi modu: damgalar gercek kod yollarindan
         self._akislar = {}
-        self.servis = ses.SesServisi("", olay_fn=self._servis_olayi, esikler=sec.get("esikler"))
+        self.uzun = bool(sec.get("uzun"))                            # Faz 3: config uzun_pencere
+        self.servis = ses.SesServisi("", olay_fn=self._servis_olayi, esikler=sec.get("esikler"), uzun_pencere=self.uzun)
         self.stt = SahteStt()                                        # SesServisi._coz gercek: prompt korumalari dahil
         self.servis.stt = self.stt
+        self.uzun_pencereler = []                                    # planlanan uzun pencereler (dikis olcumu)
+        self._uzun_r = random.Random(seed * 1000 + 7)                # uzun STT sureleri (kisa kosumun rastgele dizisi degismez)
+        self._akis_klip = {}                                         # akis -> [(bas, kapanis)] (acik klip: ilerleme)
+        if self.uzun:
+            self.servis.uzun_ac()                                    # gercek UzunPencere; ses halka yerine zemin gercegi
+            self.servis.uzun._ses_fn = self._uzun_ses
         if os.environ.get("BM_E2E_TEKRAR") == "kapali":              # tani: tekrar suzgecini kapat (varsayilan: gercek)
             self.servis._tekrar_mi = lambda *a, **k: False
         self._yayim_giris = {}                                       # klip_no -> suzgecten once metin
@@ -748,12 +859,18 @@ class Kosum:
                 c = klip_kur(a, uzak, "mikrofon", r, yanki=True, gecikme=r.uniform(0.08, 0.3))
                 if r.random() < 0.85:                        # Whisper dusuk seviyeli yankidan bazen metin cikaramaz
                     mk.append(c)
+        if self.sec.get("sinir_kes"):                        # Faz 3: kisa klip sinirinda kelime yarim duyulur
+            sinir_kes(lb, r)
+            sinir_kes(mk, r)
         klipler = lb + mk
         if self.sec.get("halusinasyon"):
             klipler += self._halusinasyon(uzak + ben)
         for c in klipler:
             if c["bit"] - c["bas"] >= SES_ESIK_KISA:
                 self.at(c["bit"] + VAD_KAPANIS, "kapandi", c)
+                self._akis_klip.setdefault(c["akis"], []).append((c["bas"], c["bit"] + VAD_KAPANIS))
+        for v in self._akis_klip.values():
+            v.sort()
         son = max(u["bit"] for u in self.ut) + 40
         t = r.uniform(0.2, 0.9)                              # okumalar: R ~1.2 sn (okuma + uyku), jitter
         while t < son:
@@ -937,8 +1054,65 @@ class Kosum:
             getattr(self, "_o_" + tur)(t, v)
             if self.kesinti and tur in ("tik", "kapandi"):
                 self.alici.stt_durum(self._stt_durumu(t))
+            if self.uzun:
+                self._uzun_tur(t)
             self.alici.kontrol()
         self.alici.zaman(T0 + self.bitis)
+        if self.uzun:                                        # yakalama bitti (SesServisi.durdur): kalan pencereler
+            u = self.servis.uzun
+            u.bitir_isaretle()
+            self.uzun_pencereler += u.planla()
+            u.adim(zorla=True, planla=False)
+            self.alici.kontrol()
+
+    # --- Faz 3: uzun pencere (gercek UzunPencere, sanal saat) ---
+    def _ilerleme(self, akis, t):
+        """Akisin klip bolmesinin kesinlestigi an (AkisYakalayici.ilerleme): acik (kapanmamis) klip varsa onun basi."""
+        an = t - VAD_KAPANIS
+        liste = self._akis_klip.get(akis) or []
+        i = bisect.bisect_right(liste, (t, float("inf")))
+        for bas, kapanis in liste[max(0, i - 4):i]:
+            if bas <= t < kapanis:
+                an = min(an, bas)
+        return T0 + an
+
+    def _uzun_tur(self, t):
+        u = self.servis.uzun
+        for akis in ("loopback", "mikrofon"):
+            u.ilerle(akis, self._ilerleme(akis, t))
+        for p in u.planla():
+            self.uzun_pencereler.append(p)
+            if not p["cozuldu"]:
+                self.at(t + 0.8 + 0.08 * (p["bit"] - p["bas"]) + self._uzun_r.uniform(0.0, 1.5), "uzun_stt", p)
+        u.adim(cozucu=False, planla=False)
+
+    def _o_uzun_stt(self, t, p):
+        self.servis.uzun.coz(p)                              # gercek coz: prompt korumasi + halusinasyon puani -> SahteStt
+
+    def _uzun_ses(self, akis, bas, bit):
+        """Pencere 'sesi' (SahteStt'ye): akisin zemin gercegi kelimeleri (merkezi [bas, bit) icinde; kaybolan sozler
+        haric). Pencere basi kelimenin ortasina duserse kelime yarim duyulur (o kelime onceki pencereye aittir)."""
+        a, b = bas - T0, bit - T0
+        kayip = set()
+        for c in self.klipler.values():
+            if c["akis"] == akis and c["bit"] > a and c["bas"] < b:
+                kayip |= c["kayip"]
+        sozler = [u for u in self.ut if not u["sessiz"] and u["id"] not in kayip
+                  and (u["kim"] == self.ben) == (akis == "mikrofon") and u["bit"] > a and u["bas"] < b]
+        kel = []
+        for u in sozler:
+            n = len(u["slot"])
+            h = (u["bit"] - u["bas"]) / (2.0 * n)
+            for i, (dogru, whisper) in enumerate(u["slot"]):
+                t = u["bas"] + (i + 0.5) * (u["bit"] - u["bas"]) / n
+                if t - h < a < t + h:
+                    pay = (t + h - a) / (2 * h)
+                    if pay < 0.9:
+                        whisper = whisper[-max(1, int(round(len(whisper) * pay))):]
+                if a <= t < b or (t - h < a < t + h):
+                    kel.append((t, whisper))
+        kel.sort()
+        return {"uzun": True, "akis": akis, "bas": a, "bit": b, "kelimeler": [w for _, w in kel]}
 
     def _o_tik(self, t, v):
         pass
@@ -971,6 +1145,9 @@ class Kosum:
 
     def _o_kapandi(self, t, c):
         self._yeni_klip_no(c)
+        if self.uzun:
+            self.servis.uzun.klip_kaydet(c["akis"], c["klip_no"], T0 + c["bas"], T0 + c["bit"],
+                                         rms=sum(c["zarf"]) / max(1, len(c["zarf"])))
         w = self._kesinti_penceresi(t)
         if w is None:
             self.at(t + self._stt_suresi(c), "stt", c)
@@ -984,6 +1161,7 @@ class Kosum:
                 self.at(b + 1.0, "gec", i)
         else:
             self.bosluklar.append((c["bas"], c["bit"]))
+            self.servis._uzun_metin(c["klip_no"], "")       # hic cozulmeyecek: uzun pencere beklemez
 
     def _o_gec(self, t, i):
         kuyruk = self._kesinti_kuyrugu.get(i) or []
@@ -993,6 +1171,8 @@ class Kosum:
         c["stt_yok"] = False
         p = self._p(c)
         ev = self.servis.klip_olayi_uret(p, self.servis._coz(p))
+        if ev is None:
+            self.servis._uzun_metin(c["klip_no"], "")
         with self.servis._kilit:
             self.servis._yay([ev] if ev else [])
         if kuyruk:
@@ -1001,6 +1181,8 @@ class Kosum:
     def _o_stt(self, t, c):
         p = self._p(c)
         ev = self.servis.klip_olayi_uret(p, self.servis._coz(p))   # gercek _coz: Whisper prompt'u (korumali) -> SahteStt
+        if ev is None:
+            self.servis._uzun_metin(c["klip_no"], "")         # satiri olmayacak klip (SesServisi._isle ile ayni)
         self.servis._sirali_yay(c["no"], [ev] if ev else [])
 
     # --- yeniden kesme (SesServisi.yeniden_kes sozlesmesi) ---
@@ -1034,7 +1216,12 @@ class Kosum:
                   "sozler": c["sozler"], "kayip": c["kayip"], "yanki": c["yanki"], "hayalet": c["hayalet"],
                   "ust": klip_no, "kelimeler": [k for k in c["kelimeler"] if (k[5] < kes) == (yar == 0)],
                   "zarf": (c["zarf"][:kk + 1] if yar == 0 else c["zarf"][kk + 1:]) or [0.01]}
+            if c.get("yarim"):
+                ps["yarim"] = dict(c["yarim"])
             self._yeni_klip_no(ps)
+            if self.uzun:
+                self.servis.uzun.klip_kaydet(ps["akis"], ps["klip_no"], T0 + ps["bas"], T0 + ps["bit"],
+                                             rms=sum(ps["zarf"]) / max(1, len(ps["zarf"])), ust=klip_no)
             self.at(self.saat + self._stt_suresi(ps), "stt", ps)
         return True
 
@@ -1119,6 +1306,8 @@ class MotorAlici:
         self.olaylar = []                    # (an, tip, id, durum)
         self.silinme = collections.Counter()  # satir_sil olaylarinin nedeni (yanki / halusinasyon ...)
         self.loglar = []                     # Motor.log mesajlari (Olaylar paneli): sessiz yedek dususu burada gorunur
+        self.kapanis_gecikme = []            # parca kapanisi ertelemesi (sn): kapanis karari -> parca_kapandi
+        self._kp, self._kp_bas = None, None
 
     def zaman(self, an):
         self.saat.t = an
@@ -1131,11 +1320,17 @@ class MotorAlici:
 
     def kontrol(self):
         self.m.kontrol()
+        kp = self.m._kapanis
+        if kp is not None and kp is not self._kp:
+            self._kp, self._kp_bas = kp, self.saat.t
 
     def stt_durum(self, d):
         self.m.stt_durumu_ayarla(d)
 
     def olay(self, tip, veri):
+        if tip == "parca_kapandi":
+            self.kapanis_gecikme.append(round(self.saat.t - self._kp_bas, 2) if self._kp_bas is not None else 0.0)
+            self._kp, self._kp_bas = None, None
         if tip in ("satir", "satir_guncelle", "satir_sil", "satir_degistir"):
             self.olaylar.append((self.saat.t, tip, veri.get("id", veri.get("eski_id")), veri.get("durum")))
         if tip == "satir_sil":
@@ -1884,6 +2079,8 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
               "terim_gozlem": len(m.terimler.gozlemler), "duzelt_log": _duzelt_gunlugu_ozeti(m.klasor)}
         if isinstance(sahte, DusmanLLM):
             ek.update(_not_olcum(m, k, satirlar, not_md, sahte, alici))
+        if sec.get("uzun") or sec.get("sinir_kes") or sec.get("f3_olcum"):
+            ek.update(uzun_olcum(m, k, satirlar, alici))
         m.kapat()
         m = None
         return _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik, sahte, sec, seed, ek)
@@ -1896,6 +2093,67 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
         _ortam_geri_yukle(eski)
         os.chdir(onceki_cwd)
         shutil.rmtree(gecici, ignore_errors=True)
+
+
+def _hata_say(ref, hip):
+    """Kelime hatasi (SequenceMatcher islemleriyle Levenshtein yaklasimi; uzun transkriptte hizli)."""
+    import difflib
+    sm = difflib.SequenceMatcher(None, ref, hip, autojunk=False)
+    return sum(max(i2 - i1, j2 - j1) if op == "replace" else (i2 - i1 if op == "delete" else j2 - j1)
+               for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal")
+
+
+def uzun_olcum(m, k, satirlar, alici):
+    """Faz 3 olcumu (bayrak acik ya da kapali, ayni tanim): akis basina transkript duzeyinde kelime hatasi (zemin gercegi
+    'dogru' kelimelerine gore, satiri olan kliplerin kelimeleri zaman sirasiyla), benzersiz kelimelerin nihai transkriptteki
+    sayisi (0: kayip, >= 2: cift), pencere dikisi cevresindeki kelimeler, satir basina konusmaci, parca kapanis gecikmesi,
+    STT istek sayilari. Kelimeler uzun.kelime_norm ile."""
+    import uzun as uzun_mod
+    karar = {s["klip_no"]: s for s in satirlar if s.get("klip_no") is not None}
+    hata = ref_n = klip_hata = 0
+    say = collections.Counter()
+    zemin = collections.Counter()
+    zaman = {}
+    for akis in ("loopback", "mikrofon"):
+        sat = sorted((s for no, s in karar.items() if no in k.klipler and k.klipler[no]["akis"] == akis
+                      and M.nota_girer(s)), key=lambda s: (s.get("bas") or 0, s.get("id") or 0))
+        hip = [n for s in sat for _, n in uzun_mod.kelimeler(s.get("text"))]
+        kel = sorted((x[5], x[2]) for s in sat for x in k.klipler[s["klip_no"]]["kelimeler"])
+        ref = [n for _, w in kel for n in [uzun_mod.kelime_norm(w)] if n]
+        for t, w in kel:
+            n = uzun_mod.kelime_norm(w)
+            if n:
+                zemin[n] += 1
+                zaman.setdefault(n, t)
+        hata += _hata_say(ref, hip)
+        ref_n += len(ref)
+        say.update(hip)
+        for s in sat:                                        # olcum.py gibi klip basina (sinir kelimesi yanlis klibe
+            kref = [uzun_mod.kelime_norm(x[2]) for x in sorted(k.klipler[s["klip_no"]]["kelimeler"], key=lambda x: x[5])]
+            klip_hata += _hata_say([n for n in kref if n], [n for _, n in uzun_mod.kelimeler(s.get("text"))])
+    tekil = [n for n, c in zemin.items() if c == 1 and not n.isdigit() and n not in ("evet", "tamam")]
+    dikis = set()
+    for p in k.uzun_pencereler:
+        ws = p["bas"] - T0 + ses.UZUN_ORTUSME_SN                 # ilk sahip klibin basi
+        for n in tekil:
+            if ws - ses.UZUN_ORTUSME_SN - 0.5 <= zaman[n] <= ws + 1.0:
+                dikis.add(n)
+    konusmaci = {no: (s.get("speaker"), round(float(s.get("spk_guven") or 0.0), 4), bool(s.get("cakisma")),
+                      bool(s.get("devir"))) for no, s in karar.items()}
+    ist = k.servis.uzun_istatistik() or {}
+    return {"f3_kelime_hata": hata, "f3_ref_kelime": ref_n, "f3_wer": round(hata / ref_n, 4) if ref_n else None,
+            "f3_klip_hata": klip_hata,
+            "f3_tekil": len(tekil), "f3_sifir": sorted(n for n in tekil if say[n] == 0),
+            "f3_coklu": sorted(n for n in tekil if say[n] >= 2), "f3_dikis": sorted(dikis),
+            "f3_konusmaci": konusmaci, "f3_kapanis_gecikme_maks": max(alici.kapanis_gecikme or [0.0]),
+            "f3_parca": len(alici.kapanis_gecikme), "f3_guncellenen": m.uzun_guncellenen, "f3_gec": m.uzun_gec,
+            "f3_pencere": len(k.uzun_pencereler), "f3_uzun_istek": len(k.stt.uzun_cagri),
+            "f3_kisa_istek": len(k.stt.cagrilar), "f3_istatistik": ist,
+            "f3_belirsiz": sum(len(s.get("uzun_belirsiz") or []) for s in satirlar),
+            "f3_ipucu": sum(1 for c in k.stt.uzun_cagri if c["ipucu_kr"]),
+            "f3_raw_kisa": sum(1 for s in satirlar if "raw_kisa" in s),
+            "f3_sarmal": sum(1 for s in satirlar if "raw_kisa" in s and (M.SARMAL_AC in (s.get("text") or "")
+                                                                        or M.SARMAL_AC in (s.get("raw") or "")))}
 
 
 def _ipucu_onbellekli(m):

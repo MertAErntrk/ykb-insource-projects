@@ -217,3 +217,24 @@ def test_dayanak_bos_sonraki_adima_nokta_eklemez():
     md = "# T\n\n## Özet\nIFRS raporu görüşüldü.\n\n## Bir sonraki adım\n-\n"
     yeni, _ = motor_mod.dayanak_kontrolu(md, "Ahmet: IFRS raporu hazır mı? Ayşe: hazır, görüşelim.")
     assert yeni.rstrip().endswith("\n-") and "-." not in yeni
+
+
+def test_motor_notu_uret_altyazisiz_satirlari_uyarir(tmp_path, monkeypatch):
+    monkeypatch.setattr(motor_mod, "KOK", str(tmp_path))
+    monkeypatch.setattr(llm, "sor", SahteLLM())
+    m = motor_mod.Motor(str(tmp_path / "t"), "Test toplantısı", dt.date(2026, 9, 29), duzelt=False)
+    satirlar = [
+        {"id": 1, "ts": "10:00:05", "speaker": "Ahmet", "akis": "loopback", "kapsama": True, "spk_guven": 0.9,
+         "text": "IFRS 9 raporunda PD kolonu string geliyor, number tipine çevireceğiz, düzeltmeyi ben yaparım."},
+        {"id": 2, "ts": "10:11:50", "speaker": "?", "akis": "loopback", "kapsama": False, "spk_guven": 0.0,
+         "text": "Test ortamı perşembe hazır, Jira kaydı açılacak."},
+    ]
+    for no, (s, ozet) in enumerate(zip(satirlar, BOLUMLER), 1):
+        o = {k: v for k, v in ozet.items() if k != "aralik"}
+        o["belirsiz_terimler"] = []
+        m.parca_no = no
+        m.parca_yaz({"sira": no, "neden": "token", "token": 100, "baslangic": s["ts"], "bitis": s["ts"],
+                     "satirlar": [s], "duzeltmeler": [], "ozet": o})
+    md = m.notu_uret()
+    m.kapat()
+    assert "Konuşmacı bilgisi yok" in md and "1 satırda (%50)" in md

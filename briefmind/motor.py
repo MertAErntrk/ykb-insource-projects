@@ -12,6 +12,9 @@ Akis (Faz 1-2, docs/MIMARI_v3.md §3-5):
                               (terim.TerimHavuzu.ogren), belirsizler() listesini verir (onay akisi YOK)
        notu_uret()         -> birlestirme -> sorumlu dogrulama -> dayanak kontrolu -> not.md (supheli satirlar girmez)
        yeniden_ozetle()    -> (Gecmis) TUM parcalar yeniden duzeltme (yalniz 'raw'i olan satirlar) + ozet
+       ses_olayi(uzun)     -> Faz 3 (config uzun_pencere): uzun pencere metni klip satirina (raw/text; raw_kisa = kisa metin,
+                              uyusmayan kelimeler 'belirsiz', notta ⟨⟩); konusmaci degismez. Parca kapanisi sonucu en fazla
+                              UZUN_BEKLE_SN bekler; gec gelirse satirlar guncellenir, parca yeniden ozetlenir
 
 Disk (toplantilar/<tarih>_<slug>/): meta.json, altyazi.jsonl (satir v2 + {'guncelle'} / {'sil'} kayitlari),
        parcalar/parca_NNN.json, not.md, duzelt_log.jsonl (kabul/red, kelime duzeyinde), cizelge.json (konusmaci araliklari, metin yok),
@@ -37,9 +40,11 @@ from collections import OrderedDict
 import duzelt as duzelt_mod
 import llm
 import rag
+import ses_izi as ses_izi_mod
 import saat                    # adima dayanikli zaman kaynagi: tum zaman karsilastirmalari saat.simdi()
 import tarih as tarih_mod
 import terim as terim_mod
+import uzun as uzun_mod
 from kelime import normalize
 from konusmaci import Konusmaci
 from metin import ad_geciyor, gorunen_ad, kesin_ad_mi, tr_kucuk
@@ -55,6 +60,7 @@ DUZELT_MIN_TOKEN = 800          # bundan kucuk (genelde son) parcada duzeltme ge
 PARALEL = 0                     # 0: llm.butce("paralel") (varsayilan 2; config.json 'paralel' ile artirilabilir)
 KAPANIS_BEKLE_SN = 20           # parca kapanisi satirlarinin konusmaci kararini en fazla bu kadar bekler
 KESIM_BEKLE_SN = 20             # yeniden kesilen klibin iki parcasi en fazla bu kadar beklenir
+UZUN_BEKLE_SN = 20              # Faz 3: parca kapanisi kapsadigi araligin uzun pencere sonucunu en fazla bu kadar bekler
 GEC_KESIM_TAVAN = 500           # suresi dolmus (parcasi eksik) kesimlerde gec parca icin tutulan en fazla kayit
 OZET_YENI_SN = 10               # kapanmis parcaya gec satir girdiyse yeniden ozet bu kadar sessizlikten sonra
 KAPSAMA_UYARI_SN = 60           # konusmaci bilgisi (altyazi cizelgesi) bu kadar yoksa arayuz uyarir
@@ -230,11 +236,31 @@ def _madde_isaretle(satir, ek=" (?)"):
     return satir.rstrip() + ek
 
 
+_KAYNAK_DAMGASI = re.compile(_ISARET + r"\s*\d{1,2}:\d{2}(?::\d{2})?")
+
+
+def madde_dayanagi(aday, dizin, soru=False):
+    """Tek karar / aksiyon / soru maddesinin satir bazli dayanak karari (dayanak_kontrolu'nun madde yolu; canli bolum
+    ozeti de bunu kullanir). aday: madde metni (kaynak damgasi ayiklanmis); dizin: _dayanak_dizini(transkript).
+    Dondurur: None (denetlenecek kok yok: madde oldugu gibi kalir) | 'at' (dayanak yok ya da sayi / tarih / kod yalniz
+    ⟨⟩ icinde) | (belirsiz_madde, belirsiz_sahip). Soru maddesi belirsiz_madde almaz."""
+    ak = _kokler(aday) - _MADDE_DURAK
+    if not ak:
+        return None
+    dayanak = _dayanak_bul(ak, dizin, zorunlu=_zorunlu_degerler(aday))
+    if dayanak is None or (dayanak["eksik"] and _yalniz_sarmalda(dayanak["eksik"], dizin)):
+        return "at"
+    belirsiz_madde = bool((dayanak["pay"] > SARMAL_PAY_SINIRI or dayanak["eksik"] or dayanak["sarmal_kaynak"])
+                          and not soru)
+    return belirsiz_madde, belirsiz_madde or _etiket_belirsiz(dayanak["ana"]["etiket"])
+
+
 def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
     """Nottaki Karar/Aksiyon/Soru maddelerini ve ozet cumlelerini transkriptle karsilastirir; dayanagi olmayan
     maddeleri cikarir. Modelin terim listesi/gundemden ya da genel bilgisinden 'uydurdugu' satirlara karsi son
     sigorta. Dondurur (yeni_md, atilanlar).
-    Karar/aksiyon/soru maddeleri SATIR bazli denetlenir (MIMARI_v3 §6): kok ortusmesi >= DAYANAK_SATIR_ESIK olan 1-3
+    Karar/aksiyon/soru maddeleri SATIR bazli denetlenir (MIMARI_v3 §6; madde_dayanagi; maddenin kaynak damgasi
+    ⏱HH:MM:SS deger sayilmaz, isaret damganin onune yazilir): kok ortusmesi >= DAYANAK_SATIR_ESIK olan 1-3
     ardisik transkript satiri aranir; ⟨⟩ icindeki (eszamanli konusma) kelimeler dayanak sayilmaz. Maddedeki sayi / tutar,
     ay / gun adi ve kod adi (zorunlu deger) pencerenin ⟨⟩ disindaki metninde gecmeli: yalniz ⟨⟩ icinde geciyorsa madde
     atilir, hic gecmiyorsa (?) alir. Bulunan dayanagin ⟨⟩ payi > %30 ise ya da maddeyi tek basina en iyi karsilayan satir
@@ -282,17 +308,15 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
         if aday is None:
             yeni.append(satir)
             continue
-        ak = _kokler(aday) - _MADDE_DURAK
-        if not ak:
+        aday = _KAYNAK_DAMGASI.sub(" ", aday).strip()      # kaynak damgasi (⏱HH:MM:SS) maddenin degeri degildir
+        karar = madde_dayanagi(aday, dizin, soru="soru" in bolum)
+        if karar is None:
             yeni.append(satir)
             continue
-        dayanak = _dayanak_bul(ak, dizin, zorunlu=_zorunlu_degerler(aday))
-        if dayanak is None or (dayanak["eksik"] and _yalniz_sarmalda(dayanak["eksik"], dizin)):
+        if karar == "at":
             atilan.append(aday)                 # dayanak yok ya da sayi / tarih / kod yalniz ⟨⟩ icinden geliyor
             continue
-        belirsiz_madde = ((dayanak["pay"] > SARMAL_PAY_SINIRI or dayanak["eksik"] or dayanak["sarmal_kaynak"])
-                          and "soru" not in bolum)
-        belirsiz_sahip = belirsiz_madde or _etiket_belirsiz(dayanak["ana"]["etiket"])
+        belirsiz_madde, belirsiz_sahip = karar
         if tablo and "aksiyon" in bolum:
             h = [x.strip() for x in cizgisiz.strip("|").split("|")]
             if belirsiz_sahip and len(h) >= 3 and h[2].lower() not in ("", "-", "belirsiz", "?") and "(?)" not in h[2]:
@@ -319,6 +343,260 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
             atilan += ozet_atilan
             md = md[:m.start(2)] + " ".join(tutulan) + "\n" + md[m.end(2):]
     return md, atilan
+
+
+# ---------- not son denetimi: ozet / konu akisi / sonraki adim / kisiye gore liste (dayanak kontrolunden SONRA) ----------
+# Aksiyon tablosu dayanak kontrolu + sahip dogrulamasiyla kesinlesir; ozet ve 'Bir sonraki adim' serbest cumledir ve
+# yalniz kok ortusmesiyle denetleniyordu: ⟨⟩ tutari ozete, belirsiz kaynakli is sahibiyle sonraki adima giriyordu.
+
+# gelecek / sifat-fiil ('hazirlayacak', 'hazirlayacagini', 'gondereceklerini', 'yapacagiz'), -mAlI, '-mAsI gerek / lazim',
+# ustlen- / sorumlu / gorevlendiril- / atandi; 3. kisi emir ('hazirlasin') is fiili kaliplariyla (_is_cumlesi)
+_IS_IFADESI = re.compile(r"(?<!\w)(?:\w+[ae]c[ae](?:k|ğ)\w*|\w+m[ae]l[ıi]\w*|"
+                         r"\w+m[ae]s[ıi](?:n[ıi])?\s+(?:gerek|lazım|şart|bekleniyor|istendi|isteniyor)\w*|üstlen\w*|"
+                         r"sorumlu\w*|görevlendiril\w*|atand[ıi]\w*)(?!\w)")
+_CUMLE_SONU = re.compile(r"(?<=[.!?])\s+")
+_SONRAKI_CUMLE = re.compile(r"(?<=[.!?;])\s+")
+_KONU_SATIRI = re.compile(r"^(\s*-\s+\S+:\s)(.*)$")
+NOT_ESLESME_ESIK = 0.5          # cumle -> aksiyon satiri: maddenin kokleri cumlede en az bu oranda
+
+
+def _ay_gun(kelime):
+    """Sade kelime bir ay / gun adi mi (_zorunlu_degerler ile ayni kural)? Dondurur: ad | None."""
+    return next((ad for ad in _AY_GUN if kelime.startswith(ad) and (kelime == ad or len(ad) >= 4)), None)
+
+
+class _DegerZemini:
+    """Transkriptte sayi / ay-gun degerlerinin nerede gectigi: ⟨⟩ disi (kesin zemin) ve yalniz belirsiz zemin (⟨⟩ icleri
+    + halusinasyon supheli satirlar; supheli satirlar transkripte hic girmez, metinleri ayrica verilir)."""
+
+    def __init__(self, dizin, supheli_metin=""):
+        self.disi = [k for d in dizin for k in d["duz"]]
+        self.disi_sayi = set().union(*[d["sayi"] for d in dizin]) if dizin else set()
+        self.ic = [k for d in dizin for k in d["ic"]] + _sade_kelimeler(supheli_metin)
+        self.ic_sayi = (set().union(*[d["ic_sayi"] for d in dizin]) if dizin else set()) | set(
+            re.findall(r"\d+", supheli_metin or ""))
+
+    def belirsiz(self, deger):
+        """deger kesin zeminde yok: ⟨⟩ disinda hicbir satirda gecmiyor (yalniz ⟨⟩ / supheli metinde geciyor ya da
+        transkriptte HIC gecmiyor: modelin uydurdugu tutar / tarih). Kesin gorunmemeli."""
+        return not _deger_geciyor(deger, self.disi, self.disi_sayi)
+
+    def yalniz_ic(self, deger):
+        """deger yalniz ⟨⟩ / supheli metinde geciyor (olay metni icin: 'yalniz ⟨⟩ icinde' / 'transkriptte yok')."""
+        return _deger_geciyor(deger, self.ic, self.ic_sayi)
+
+
+# kod / araclarin urettigi degerler: kaynak damgasi ('⏱10:12:03'), tarih_coz'un ISO tarihi, konu akisi saat araligi; notun
+# kendi sayimi ('12 madde konuşuldu', '3 aksiyon'): transkriptte gecen bir deger degildir
+_KORUNAN_DEGER = re.compile(_ISARET + r"\s*\d{1,2}:\d{2}(?::\d{2})?|(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)"
+                            r"|(?<!\d)\d{1,2}:\d{2}(?::\d{2})?\s*[–-]\s*\d{1,2}:\d{2}(?::\d{2})?(?!\d)"
+                            r"|(?<![\d.,])\d{1,3}\s+(?:madde|aksiyon|karar|konu|açık soru|soru|başlık|bölüm|katılımcı|kişi)"
+                            r"(?:l[ae]r)?(?!\w)")
+
+
+def _degerleri_isaretle(cumle, zemin):
+    """Cumledeki sayi / tutar / ay-gun degerlerinden kesin zeminde (⟨⟩ disindaki transkript) GECMEYENLERIN yerine '(?)'
+    yazar: yalniz ⟨⟩ (ya da supheli satir) icinde gecen ve transkriptte hic gecmeyen (uydurma) deger kesin gibi
+    gorunmez, 'ele alindi' baglami kalir. Kaynak damgasi, ISO tarih ve saat araligi (kodun urettigi) muaftir.
+    Dondurur (yeni_cumle, isaretlenen_degerler)."""
+    isaretli = []
+
+    def degistir(m):
+        k = m.group(0)
+        if re.search(r"\d", k):
+            degerler = re.findall(r"\d+", k)
+        else:
+            sade = _sade_kelimeler(k)
+            ad = _ay_gun(sade[0]) if sade else None
+            degerler = [ad] if ad else []
+        if any(zemin.belirsiz(d) for d in degerler):
+            isaretli.append(k)
+            return "(?)"
+        return k
+    parcalar, son = [], 0
+    for m in _KORUNAN_DEGER.finditer(cumle):
+        parcalar += [re.sub(r"\w+", degistir, cumle[son:m.start()]), m.group(0)]
+        son = m.end()
+    yeni = "".join(parcalar) + re.sub(r"\w+", degistir, cumle[son:])
+    return re.sub(r"\(\?\)(?:\s*\(\?\))+", "(?)", yeni), isaretli
+
+
+def _deger_olayi(yer, isaret, zemin):
+    """not_son_denetim olay metni: isaretlenen degerler yalniz ⟨⟩ icinde mi, transkriptte hic yok mu."""
+    ic = [x for x in isaret if any(zemin.yalniz_ic(d) for d in (re.findall(r"\d+", x) or _sade_kelimeler(x)[:1]))]
+    yok = [x for x in isaret if x not in ic]
+    neden = "; ".join(x for x in (f"yalnız ⟨⟩ içinde: {', '.join(ic)}" if ic else "",
+                                  f"transkriptte yok: {', '.join(yok)}" if yok else "") if x)
+    return f"{yer} kesin olmayan değer (?) ile işaretlendi ({neden})"
+
+
+def _kisi_adlari(katilimcilar, aksiyonlar):
+    """Cumlede aranacak kisi adlari: katilimcilar + tablodaki sahip adlari ('?', 'Ben', birlesik etiketler haric)."""
+    adlar = []
+    for ad in list(katilimcilar or []) + [x for a in aksiyonlar for x in a["sahip"]["ad"].split(",")]:
+        ad = re.sub(r"\s+", " ", str(ad or "")).strip()
+        if (len(ad) >= 3 and "?" not in ad and " → " not in ad and " / " not in ad and tr_kucuk(ad) != "ben"
+                and ad not in adlar):
+            adlar.append(ad)
+    return adlar
+
+
+def _gecen_kisiler(cumle, adlar):
+    """Cumlede tam adi ya da ilk adi gecen kisiler (ilk ad birden cok kisiye uyuyorsa hepsi: belirsizdir)."""
+    return [ad for ad in adlar if ad_geciyor(ad, cumle) or ad_geciyor(ad.split()[0], cumle)]
+
+
+def _ad_cikar(cumle, adlar):
+    """Cumleden kisi adlarini (ekli yazim ve 'tarafindan' dahil) atar, cumleyi '(?)' ile isaretler. Geriye anlamli bir
+    sey kalmazsa None."""
+    for ad in sorted(adlar, key=len, reverse=True):
+        for parca in dict.fromkeys((ad, ad.split()[0])):
+            cumle = re.sub(r"(?<!\w)" + re.escape(parca) + r"(?:['’]\w*)?(?:\s+tarafından)?(?!\w)", " ", cumle)
+    m = re.search(r"[.!?;]*\s*$", cumle)
+    son, govde = m.group(0).strip(), re.sub(r"\s+", " ", cumle[:m.start()]).strip()
+    govde = re.sub(r"^(?:(?:ve|ile|,)\s*)+", "", govde)
+    govde = re.sub(r"\s+(?:ve|ile)\s*(?=,|$)", "", govde)
+    govde = re.sub(r"\s+,", ",", govde).strip(" ,")
+    if len(re.findall(r"\w+", govde)) < 2:
+        return None
+    govde = govde[:1].upper() + govde[1:]
+    if not govde.endswith("(?)"):
+        govde += " (?)"
+    return govde + (son or ".")
+
+
+def _madde_eslesir(ck, cumle_sayi, madde):
+    """Cumle (kokleri ck, sayilari cumle_sayi) bu aksiyon maddesini anlatiyor mu? Maddenin kokleri cumlede >= esik ve
+    ikisinde de sayi varsa en az biri ortak."""
+    ak = _kokler(re.sub(r"\(\?\)", " ", madde)) - _MADDE_DURAK
+    if not ak or len(ak & ck) / len(ak) < NOT_ESLESME_ESIK:
+        return False
+    sayi = set(re.findall(r"\d+", madde))
+    return not (sayi and cumle_sayi) or bool(sayi & cumle_sayi)
+
+
+def _kesin_sahibi(ad, aksiyon):
+    return aksiyon["sahip"]["durum"] == "kesin" and ad in [x.strip() for x in aksiyon["sahip"]["ad"].split(",")]
+
+
+def _yalniz_belirsiz_etikette(ad, ck, dizin):
+    """Cumlenin (kokleri ck) bu kisiye dayanagi yalniz belirsiz etiketli satirlarda mi ('Ad?', 'A → Ad', 'Ad / B',
+    'Ad (oda)', Bilinmeyen degil: adi gecen etiket)? Kesin etiketli satirda ⟨⟩ icindeki kelimeler sayilmaz."""
+    kesin = belirsiz = 0
+    for d in dizin:
+        e = d["etiket"] or ""
+        if not (ad_geciyor(ad, e) or ad_geciyor(ad.split()[0], e)):
+            continue
+        if _etiket_belirsiz(e) or d["cakisma"]:
+            belirsiz = max(belirsiz, len(ck & d["tum"]))
+        else:
+            kesin = max(kesin, len(ck & d["kok"]))
+    return belirsiz > kesin
+
+
+def _is_cumlesi(cumle, ck, aksiyonlar):
+    """Cumle bir isi / gorevi anlatiyor mu? Gelecek / gereklilik / ustlenme kalibi, is fiilinin 3. kisi emri / gelecegi
+    ('hazirlasin') ya da -- zaman kipinden bagimsiz -- cumle son tablodaki bir aksiyon maddesiyle eslesiyor ('Selin
+    raporu hazirliyor' / 'hazirlayacagini soyledi' tablodaki 'Raporu hazirla' ise is cumlesidir)."""
+    if _IS_IFADESI.search(tr_kucuk(cumle)) or "3" in _fiil_etiketleri(cumle):
+        return True
+    sayi = set(re.findall(r"\d+", cumle))
+    return any(_madde_eslesir(ck, sayi, a["madde"]) for a in aksiyonlar)
+
+
+def _sahip_denetle(cumle, adlar, aksiyonlar, dizin, sonraki):
+    """Kisi adlandiran cumle (ozet ya da sonraki adim). Is cumlesi (sonraki adimin her cumlesi; ozette gelecek zaman /
+    -meli / ustlen- / sorumlu): adi gecen her kisi, cumlenin anlattigi DAYANAKLI aksiyonun (son tablo) KESIN sahibi olmali.
+    Degilse: sonraki adimda is tabloda varsa (sahibi '(?)' / baskasi) cumle duser, yoksa ad cikar + '(?)'; ozette ad cikar
+    + '(?)'. Is cumlesi olmayan ozet cumlesinde kisiye dayanak yalniz belirsiz etiketli satirlardaysa ad cikar.
+    Dondurur (yeni_cumle | None (dustu), neden | None)."""
+    gecen = _gecen_kisiler(cumle, adlar)
+    if not gecen:
+        return cumle, None
+    ad_kok = set().union(*[_kokler(a) for a in gecen])
+    ck = _kokler(cumle) - ad_kok - _MADDE_DURAK
+    if sonraki or _is_cumlesi(cumle, ck, aksiyonlar):
+        sayi = set(re.findall(r"\d+", cumle))
+        eslesen = [a for a in aksiyonlar if _madde_eslesir(ck, sayi, a["madde"])]
+        kotu = [ad for ad in gecen if not any(_kesin_sahibi(ad, a) for a in eslesen)]
+        if not kotu:
+            return cumle, None
+        if sonraki and eslesen:
+            return None, "işin sahibi kesin değil (tabloda '(?)' ile duruyor)"
+        return _ad_cikar(cumle, kotu), "kişi dayanaklı bir işin kesin sahibi değil"
+    kotu = [ad for ad in gecen if _yalniz_belirsiz_etikette(ad, ck, dizin)]
+    if not kotu:
+        return cumle, None
+    return _ad_cikar(cumle, kotu), "kişiye dayanak yalnız belirsiz etiketli satırlarda"
+
+
+def not_son_denetim(not_md, transkript, katilimcilar=None, supheli_metin=""):
+    """dayanak_kontrolu + sahip dogrulamasindan SONRAKI son denetim (MIMARI_v3 §6, otomatik not: inceleme adimi yok):
+    (1) aksiyon tablosu yeniden numaralanir; 'Kişiye göre iş listesi' SON tablodan yeniden kurulur (atilan madde listede
+    yok; belirsiz sahip yalniz 'belirsiz' altinda '(aday: Ad)'). (2) Ozet / sonraki adim cumlesinde adi gecen kisi:
+    _sahip_denetle. (3) Ozet paragrafi ve konu akisinda ⟨⟩ disindaki transkriptte gecmeyen sayi / tutar / ay-gun (yalniz ⟨⟩ ya da
+    supheli satir icinde gecen, ya da hic gecmeyen: uydurma) '(?)' olur; sonraki adimda boyle deger tasiyan cumle duser
+    (⟨⟩ icinden ya da yoktan is uretilmez). Sonraki adim bosalirsa kesin
+    sahipli aksiyonlardan kurulur. Dondurur (yeni_md, olaylar)."""
+    import not_araclari                  # gec: not_araclari motor'u ice aktarir
+    md = not_araclari.kisiye_gore_yenile(not_araclari.aksiyon_sirasini_yenile(not_md))
+    aksiyonlar = not_araclari.aksiyonlari_ayikla(md)
+    dizin = _dayanak_dizini(transkript)
+    zemin = _DegerZemini(dizin, supheli_metin)
+    adlar = _kisi_adlari(katilimcilar, aksiyonlar)
+    olaylar, yeni, bolum = [], [], ""
+    for satir in md.split("\n"):
+        s = satir.strip()
+        if s.startswith("#"):
+            bolum = s.lstrip("# ").strip().lower()
+            yeni.append(satir)
+            continue
+        if not s or s.strip(" -.") == "" or s.startswith("_"):
+            yeni.append(satir)
+            continue
+        if bolum == "özet":
+            tutulan = []
+            for c in _CUMLE_SONU.split(s):
+                c, isaret = _degerleri_isaretle(c, zemin)
+                if isaret:
+                    olaylar.append(_deger_olayi("özette", isaret, zemin))
+                c2, neden = _sahip_denetle(c, adlar, aksiyonlar, dizin, sonraki=False)
+                if neden:
+                    olaylar.append(f"özet cümlesinden kişi adı çıkarıldı ({neden}): {c[:90]}")
+                if c2:
+                    tutulan.append(c2)
+            yeni.append(" ".join(tutulan) or "-")
+        elif bolum == "konu akışı":
+            m = _KONU_SATIRI.match(satir)
+            if m:
+                govde, isaret = _degerleri_isaretle(m.group(2), zemin)
+                if isaret:
+                    olaylar.append(_deger_olayi("konu akışında", isaret, zemin))
+                satir = m.group(1) + govde
+            yeni.append(satir)
+        elif bolum == "bir sonraki adım":
+            tutulan = []
+            for c in _SONRAKI_CUMLE.split(s):
+                _, isaret = _degerleri_isaretle(c, zemin)
+                if isaret:
+                    olaylar.append(f"sonraki adımdan çıkarıldı (değer kesin değil: ⟨⟩ dışında geçmiyor: "
+                                   f"{', '.join(isaret)}): {c[:90]}")
+                    continue
+                c2, neden = _sahip_denetle(c, adlar, aksiyonlar, dizin, sonraki=True)
+                if neden:
+                    olaylar.append(f"sonraki adım {'cümlesi çıkarıldı' if c2 is None else 'cümlesinden kişi adı çıkarıldı'}"
+                                   f" ({neden}): {c[:90]}")
+                if c2:
+                    tutulan.append(c2)
+            if tutulan:
+                yeni.append(" ".join(tutulan))
+            else:
+                kesin = [dict(a, sorumlu=a["sahip"]["ad"]) for a in aksiyonlar
+                         if a["sahip"]["durum"] == "kesin" and a["madde"].strip(" -")]
+                yeni.append(llm.yedek_sonraki_adim({"aksiyonlar": kesin}))
+        else:
+            yeni.append(satir)
+    return "\n".join(yeni), olaylar
 
 
 def _sn(x):
@@ -367,12 +645,47 @@ def sarmal_sil(metin):
     return _SARMAL.sub(" ", metin or "")
 
 
+_KENAR = ".,;:!?\"()[]{}…«»“”-–—"
+
+
+def belirsiz_isaretle(metin, kelimeler):
+    """Metinde 'kelimeler'den biriyle (uzun.kelime_norm esitligi: buyuk / kucuk harf, noktalama, kesme farki yok) eslesen
+    belirtecleri ⟨⟩ icine alir; bas / son noktalama disarida kalir, zaten ⟨⟩ icindeki bolume dokunulmaz, ardisik
+    isaretli belirtecler tek ⟨⟩ olur ('⟨Kaan⟩, sen ...', '... ⟨231⟩ için'). Satirin kendisi (raw / text) degismez:
+    yalniz nota / LLM'e / dayanaga giden gorunum."""
+    hedef = {uzun_mod.kelime_norm(k) for k in (kelimeler or []) if isinstance(k, str)} - {""}
+    if not hedef or not metin:
+        return metin
+    parcalar, icinde = [], False
+    for p in re.split(r"(\s+)", metin):
+        if not p or p.isspace() or icinde or SARMAL_AC in p or SARMAL_KAPA in p:
+            if SARMAL_AC in p:
+                icinde = p.rfind(SARMAL_AC) > p.rfind(SARMAL_KAPA)
+            elif SARMAL_KAPA in p:
+                icinde = False
+            parcalar.append(p)
+            continue
+        cekirdek = p.strip(_KENAR)
+        if cekirdek and uzun_mod.kelime_norm(cekirdek) in hedef:
+            i = p.find(cekirdek)
+            p = p[:i] + SARMAL_AC + cekirdek + SARMAL_KAPA + p[i + len(cekirdek):]
+        parcalar.append(p)
+    return re.sub(SARMAL_KAPA + r"(\s+)" + SARMAL_AC, r"\1", "".join(parcalar))
+
+
+def _uzun_isaretli(s):
+    """Satir metni, kisa ile uzun pencerenin uyusmadigi kelimeler (uzun_belirsiz) ⟨⟩ icinde (MIMARI_v3 §4)."""
+    return belirsiz_isaretle(str(s.get("text") or ""), s.get("uzun_belirsiz"))
+
+
 def satir_metni(s):
-    """Satirin nota/LLM'e giden metni: eszamanli konusma (cakisma) satirinin tamami ⟨⟩ icine alinir."""
+    """Satirin nota/LLM'e giden metni: eszamanli konusma (cakisma) satirinin tamami ⟨⟩ icine alinir; kisa klip ile uzun
+    pencerenin farkli verdigi kelimeler (uzun_belirsiz: uzun metin kazandiysa uzunun, sayi kaybinda kisanin uyusmayan
+    kelimeleri) ⟨⟩ icinde: dayanak / sahip kaniti sayilmaz, LLM onlardan karar / aksiyon / sayi uretmez."""
     t = str(s.get("text") or "")
     if s.get("cakisma") and t.strip():
         return SARMAL_AC + t.replace(SARMAL_AC, "").replace(SARMAL_KAPA, "") + SARMAL_KAPA
-    return t
+    return _uzun_isaretli(s)
 
 
 def blok_metni(satirlar):
@@ -458,6 +771,7 @@ class Motor:
         self.konusmaci = Konusmaci(ben=ben, katilimcilar=self.katilimcilar, esikler=esikler,
                                    olay_fn=self._konusmaci_olayi)
         self.yeniden_kes_fn = None           # isler: SesServisi.yeniden_kes(klip_no, an) -> bool
+        self.ses_izi = None                  # Faz 6 spike (config ses_izi, varsayilan kapali): ses_izi_kur ile baglanir
         self._satir_no = 0
         self._klip_satir = {}                # klip_no -> satir (karar, kesim; kapanmis parcadakiler dahil, tavanli)
         self._satir_parca = {}               # satir id -> kapanmis parcanin sirasi
@@ -469,7 +783,12 @@ class Motor:
         self._parca_nesil = {}               # sira -> kapanmis parcanin satir listesi degisim sayaci (gec satir)
         self._ozet_kirli = {}                # sira -> son gec satir zamani (yeniden ozet bekliyor)
         self._silinen = set()                # atilmis / degistirilmis satir id'leri
-        self._kapanis = None                 # ertelenmis parca kapanisi {"neden", "son", "sinir": {id}}
+        self._kapanis = None                 # ertelenmis parca kapanisi {"neden", "son", "sinir": {id}, "uzun_son",
+                                             # "kon_tamam": konusmaci beklemesi bitti (yalniz uzun pencere bekleniyor)}
+        self.uzun_pencere = False            # Faz 3: ses servisi uzun pencere acik ({"tur": "uzun_durum"} olayi)
+        self._uzun_kapsam = {}               # akis -> uzun pencere sonucu kesinlesen son an (epoch)
+        self.uzun_guncellenen = 0            # uzun pencereyle metni degisen satir
+        self.uzun_gec = 0                    # ... kapanmis parcada (parca yeniden ozetlenir)
         self._bitiyor = False
         self._goc = False                    # Motor.yukle: surumsuz satirlar okunurken goc eder
         self.stt_kesik = False               # STT kesintisi (isler: SesServisi.stt_durumu)
@@ -598,6 +917,12 @@ class Motor:
                 return None
             if tur == "capa":                   # ses saat capasi yenilendi: L capalari duzeltilir
                 self.konusmaci.saat_capasi(olay.get("akis"), olay.get("fark"))
+                return None
+            if tur == "uzun_durum":             # Faz 3: uzun pencere acik/kapali (parca kapanisi bekler mi)
+                self.uzun_pencere = bool(olay.get("acik"))
+                return None
+            if tur == "uzun":                   # Faz 3: uzun pencere sonucu (klip metni; konusmaci degismez)
+                self._uzun_uygula(olay)
                 return None
             if tur == "bosluk":
                 self.ses_olay_sayisi += 1
@@ -1110,11 +1435,91 @@ class Motor:
                 self.parca_kapat("süre")
         self._kesimleri_yap(kes)
 
+    def _uzun_bekliyor_mu(self, s):
+        """Faz 3: satirin araligi icin uzun pencere sonucu henuz gelmedi mi (uzun pencere acikken; ses klibi, supheli degil)."""
+        if not self.uzun_pencere or s.get("kaynak") != "ses" or s.get("klip_no") is None or s.get("supheli"):
+            return False
+        bit = s.get("bit")
+        if not isinstance(bit, (int, float)):
+            return False
+        kapsam = self._uzun_kapsam.get(s.get("akis") or "loopback")
+        return kapsam is None or bit > kapsam + 1e-6
+
+    def _uzun_uygula(self, olay):
+        """Faz 3 uzun pencere sonucu (ses.UzunPencere): klip metni uzun pencerenin hizalanan bolumu olur, kisa ile uzunun
+        farkli verdigi kelimeler 'belirsiz'e (ve 'uzun_belirsiz'e) girer; satir verisi duz kalir, nota / LLM'e giden
+        gorunumde (satir_metni) bu kelimeler ⟨⟩ icindedir: dayanak / sahip kaniti olmaz. Konusmaci alanlarina ve klip sinirlarina DOKUNULMAZ. raw = yeni metin
+        (duzeltme bundan calisir), raw_kisa = ozgun kisa metin. Kapanmis parcadaki satir degistiyse parca yeniden ozet
+        kuyruguna girer (_ozet_kirli: OZET_YENI_SN sessizlikten sonra / bitiste); canli ekrana satir_guncelle."""
+        akis = olay.get("akis") or "loopback"
+        try:
+            kapsam = float(olay.get("kapsam"))
+        except (TypeError, ValueError):
+            kapsam = None
+        kirli = set()
+        for k in olay.get("klipler") or []:
+            satir = self._klip_satir.get(k.get("klip_no"))
+            if satir is None or satir["id"] in self._silinen or satir.get("supheli") or satir.get("kaynak") != "ses":
+                continue
+            yer = self._satir_bul(satir["id"])
+            yeni = k.get("text")
+            yeni = re.sub(r"\s+", " ", yeni).strip() if isinstance(yeni, str) else None
+            belirsiz = [str(b) for b in (k.get("belirsiz") or []) if str(b).strip()]
+            if not yeni and not belirsiz:
+                continue
+            eski_belirsiz = list(satir.get("belirsiz") or [])
+            alan = {}
+            if yeni and yeni != satir.get("raw"):
+                satir.setdefault("raw_kisa", satir.get("raw"))
+                satir["raw"] = satir["text"] = yeni
+                satir["duzeltmeler"] = []                    # duzeltme yeni metinden (raw) yeniden calisir
+                satir["belirsiz"] = list(dict.fromkeys(belirsiz))
+                alan.update(raw=yeni, text=yeni, raw_kisa=satir["raw_kisa"], duzeltmeler=[])
+            else:
+                satir["belirsiz"] = list(dict.fromkeys(eski_belirsiz + belirsiz))
+            satir["uzun_belirsiz"] = list(dict.fromkeys(belirsiz))
+            if isinstance(k.get("oran"), (int, float)):
+                satir["uzun_oran"] = round(float(k["oran"]), 4)
+            if not alan and satir["belirsiz"] == eski_belirsiz:
+                continue
+            alan.update(belirsiz=satir["belirsiz"], uzun_belirsiz=satir["uzun_belirsiz"], uzun_oran=satir.get("uzun_oran"))
+            if alan.get("text"):
+                self.uzun_guncellenen += 1
+            if yer is None:
+                continue                                     # yerlesmemis yeniden kesme parcasi: yerine konunca yazilir
+            sira = yer[2]
+            self._degisti(sira)
+            self._jsonl(dict(alan, id=satir["id"], guncelle=True))
+            if sira is not None and alan.get("text"):
+                self._parca_nesil[sira] = self._parca_nesil.get(sira, 0) + 1
+                self._ozet_kirli[sira] = saat.simdi()
+                kirli.add(sira)
+                self.uzun_gec += 1
+            self._olay("satir_guncelle", dict(satir, gorunen=gorunen_ad(satir), uzun_degisen=list(satir["uzun_belirsiz"])))
+        if kapsam is not None:
+            self._uzun_kapsam[akis] = max(self._uzun_kapsam.get(akis, kapsam), kapsam)
+        for sira in sorted(kirli):
+            self.log(f"  · uzun pencere sonucu geç geldi: parça {sira} satırları güncellendi, yeniden özetlenecek")
+
     def _kapanis_dene(self, simdi):
         kp = self._kapanis
-        bekleyen = [s for s in self.mevcut if s["id"] in kp["sinir"] and self._bekliyor_mu(s)]
-        if bekleyen and simdi < kp["son"]:
-            return
+        if not kp.get("kon_tamam"):
+            bekleyen = [s for s in self.mevcut if s["id"] in kp["sinir"] and self._bekliyor_mu(s)]
+            if bekleyen and simdi < kp["son"]:
+                return
+            if bekleyen:
+                self._kapanis_zorla(kp, bekleyen)
+            kp["kon_tamam"] = True                   # konusmaci beklemesi bitti (eski davranista parca burada kapanirdi)
+        uzun = [s for s in self.mevcut if s["id"] in kp["sinir"] and self._uzun_bekliyor_mu(s)]
+        if uzun and simdi < kp.get("uzun_son", simdi):
+            return                                   # Faz 3: uzun pencere sonucu en fazla UZUN_BEKLE_SN beklenir
+        if uzun:
+            self.log(f"! parça kapanışı uzun pencereyi {UZUN_BEKLE_SN} sn bekledi: {len(uzun)} satır kısa metinle "
+                     "özetleniyor; sonuç gelirse satırlar güncellenip parça yeniden özetlenir")
+        self._parca_kapat_simdi(kp["neden"], kp["sinir"])
+
+    def _kapanis_zorla(self, kp, bekleyen):
+        """Konusmaci beklemesi (KAPANIS_BEKLE_SN) doldu: araliktaki bekleyen kararlar zorlanir, kalanlar '?'."""
         if bekleyen:
             # sure doldu: aralikta bekleyen klipler zorlanir (konusmaci baska aralikta bekleyen tasimiyorsa bitir)
             bas, bit = min(s["bas"] for s in bekleyen), max(s["bit"] for s in bekleyen)
@@ -1131,11 +1536,12 @@ class Motor:
                 self._zaman_asimi(s)
             self.log(f"! parça kapanışı {KAPANIS_BEKLE_SN} sn bekledi: {len(bekleyen)} satırın konuşmacı kararı "
                      f"zorlandı ({len(kalan)} satır '?')")
-        self._parca_kapat_simdi(kp["neden"], kp["sinir"])
 
     def parca_kapat(self, neden, zorla=False):
         """Acik parcayi kapatir. Konusmaci karari bekleyen satir varsa kapanis ertelenir (kontrol() en fazla
-        KAPANIS_BEKLE_SN bekler, sonra zorlar); erteleme surerken gelen satirlar sonraki parcaya kalir."""
+        KAPANIS_BEKLE_SN bekler, sonra zorlar); erteleme surerken gelen satirlar sonraki parcaya kalir.
+        Faz 3 (uzun pencere acik): kapsadigi araligin uzun pencere sonucu da en fazla UZUN_BEKLE_SN beklenir; gelmezse kisa
+        metinle kapanir, sonuc sonra gelirse satirlar guncellenir ve parca yeniden ozetlenir (_uzun_uygula)."""
         with self._iz_kilit:
             if not self.mevcut:
                 self._kapanis = None
@@ -1146,8 +1552,13 @@ class Motor:
             if self._kapanis is not None:
                 return
             sinir = {s["id"] for s in self.mevcut}
-            if any(self._bekliyor_mu(s) for s in self.mevcut):
-                self._kapanis = {"neden": neden, "son": saat.simdi() + KAPANIS_BEKLE_SN, "sinir": sinir}
+            kon = any(self._bekliyor_mu(s) for s in self.mevcut)
+            uzun = any(self._uzun_bekliyor_mu(s) for s in self.mevcut)
+            if kon or uzun:
+                simdi = saat.simdi()
+                self._kapanis = {"neden": neden, "son": simdi + KAPANIS_BEKLE_SN, "sinir": sinir}
+                if uzun:
+                    self._kapanis.update(uzun_son=simdi + UZUN_BEKLE_SN, kon_tamam=not kon)
                 return
             self._parca_kapat_simdi(neden, sinir)
 
@@ -1204,6 +1615,8 @@ class Motor:
         sonuclar satir id'siyle geri yazilir (yalniz hala listede olanlara). Arada liste degistiyse (nesil) ozet
         yazilmaz; yeniden ozet zaten siradadir."""
         sira = veri.get("sira")
+        if self.ses_izi is not None:
+            self._ses_izi_isle(veri)               # Faz 6: altyazi kapali '?' satirlar icin ses izi ('Ad?'), ozetten once
         with self._iz_kilit:
             nesil = self._parca_nesil.get(sira, 0)
         # 1) duzeltme gecisi -- basarisiz olursa ham metinle devam
@@ -1215,10 +1628,12 @@ class Motor:
                 self.log(f"  ! parça {veri['sira']} düzeltme atlandı: {llm.hata_metni(e)}")
         # 2) ozet
         self.log(f"  parça {veri['sira']}: özetleniyor...")
+        anlik = []
         try:
             onceki = self._onceki_baglam(veri["sira"])
             with self._iz_kilit:
-                metin = blok_metni(list(veri["satirlar"]))
+                anlik = [dict(s) for s in veri["satirlar"]]
+            metin = blok_metni(anlik)
             if metin.strip():
                 ozet = llm.bolum_ozetle(metin, veri["sira"], self.baglam(metin), onceki)
             else:                                  # yalniz supheli (halusinasyon) satirlar: LLM'e gidecek metin yok
@@ -1236,9 +1651,93 @@ class Motor:
             veri["ozet"] = None
         with self._iz_kilit:
             self.parca_yaz(veri)
-        self._olay("parca_ozetlendi", {"sira": veri["sira"], "ozet": veri["ozet"],
-                                       "duzeltme": len(veri["duzeltmeler"])})
+        canli = veri["ozet"]
+        if canli:
+            try:
+                canli = self.canli_ozet(canli, anlik)
+            except Exception as e:                 # dogrulanamayan ozet canli panele hic gitmez (son not etkilenmez)
+                self.log(f"  ! parça {veri['sira']} canlı özet doğrulanamadı: {e!r}")
+                canli = llm.normalize_ozet({})
+        self._olay("parca_ozetlendi", {"sira": veri["sira"], "ozet": canli, "duzeltme": len(veri["duzeltmeler"])})
         return veri["ozet"]
+
+    def canli_ozet(self, ozet, satirlar):
+        """Canli 'canli not' paneline giden bolum ozeti: LLM'in ham bolum ozetinin DOGRULANMIS kopyasi (parca dosyasindaki ham
+        ozet degismez; son not kendi denetiminden gecer). Son notla ayni kurallar (MIMARI_v3 §6): karar / aksiyon / soru
+        maddesi satir bazli dayanak denetiminden (madde_dayanagi) gecer -- dayanaksiz ya da sayi / tarih / kodu yalniz ⟨⟩
+        icinde olan madde gosterilmez, belirsiz madde '(?)' alir; aksiyon sahibi sorumlu_dogrula ile kesinlesir (kesin
+        degilse 'Ad (?)' / 'belirsiz'; dayanak satirinin etiketi kesin degilse kesin sahip de '(?)'); bolum ozeti
+        cumlelerinde ⟨⟩ disinda gecmeyen deger '(?)' olur, adi gecen kisi kesin sahip kuralina uyar."""
+        sat = [s for s in satirlar if nota_girer(s)]
+        transkript = blok_metni(sat)
+        dizin = _dayanak_dizini(transkript)
+        denetle = len(_kokler(sarmal_sil(transkript))) >= 6        # dayanak_kontrolu ile ayni alt sinir
+
+        def karar_ver(madde, soru=False):
+            return madde_dayanagi(_KAYNAK_DAMGASI.sub(" ", str(madde or "")).strip(), dizin, soru=soru) if denetle else None
+
+        o = dict(ozet)
+        kararlar = []
+        for k in ozet.get("kararlar") or []:
+            karar = karar_ver(k)
+            if karar != "at":
+                kararlar.append(_madde_isaretle(str(k)) if karar and karar[0] else k)
+        aksiyonlar = []
+        for a in sorumlu_dogrula(ozet.get("aksiyonlar") or [], sat, self.ben, katilimcilar=self._kisi_katilimcilari()):
+            karar = karar_ver(a.get("madde"))
+            if karar == "at":
+                continue
+            if karar and karar[0]:
+                a["madde"] = _madde_isaretle(str(a.get("madde") or ""))
+            if karar and karar[1] and a["sahip"]["durum"] == "kesin":
+                a["sahip"] = dict(a["sahip"], durum="belirsiz")
+                a["sorumlu"] = ", ".join(f"{x.strip()} (?)" for x in a["sahip"]["ad"].split(",") if x.strip())
+            aksiyonlar.append(a)
+        o["kararlar"], o["aksiyonlar"] = kararlar, aksiyonlar
+        o["acik_sorular"] = [q for q in ozet.get("acik_sorular") or [] if karar_ver(q, soru=True) != "at"]
+        if o.get("ozet"):
+            supheli = " ".join(str(s.get("text") or "") for s in satirlar if not nota_girer(s))
+            zemin = _DegerZemini(dizin, supheli)
+            adlar = _kisi_adlari(self.katilimcilar, aksiyonlar)
+            tutulan = []
+            for c in _CUMLE_SONU.split(str(o["ozet"]).strip()):
+                c, _ = _degerleri_isaretle(c, zemin)
+                c2, _ = _sahip_denetle(c, adlar, aksiyonlar, dizin, sonraki=False)
+                if c2:
+                    tutulan.append(c2)
+            o["ozet"] = " ".join(tutulan)
+        o["dogrulandi"] = True
+        return o
+
+    def ses_izi_kur(self, ayar, ses_al_fn, cikarici=None):
+        """Faz 6 spike (ses_izi.py): ayar['ses_izi'] aciksa ve cikarici kurulabiliyorsa parca kapanisinda altyazi kapali '?'
+        satirlara ses izi yardimi acilir. ses_al_fn(akis, bas, bit) -> 16 kHz ses (isler: halka tampon). Kapali/kurulamazsa
+        False (tek log satiri); not hatti etkilenmez."""
+        self.ses_izi = ses_izi_mod.kur(ayar, ses_al_fn, ben=self.ben, log=self.log, cikarici=cikarici)
+        return self.ses_izi is not None
+
+    def _ses_izi_isle(self, veri):
+        """Parca kapanisi (arka plan): kesin satirlardan centroid ogrenir, altyazi kapali '?' satirlari karara baglar. Atanan
+        satir speaker=Ad, spk_guven<=0.6 ('Ad?', sahip degil), kaynak_konusmaci 'ses_izi'. Hata not hattini bozmaz."""
+        sira = veri.get("sira")
+        try:
+            with self._iz_kilit:
+                anlik = list(veri["satirlar"])
+            sonuc = self.ses_izi.parca_isle(anlik)            # agir is kilit disinda
+            yazilan = []
+            with self._iz_kilit:
+                for satir, alan in sonuc:
+                    if satir["id"] not in self._silinen and self.ses_izi.uygula(satir, alan):
+                        yazilan.append((satir, alan))
+                if yazilan:
+                    self._degisti(sira)
+            for satir, alan in yazilan:
+                self._jsonl(dict(alan, id=satir["id"], guncelle=True))
+                self._olay("satir_guncelle", dict(satir, gorunen=gorunen_ad(satir)))
+            if yazilan:
+                self.log(f"  parça {sira}: ses izi {len(yazilan)} '?' satırı 'Ad?' yaptı")
+        except Exception as e:
+            self.log(f"  ! parça {sira} ses izi atlandı: {e!r}")
 
     def _duzelt_parca(self, veri):
         """Parcanin satirlarinda terim/ad duzeltmesi. LLM yalniz ONERIR; her oneri duzelt.kapi'dan (deterministik, VE
@@ -1267,16 +1766,19 @@ class Motor:
             if not rapor["kabul"]:
                 return                              # model hatasi: mevcut metin ve onceki duzeltmeler korunur
         harita = {str(y["id"]): y for y in yeni}
+        girdi_raw = {str(g["id"]): g["raw"] for g in girdi}
         cift, degisen = [], []
         with self._iz_kilit:
             for s in veri["satirlar"]:
                 y = harita.get(str(s["id"]))
                 if y is None:
                     continue
+                if s.get("raw") != girdi_raw.get(str(s["id"])):
+                    continue                        # Faz 3: duzeltme surerken metin uzun pencereyle degisti (yeniden isler)
                 onceki = (s.get("text"), s.get("duzeltmeler"), s.get("belirsiz"))
                 s["text"] = y["text"]
                 s["duzeltmeler"] = [dict(d) for d in (y.get("duzeltmeler") or [])]
-                s["belirsiz"] = list(y.get("belirsiz") or [])
+                s["belirsiz"] = list(dict.fromkeys(list(y.get("belirsiz") or []) + list(s.get("uzun_belirsiz") or [])))
                 cift += [[d["eski"], d["yeni"]] for d in s["duzeltmeler"]]
                 if onceki != (s["text"], s["duzeltmeler"], s["belirsiz"]):
                     degisen.append(s)
@@ -1588,6 +2090,10 @@ class Motor:
         not_md, atilan = dayanak_kontrolu(not_md, transkript, ozet_kaynak=bolum_ozetleri)
         for madde in atilan:
             self.log(f"  ! transkriptte dayanağı yok, nottan çıkarıldı: {madde[:90]}")
+        supheli = " ".join(str(s.get("text") or "") for s in self.tum_satirlar() if not nota_girer(s))
+        not_md, olaylar = not_son_denetim(not_md, transkript, self.katilimcilar, supheli)
+        for olay in olaylar:
+            self.log(f"  ! {olay}")
         if eksik:
             # sessizce eksik not yerine okuyana hangi araligin notta olmadigini soyle
             not_md = not_md.rstrip("\n") + "\n\n## Eksik bölümler\n" + "\n".join(
@@ -1599,6 +2105,13 @@ class Motor:
                 f"- {stt_eksik_metni([a])}" for a in stt_eksik) + "\n"
         if any(s.get("kaynak") == "altyazi-yedek" for s in satirlar):
             not_md = not_md.rstrip("\n") + "\n\n_Bazı bölümler Teams altyazısından alındı (altyazıdan, düşük güven)._\n"
+        kapsamasiz = [s for s in satirlar if s.get("kapsama") is False and s.get("akis") != "mikrofon"]
+        if kapsamasiz:
+            # altyazi kapaliyken konusmaci bilinemez: okuyan '?' satirlarin nedenini notta gorsun
+            uzak = [s for s in satirlar if s.get("akis") != "mikrofon"] or kapsamasiz
+            not_md = not_md.rstrip("\n") + (
+                f"\n\n_Konuşmacı bilgisi yok: Teams altyazısı kapalıyken konuşulan {len(kapsamasiz)} satırda "
+                f"(%{round(100 * len(kapsamasiz) / len(uzak))}) konuşmacı belirlenemedi ve '?' gösterildi._\n")
         self.adim("Not kaydediliyor", 4, 4)
         with open(os.path.join(self.klasor, "not.md"), "w", encoding="utf-8") as f:
             f.write(not_md)
@@ -1971,7 +2484,9 @@ def _sahip_belirle(s, adlar, kisiler, ben):
     if konusan in _BENIM:
         konusan = ben or ""                          # mikrofon sahibinin adi bilinmiyorsa adlandirilamaz
     kesin = kesin_ad_mi(s) and not s.get("cakisma")
-    metin = sarmal_sil(s.get("text"))
+    # kisa / uzun pencerenin uyusmadigi kelimeler (uzun_belirsiz, ⟨⟩) kanit sayilmaz: uzun 'Kaan, sen ...' kisada
+    # 'Sinan, sen ...' ise hitap kesin degildir
+    metin = sarmal_sil(_uzun_isaretli(s))
     ham_taahhut = _konusan_taahhudu(metin)
     # (a) konusan kendi isini ustleniyor: acik 1. tekil kanit, soru / olumsuz / gecmis degil, muhatap ya da baska
     # katilimci adi yok ('Raporu Ayse'den bekliyorum', 'Zeynep, gondermeni rica ediyorum', 'taslagi Mehmet incelesin')

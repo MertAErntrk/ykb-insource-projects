@@ -156,6 +156,68 @@ def sahibi_belirsiz_blogu(not_md):
     return ("Sahibi belirsiz:\n" + "\n".join(satirlar)) if satirlar else ""
 
 
+def _bolum_sil(satirlar, baslik):
+    """satirlar icinden '## baslik' bolumunu (sonraki '## ' basligina kadar, onundeki bos satir dahil) atar."""
+    try:
+        i = next(k for k, x in enumerate(satirlar) if x.strip() == baslik)
+    except StopIteration:
+        return satirlar
+    j = next((k for k in range(i + 1, len(satirlar)) if satirlar[k].startswith("## ")), len(satirlar))
+    while j > i + 1 and not satirlar[j - 1].strip():
+        j -= 1                                          # bolumden sonraki bos satir (sonraki basligin ayiraci) kalir
+    bas = i - 1 if i and not satirlar[i - 1].strip() else i
+    return satirlar[:bas] + satirlar[j:]
+
+
+def aksiyon_sirasini_yenile(not_md):
+    """Aksiyon tablosunun '#' sutununu 1..n yeniden numaralar (dayanak kontrolunun attigi satirlar bosluk birakmasin)."""
+    satirlar, bolum, no = not_md.split("\n"), "", 0
+    for k, satir in enumerate(satirlar):
+        s = satir.strip()
+        if s.startswith("#"):
+            bolum = s.lower()
+            continue
+        if "aksiyon" not in bolum or not s.startswith("|"):
+            continue
+        m = re.match(r"^(\s*\|\s*)(\d+)(\s*\|.*)$", satir)
+        if m:
+            no += 1
+            satirlar[k] = f"{m.group(1)}{no}{m.group(3)}"
+    return "\n".join(satirlar)
+
+
+def kisiye_gore_yenile(not_md):
+    """'Kişiye göre iş listesi' bolumunu SON aksiyon tablosundan (dayanak kontrolu ve sahip dogrulamasindan sonra)
+    yeniden kurar: tablodan atilan madde listede de yoktur; sahibi kesin olmayan is ('Ad (?)', madde '(?)') kisinin
+    isi sayilmaz, 'belirsiz' altinda '(aday: Ad)' ile yazilir (sahip_coz: e-posta / Jira ile ayni kural). Tabloda en az
+    4 aksiyon ve 2 grup yoksa bolum kalkar."""
+    import llm
+    girdi = []
+    for a in aksiyonlari_ayikla(not_md):
+        sahip = _sahip(a)
+        if sahip["durum"] == "kesin":
+            sorumlu = sahip["ad"]
+        else:
+            sorumlu = f"{sahip['ad']} (?)" if sahip["ad"] else "belirsiz"
+        girdi.append({"madde": a["madde"], "sorumlu": sorumlu})
+    satirlar = _bolum_sil(not_md.split("\n"), llm.KISIYE_BASLIK)
+    yeni = llm.kisiye_gore_satirlari(girdi)
+    if yeni:
+        try:
+            i = next(k for k, x in enumerate(satirlar) if x.strip().lower() == "## aksiyonlar")
+        except StopIteration:
+            return "\n".join(satirlar)
+        j = i + 1
+        while j < len(satirlar) and not satirlar[j].strip():
+            j += 1
+        if j >= len(satirlar) or not satirlar[j].strip().startswith("|"):
+            return "\n".join(satirlar)                  # tablo yok
+        while j < len(satirlar) and satirlar[j].strip().startswith("|"):
+            j += 1
+        satirlar[j:j] = ["", llm.KISIYE_BASLIK] + yeni
+    return "\n".join(satirlar)
+
+
 def kisiye_ozel_epostalar(not_md, baslik, tarih):
     """Sahibi KESIN her kisi icin (ad, konu, govde): yalnizca o kisinin isleri + notun ozeti. Sahibi belirsiz
     ('Ad (?)', 'belirsiz') aksiyonlar hicbir e-postaya girmez (bkz. sahibi_belirsiz_blogu)."""

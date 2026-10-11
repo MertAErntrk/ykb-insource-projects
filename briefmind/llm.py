@@ -9,7 +9,6 @@ kesik cevapta LLM'siz yedege (bolum notlarinin kendisi) dusulur.
 import datetime as dt
 import difflib
 import json
-import os
 import re
 import ssl
 import threading
@@ -23,13 +22,17 @@ import ayar as ayar_mod
 from metin import ad_geciyor, cift_yonlu_benzerlik, tr_kucuk
 
 CONFIG = "config.json"
-_cfg = {}
-if os.path.exists(CONFIG):
+
+
+def _ilk_ayar():
+    """Acilis ayari: ayar.ham_oku ile (utf-8-sig: Not Defteri'nin BOM'lu config.json'u da okunur). Bozuksa {}."""
     try:
-        with open(CONFIG, encoding="utf-8") as _f:
-            _cfg = json.load(_f)
+        return ayar_mod.ham_oku(CONFIG)
     except Exception:
-        _cfg = {}
+        return {}
+
+
+_cfg = _ilk_ayar()
 
 MARJ = 350                                             # sablon + guvenlik payi
 VARSAYILAN_PENCERE = 16384                             # sunucu sorulamazsa ve config'te 'context' yoksa
@@ -1249,11 +1252,59 @@ def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
     return sonuc
 
 
+def _liste_bos():
+    return {"kararlar": [], "aksiyonlar": [], "acik_sorular": []}
+
+
+def _liste_ekle(hedef, v):
+    for alan in ("kararlar", "aksiyonlar", "acik_sorular"):
+        hedef[alan] += list(v.get(alan) or [])
+
+
+def _liste_kuyruk_ayir(v, tavan):
+    """Birlesmis listeyi (sabit, kuyruk) ikiye boler: kuyruk her alanin SON maddeleri (kronoloji korunur), girdi tokeni
+    tavan'i asmaz. Sigan kuyruk yoksa (sabit=v, kuyruk=None)."""
+    toplam = token_say(_liste_girdisi([v])[0])
+    oran = min(1.0, tavan / toplam) if toplam else 0.0
+    while oran > 0.02:
+        kuyruk, sabit = _liste_bos(), _liste_bos()
+        for alan in ("kararlar", "aksiyonlar", "acik_sorular"):
+            x = list(v.get(alan) or [])
+            k = len(x) - int(len(x) * (1 - oran))          # en az bir madde (liste bos degilse)
+            sabit[alan], kuyruk[alan] = x[:len(x) - k], x[len(x) - k:]
+        if _liste_sayisi(kuyruk) and token_say(_liste_girdisi([kuyruk])[0]) <= tavan:
+            return sabit, kuyruk
+        oran *= 0.8
+    return v, None
+
+
+def _liste_sinir_birlestir(seviye, baglam, ilerleme):
+    """Grup sonuclari ikiser bile tek istege sigmiyor (toplam madde tek istek kapasitesini asiyor, model maddeleri
+    azaltamiyor): her sonraki grup, oncekinin KUYRUGUYLA (kronolojik sinir: bitisik bolumlerin tekrarlari burada olur)
+    birlikte LLM'e verilir; kuyrugun oncesi oldugu gibi kalir. Kucuk kalan grup yerel birlestirmeye dusmez, sinirdaki
+    tekrarlar yine LLM ile birlesir (MIMARI_v3 §6 kademeli birlestirme). Dondurur: birlesik liste."""
+    ust = _liste_girdi_ust(baglam)
+    sonuc, tasinan = _liste_bos(), seviye[0]
+    _gunluge_yaz(olay="liste_sinir", zaman=dt.datetime.now().strftime("%H:%M:%S"), grup=len(seviye),
+                 madde=_liste_girdisi(seviye)[1])
+    for v in seviye[1:]:
+        yer = min(ust - token_say(_liste_girdisi([v])[0]), ust // 2)
+        sabit, kuyruk = _liste_kuyruk_ayir(tasinan, yer) if yer > 0 else (tasinan, None)
+        _liste_ekle(sonuc, sabit)
+        if kuyruk is None:                              # sonraki grup tek basina dolu: sinir birlestirmesi yok
+            tasinan = v
+            continue
+        tasinan = _liste_grup_birlestir([kuyruk, v], baglam, ilerleme)
+    _liste_ekle(sonuc, tasinan)
+    return sonuc
+
+
 def _listeleri_birlestir(bolumler, baglam, ilerleme=print):
     """Karar/aksiyon/acik soru listelerini tekillestirir. Liste tek istege sigiyorsa tek LLM cagrisi; uzun toplantida
     (170+ madde) bolumler sigan gruplara bolunur, her grup ayri birlestirilir, ardindan grup sonuclari yeniden
-    birlestirilir (en cok LISTE_KADEME tur). LLM'siz yedege dusus YALNIZ sorunlu grup / son basamak icin olur ve
-    her zaman loglanir (eskiden 170+ maddede tum liste sessizce yerel yedege dusuyordu)."""
+    birlestirilir (en cok LISTE_KADEME tur; ust turlarda tek basina kalan grup sonucu yeniden istenmez). Toplam tek istek
+    kapasitesini asiyorsa (gruplar kuculmuyor) son basamak sinir birlestirmesidir (_liste_sinir_birlestir). LLM'siz
+    yedege dusus YALNIZ sorunlu grup ya da tek bolumu bile sigmayan liste icin olur ve her zaman loglanir."""
     _, adet = _liste_girdisi(bolumler)
     if adet <= 3:                                      # birlestirecek bir sey yok
         return listeleri_tekille(bolumler)
@@ -1262,11 +1313,22 @@ def _listeleri_birlestir(bolumler, baglam, ilerleme=print):
         gruplar = _liste_gruplari(seviye, baglam, LISTE_GRUP_MADDE if tur == 0 else 0)
         if len(gruplar) == 1:
             return _liste_grup_birlestir(seviye, baglam, ilerleme)
-        if len(gruplar) >= len(seviye):                # her bolum tek basina bir grup: gruplamak ilerleme saglamaz
+        if len(gruplar) >= len(seviye):                # her eleman tek basina bir grup: gruplamak ilerleme saglamaz
+            if tur:
+                ilerleme(f"  {_liste_girdisi(seviye)[1]} madde tek istekte sığmıyor: {len(seviye)} grup sonucu "
+                         f"sınırlarından birleştiriliyor...")
+                return _liste_sinir_birlestir(seviye, baglam, ilerleme)
             break
         ilerleme(f"  {_liste_girdisi(seviye)[1]} madde tek istekte sığmıyor: {len(gruplar)} grupta birleştiriliyor"
                  f"{f' (tur {tur + 1})' if tur else ''}...")
-        seviye = [_liste_grup_birlestir([b for _, b in g], baglam, ilerleme, g[0][0] + 1) for g in gruplar]
+        # ust turda tek elemanli grup zaten birlesmis bir grup sonucudur: ayni listeyi yeniden istemek bosa cagri
+        seviye = [g[0][1] if tur and len(g) == 1 else _liste_grup_birlestir([b for _, b in g], baglam, ilerleme,
+                                                                              g[0][0] + 1)
+                  for g in gruplar]
+    else:
+        ilerleme(f"  {_liste_girdisi(seviye)[1]} madde {LISTE_KADEME} turda tek isteğe inmedi: {len(seviye)} grup "
+                 f"sonucu sınırlarından birleştiriliyor...")
+        return _liste_sinir_birlestir(seviye, baglam, ilerleme)
     _liste_yedege_dus(ilerleme, "  ! madde listesi kademeli birleştirmeye de sığmadı, yerel birleştirme kullanıldı",
                       madde=_liste_girdisi(seviye)[1])
     return listeleri_tekille(seviye)
@@ -1435,6 +1497,18 @@ def kisi_bazli(aksiyonlar):
     return sorted(gruplar.items(), key=lambda kv: (kv[0] == "belirsiz", -len(kv[1]), kv[0]))
 
 
+KISIYE_BASLIK = "## Kişiye göre iş listesi"
+
+
+def kisiye_gore_satirlari(aksiyonlar):
+    """'Kişiye göre iş listesi' bolumunun madde satirlari (kisi_bazli): en az 4 aksiyon ve 2 grup yoksa []."""
+    gruplar = kisi_bazli(aksiyonlar)
+    if len(aksiyonlar) < 4 or len(gruplar) < 2:
+        return []
+    return [f"- {ad} ({len(isler)}): " + "; ".join(normalize_bosluk(x).rstrip(".") for x in isler)
+            for ad, isler in gruplar]
+
+
 def not_markdown(genel, listeler, kaynak_fn=None):
     """Notun Markdown'u kodda kurulur: basliklar sabit ve Turkce, tablo hic yarim kalmaz.
     kaynak_fn(metin, sorumlu) -> 'HH:MM:SS' | None: maddenin transkriptte gectigi an."""
@@ -1457,12 +1531,11 @@ def not_markdown(genel, listeler, kaynak_fn=None):
             if kaynak_fn:
                 satir += f" {kaynak(a['madde'], a['sorumlu']) or '-'} |"
             parcalar.append(satir)
-        gruplar = kisi_bazli(listeler["aksiyonlar"])
-        if len(listeler["aksiyonlar"]) >= 4 and len(gruplar) >= 2:
-            # 'aksiyon/karar/soru' kelimesi gecmeyen baslik: dayanak kontrolu bu ozet satirlarini denetlemez
-            parcalar += ["", "## Kişiye göre iş listesi"]
-            parcalar += [f"- {ad} ({len(isler)}): " + "; ".join(normalize_bosluk(x).rstrip(".") for x in isler)
-                         for ad, isler in gruplar]
+        kisiye = kisiye_gore_satirlari(listeler["aksiyonlar"])
+        if kisiye:
+            # 'aksiyon/karar/soru' kelimesi gecmeyen baslik: dayanak kontrolu bu satirlari denetlemez; motor dayanak
+            # kontrolunden SONRA bolumu son aksiyon tablosundan yeniden kurar (not_araclari.kisiye_gore_yenile)
+            parcalar += ["", KISIYE_BASLIK] + kisiye
     else:
         parcalar.append("-")
     parcalar += ["", "## Açık sorular", maddeler(listeler["acik_sorular"]), "",
@@ -1623,11 +1696,16 @@ SORU_SISTEM = (
 )
 
 
+KESIK_CEVAP_UYARISI = ("(Uyarı: cevap uzunluk sınırında kesildi, eksik olabilir. Soruyu daraltarak ya da parçalara "
+                       "bölerek yeniden sorun.)")
+
+
 def toplantiya_sor(soru, bolumler, baglam, cikti=None, sira=None):
     """bolumler: [(aralik, '[ts] Kim: metin' satirlari)], kronolojik. Soruyla en ilgili bolumler baglama
     sigdigi kadar secilir (sira verilmezse kelime koku ortakligina gore; rag.hibrit_sirala sirayi verir),
     kronolojik sirayla verilir. Girdi butcesinden ilk cagrinin GERCEK max_tokens'i (cevap + dusunme payi)
-    dusulur."""
+    dusulur. Dusunmesiz tekrar da 'length' ile biterse cevabin sonuna KESIK_CEVAP_UYARISI eklenir (kesik cevap tam
+    cevap gibi gosterilmez)."""
     cikti = cikti or butce("soru")
     pay = butce("soru_dusunme")
     def kokler(m):
@@ -1660,6 +1738,9 @@ def toplantiya_sor(soru, bolumler, baglam, cikti=None, sira=None):
         metin, neden = "", "atlandi"                  # dar pencere: dusunmeye yer yok
     if neden in ("length", "atlandi") or not metin.strip() or ingilizce_mi(metin):
         metin, neden = sor(mesajlar, cikti, temperature=0.3, dusunme=False)
+    if neden == "length":
+        # dusunmesiz tekrar da uzunluk sinirina takildi: kesik cevap tam cevap gibi gosterilmez
+        metin = (metin.rstrip() + "\n\n" if metin.strip() else "") + KESIK_CEVAP_UYARISI
     if len(secilen) < len(bolumler):
         metin += f"\n\n(Not: {len(bolumler)} bölümden soruyla en ilgili {len(secilen)} tanesine bakıldı.)"
     return metin

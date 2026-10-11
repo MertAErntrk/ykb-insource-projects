@@ -114,6 +114,8 @@ def ses_servisi_kur(m, ayar, klasor):
         elif ayar.get("kesinti_kaydi", False):
             servis.kesinti_kaydi_ac(klasor)
         m.yeniden_kes_fn = servis.yeniden_kes
+        if ayar.get("ses_izi", False):
+            m.ses_izi_kur(ayar, servis.ses_al)
         if servis.baslat():
             return servis
         neden = "ses yakalama açılamadı"

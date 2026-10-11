@@ -185,6 +185,8 @@ class YakalamaIsi(QtCore.QThread):
             elif self.ayar.get("kesinti_kaydi", False):
                 self.ses_servisi.kesinti_kaydi_ac(klasor)     # STT yokken klipler diske, donunce cozulur
             self.motor.yeniden_kes_fn = self.ses_servisi.yeniden_kes
+            if self.ayar.get("ses_izi", False):               # Faz 6: altyazisiz '?' satirlara ses izi yardimi
+                self.motor.ses_izi_kur(self.ayar, self.ses_servisi.ses_al)
             if not self.ses_servisi.baslat():                 # STT yokken de True (kesinti durumu); False: yakalama yok
                 self.ses_servisi = None
                 self._stt_yok("ses yakalama açılamadı")
@@ -518,7 +520,7 @@ class KesintiDevamIsi(QtCore.QThread):
         sv = self._servis
         if sv is not None:
             try:
-                sv._dur.set()                             # bekci dongusu bir sonraki turda cikar
+                sv.duraklat()                             # bekci dongusu bir sonraki turda cikar
             except Exception:
                 pass
 
@@ -567,23 +569,10 @@ class KesintiDevamIsi(QtCore.QThread):
                           "sonraki açılışta yeniden denenecek")
                 return 0, n
             self._log(f"önceki oturumdan {n} ses klibi çözülüyor ({ad})…")
-            orijinal = servis._coz
-
-            def coz(p):                                   # duraklatma: klip diskte kalir, sira korunur
-                if self._dur:
-                    raise Duraklatildi("kesinti kuyruğu duraklatıldı")
-                return orijinal(p)
-            servis._coz = coz
-            servis._bekci_baslat()
-            bekci = getattr(servis, "_bekci", None)
-            while bekci is not None and bekci.is_alive():
-                bekci.join(1.0)
-                kesinti = getattr(servis, "_kesinti_bas", None)
-                if kesinti is not None and saat.simdi() - kesinti > self.KESINTI_BEKLE_SN and not self._dur:
-                    self._log("! STT kuyruk çözülürken yine kesildi; kalan klipler sonraki açılışa bırakıldı")
-                    self.durdur()
-            kuyruk = getattr(servis, "_kesinti_kuyrugu", None)
-            kalan = kuyruk.sayi() if kuyruk is not None else 0
+            kalan = servis.kesinti_bosalt(
+                duraklatildi=lambda: self._dur, kesinti_bekle_sn=self.KESINTI_BEKLE_SN, duraklat_hatasi=Duraklatildi,
+                kesinti_asildi=lambda: (self._log("! STT kuyruk çözülürken yine kesildi; kalan klipler sonraki açılışa "
+                                                  "bırakıldı"), self.durdur()))
             m.bitir()                                     # acik parca diske + ozet; durum 'bitti' (not yeniden uretilebilir)
             cozulen = max(0, n - kalan)
             if cozulen:

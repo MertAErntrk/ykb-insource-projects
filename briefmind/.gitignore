@@ -9,6 +9,10 @@ toplantilar/
 olcum/
 replay_*/
 hata.log
+hata.log.1
+duman.txt
+.config.json.tmp-*
+config.json.yedek-goc
 *.wav
 logo1.jpeg
 logo.ico

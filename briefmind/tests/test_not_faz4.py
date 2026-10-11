@@ -507,3 +507,126 @@ def test_rag_pencereleri_gorunen_ad_ve_sarmal():
     # motor.soru_sor'un hazir 'gorunen' alani (altyazi yedegi son eki) oldugu gibi kullanilir, ikinci kez eklenmez
     z = rag.pencereler([sat("10:00:00", f"{AYSE} / {KEMAL}", "x", 0.5, cakisma=True, gorunen="X (özel)")])
     assert z[0]["metin"] == "[10:00:00] X (özel): ⟨x⟩"
+
+
+# ---------------------------------------------------------------- not_son_denetim (dayanak kontrolunden sonra)
+
+SON_TRANSKRIPT = (ZEMIN + f"{SELIN}: Bütçe tablosunu ben cuma günü paylaşırım.\n"
+                  f"{KEMAL}: Risk raporunu ben hazırlarım.\n"
+                  f"{AYSE}?: Sunum dosyasını ben güncellerim.\n"
+                  f"{KEMAL} / {SELIN} (aynı anda): ⟨Selin, sen lisans 480 sözleşmesini gönder. "
+                  "Teklif 750 bin lira olarak onaylandı.⟩\n"
+                  f"{SELIN}: Müşteri listesini ben temizlerim.\n"
+                  f"{KEMAL}?: Kampanya takvimini anlattım, bütçe kalemlerini özetledim.\n")
+SON_AKSIYONLAR = [aks("Bütçe tablosunu cuma paylaşmak", SELIN), aks("Risk raporunu hazırlamak", KEMAL),
+                  aks("Sunum dosyasını güncellemek", AYSE),                       # kaynak 'Ad?': dayanak (?) yapar
+                  aks("Lisans 480 sözleşmesini göndermek", SELIN),                # yalniz ⟨⟩: dayanak atar
+                  aks("Müşteri listesini temizlemek", SELIN)]
+
+
+def _son_not(ozet="Bütçe tablosu ve risk raporu konuşuldu.", sonraki="-", konu="", aksiyonlar=SON_AKSIYONLAR,
+             transkript=SON_TRANSKRIPT, supheli=""):
+    genel = {"ozet": ozet, "sonraki_adim": sonraki}
+    if konu:
+        genel["konu_akisi"] = konu
+    md = "# T\n\n" + llm.not_markdown(genel, {"kararlar": [], "aksiyonlar": [dict(a) for a in aksiyonlar],
+                                              "acik_sorular": []})
+    md, _ = motor_mod.dayanak_kontrolu(md, transkript)
+    return motor_mod.not_son_denetim(md, transkript, KISILER + [ZEYNEP], supheli)
+
+
+def _bolum(md, baslik):
+    return md.split(f"## {baslik}\n", 1)[1].split("\n## ", 1)[0].strip()
+
+
+def test_kisiye_gore_liste_son_tablodan_kurulur_atilan_yok_belirsiz_aday_olarak():
+    """Bulgu (not_temiz/7): liste dayanak kontrolunden ONCE kuruluyordu; tablodan atilan ⟨⟩ maddeleri listede '(aday: Ad)'
+    ile kaliyor, dayanagin (?) yaptigi sahip kisinin isi sayiliyordu."""
+    once = llm.not_markdown({"ozet": "x", "sonraki_adim": "-"},
+                            {"kararlar": [], "aksiyonlar": [dict(a) for a in SON_AKSIYONLAR], "acik_sorular": []})
+    assert "Lisans 480" in _bolum(once, "Kişiye göre iş listesi")                # fixture: eski liste maddeyi tasir
+    md, _ = _son_not()
+    tablo = not_araclari.aksiyonlari_ayikla(md)
+    assert [a["madde"] for a in tablo] == ["Bütçe tablosunu cuma paylaşmak", "Risk raporunu hazırlamak",
+                                          "Sunum dosyasını güncellemek", "Müşteri listesini temizlemek"]
+    assert [ln.split("|")[1].strip() for ln in md.split("\n") if ln.startswith("| ") and ln[2].isdigit()] == \
+        ["1", "2", "3", "4"]                                                     # atilan satir numara boslugu birakmaz
+    assert _bolum(md, "Kişiye göre iş listesi").split("\n") == [
+        f"- {SELIN} (2): Bütçe tablosunu cuma paylaşmak; Müşteri listesini temizlemek",
+        f"- {KEMAL} (1): Risk raporunu hazırlamak",
+        f"- belirsiz (1): Sunum dosyasını güncellemek (aday: {AYSE})"]
+    assert "\n\n## Açık sorular" in md and "\n\n## Kişiye göre iş listesi" in md
+    # tablo 4 maddenin altina inerse bolum kalkar
+    md, _ = _son_not(aksiyonlar=SON_AKSIYONLAR[:4])
+    assert "Kişiye göre iş listesi" not in md and "\n\n## Açık sorular" in md
+
+
+def test_kisiye_gore_yenile_madde_isareti_de_belirsiz_sayilir_ve_bolum_eklenir():
+    md = ("# T\n\n## Aksiyonlar\n| # | Madde | Sorumlu | Tarih |\n|---|---|---|---|\n"
+          f"| 1 | Rapor hazırlanacak (?) | {SELIN} | - |\n| 2 | Tablo güncellenecek | {SELIN} | - |\n"
+          f"| 5 | Sunum yapılacak | {KEMAL} | - |\n| 9 | Liste temizlenecek | belirsiz | - |\n\n## Açık sorular\n-\n")
+    yeni = not_araclari.kisiye_gore_yenile(not_araclari.aksiyon_sirasini_yenile(md))
+    assert "| 3 | Sunum yapılacak |" in yeni and "| 4 | Liste temizlenecek |" in yeni
+    assert _bolum(yeni, "Kişiye göre iş listesi").split("\n") == [
+        f"- {KEMAL} (1): Sunum yapılacak", f"- {SELIN} (1): Tablo güncellenecek",
+        f"- belirsiz (2): Rapor hazırlanacak (?) (aday: {SELIN}); Liste temizlenecek"]
+
+
+def test_ozette_yalniz_sarmalda_gecen_tutar_soru_isaretiyle_kalir():
+    """Bulgu (not_temiz/7): '667 bin lira tutarı da ele alındı' -- 667 yalniz ⟨⟩ (aynı anda) icinde. Deger '(?)' olur,
+    'ele alindi' baglami kalir; konu akisi da ayni kurala tabi; ⟨⟩ disinda da soylenen deger isaretsiz kalir."""
+    md, olaylar = _son_not(ozet="Bütçe tablosu ve risk raporu konuşuldu. Teklif 750 bin lira olarak ele alındı.",
+                           konu="- 10:00:00–10:05:00: bütçe tablosu; 750 bin lira teklif")
+    assert _bolum(md, "Özet") == "Bütçe tablosu ve risk raporu konuşuldu. Teklif (?) bin lira olarak ele alındı."
+    assert _bolum(md, "Konu akışı") == "- 10:00:00–10:05:00: bütçe tablosu; (?) bin lira teklif"
+    assert "750" not in md and any("750" in o for o in olaylar)
+    temiz = SON_TRANSKRIPT + f"{KEMAL}: Teklif 750 bin lira, cuma netleşir.\n"
+    md, _ = _son_not(ozet="Teklif 750 bin lira olarak ele alındı.", transkript=temiz)
+    assert _bolum(md, "Özet") == "Teklif 750 bin lira olarak ele alındı."
+
+
+def test_ozette_yalniz_supheli_satirda_gecen_deger_ve_gun_isaretlenir():
+    t = SON_TRANSKRIPT + f"{SELIN}: Lansman ayında hangi gün olacağı ele alındı, sonra netleşir.\n"
+    md, _ = _son_not(ozet="Bütçe tablosu konuşuldu. Lansman 2026 mart ayında, salı günü ele alındı.",
+                     supheli="Lansman 2026 mart ayında yapılacak salı", transkript=t)
+    assert _bolum(md, "Özet") == "Bütçe tablosu konuşuldu. Lansman (?) ayında, (?) günü ele alındı."   # '(?) (?)' teklenir
+    # transkriptte ⟨⟩ disinda gecen gun ('cuma') isaretlenmez
+    md, _ = _son_not(ozet="Bütçe tablosu cuma günü ele alındı.", supheli="cuma")
+    assert _bolum(md, "Özet") == "Bütçe tablosu cuma günü ele alındı."
+
+
+def test_sonraki_adim_yalniz_kesin_sahibin_isini_sahibiyle_tasir():
+    """Bulgu (not_temiz/7): 'Bir sonraki adım' ⟨⟩ / 'A → B' / 'Ad?' kaynakli isi SAHIBIYLE yaziyordu. Kesin sahip + dayanakli
+    is kalir; sahibi '(?)' olan is ve yalniz ⟨⟩ icindeki is cumlesi duser; dayanakli isle eslesmeyen cumlede ad cikar."""
+    md, olaylar = _son_not(sonraki="Selin bütçe tablosunu cuma paylaşacak. Ayşe sunum dosyasını güncelleyecek. "
+                                   "Selin lisans 480 sözleşmesini gönderecek. Zeynep toplantı odasını ayarlayacak.")
+    assert _bolum(md, "Bir sonraki adım") == "Selin bütçe tablosunu cuma paylaşacak. Toplantı odasını ayarlayacak (?)."
+    assert "Ayşe" not in _bolum(md, "Bir sonraki adım") and "480" not in md
+    assert sum("sonraki adım" in o for o in olaylar) == 3
+    # baskasinin kesin isi de baska kisiye yazilmaz
+    md, _ = _son_not(sonraki=f"Kemal bütçe tablosunu cuma paylaşacak; {SELIN} müşteri listesini temizleyecek.")
+    assert _bolum(md, "Bir sonraki adım") == f"{SELIN} müşteri listesini temizleyecek."
+
+
+def test_sonraki_adim_bosalirsa_yalniz_kesin_sahipli_aksiyonlardan_kurulur():
+    md, _ = _son_not(sonraki="Ayşe sunum dosyasını güncelleyecek. Selin lisans 480 sözleşmesini gönderecek.")
+    s = _bolum(md, "Bir sonraki adım")
+    assert s.startswith("Öncelikli aksiyonlar:") and f"({SELIN})" in s and "Sunum" not in s and AYSE not in s
+    md, _ = _son_not(sonraki="Ayşe sunum dosyasını güncelleyecek.", aksiyonlar=[SON_AKSIYONLAR[2]])
+    assert _bolum(md, "Bir sonraki adım") == "-"
+
+
+def test_ozette_belirsiz_kaynakli_kisi_adi_cikar_kesin_kaynakli_kalir():
+    """Ozet cumlesi: is cumlesi (gelecek zaman) yalniz kesin sahip adiyla; bir seyi 'yapti' diyen cumlenin kisiye
+    dayanagi yalniz 'Ad?' satiriysa ad cikar ve cumle (?) alir; kesin satirla dayanakli olan degismez."""
+    md, _ = _son_not(ozet="Kemal kampanya takvimini anlattı. Kemal risk raporunu hazırlayacak. "
+                          "Ayşe sunum dosyasını güncelleyecek. Selin müşteri listesinden söz etti.")
+    assert _bolum(md, "Özet") == ("Kampanya takvimini anlattı (?). Kemal risk raporunu hazırlayacak. "
+                                  "Sunum dosyasını güncelleyecek (?). Selin müşteri listesinden söz etti.")
+
+
+def test_ad_cikar_ekli_ad_ve_baglac_artigi_temizlenir():
+    assert motor_mod._ad_cikar(f"{AYSE} ve {KEMAL} raporu hazırlayacak.", [AYSE, KEMAL]) == "Raporu hazırlayacak (?)."
+    assert motor_mod._ad_cikar("Ayşe'nin raporu Kemal tarafından gönderilecek", [AYSE, KEMAL]) == \
+        "Raporu gönderilecek (?)."
+    assert motor_mod._ad_cikar(f"{AYSE}.", [AYSE]) is None

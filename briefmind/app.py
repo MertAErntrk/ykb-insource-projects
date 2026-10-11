@@ -2186,7 +2186,7 @@ def duman_testi(pencere):
     kontrol("pencere kuruldu", isinstance(pencere, QtWidgets.QMainWindow) and pencere.sayfalar.count() == 4)
     kontrol("durum makinesi: bos", pencere._durum() == "bos" and pencere.b_ana.isEnabled(), pencere._durum())
     for ad in ("konusmaci", "stt", "ses", "saat", "terim", "duzelt", "kelime", "rag", "motor", "llm", "yakalayici",
-               "not_araclari", "outlook", "isler", "gorunum", "tarih", "metin"):
+               "not_araclari", "outlook", "isler", "gorunum", "tarih", "metin", "uzun", "ses_izi"):
         try:
             importlib.import_module(ad)
             kontrol(f"modül {ad}", True)

@@ -18,6 +18,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed --name BriefMind -
   --hidden-import PyQt5.QtSvg ^
   --hidden-import konusmaci --hidden-import stt --hidden-import ses --hidden-import saat --hidden-import terim ^
   --hidden-import duzelt --hidden-import kelime --hidden-import rag --hidden-import tarih --hidden-import metin ^
+  --hidden-import uzun --hidden-import ses_izi ^
   --add-data "veri;veri" ^
   app.py
 if errorlevel 1 ( echo derleme basarisiz & pause & exit /b 1 )
