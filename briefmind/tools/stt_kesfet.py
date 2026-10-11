@@ -10,6 +10,7 @@ Olculenler:
 Kullanim (briefmind klasorunden; adres/anahtar config.json'dan okunur):
   python tools\\stt_kesfet.py                 -> 8 sn mikrofon kaydi alir (ekrandaki cumleyi oku)
   python tools\\stt_kesfet.py --wav kayit.wav -> var olan bir konusma kaydiyla (16 kHz'e cevrilir)
+  python tools\\stt_kesfet.py --cihaz 3       -> 3 numarali mikrofonla (numara: python tools\\ses_teshis.py)
 Cikti ekrana ve stt_kesfet_cikti.txt'ye yazilir; adres maskeli, konusma metni yazilmaz (--goster ile yazilir).
 """
 import argparse
@@ -58,13 +59,13 @@ def wav_oku(yol):
     return x
 
 
-def kaydet(saniye):
+def kaydet(saniye, cihaz=None):
     import sounddevice as sd
-    bilgi = sd.query_devices(None, "input")
+    bilgi = sd.query_devices(cihaz, "input")
     hiz = int(bilgi["default_samplerate"]) or ORNEK
     yaz(f"{saniye:.0f} sn kayıt başlıyor. Şu cümleyi normal hızda OKU:\n  \"{OKUNACAK}\"")
     time.sleep(1.5)
-    x = sd.rec(int(saniye * hiz), samplerate=hiz, channels=1, dtype="float32")
+    x = sd.rec(int(saniye * hiz), samplerate=hiz, channels=1, dtype="float32", device=cihaz)
     sd.wait()
     x = x[:, 0]
     if hiz != ORNEK:
@@ -184,6 +185,7 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument("--wav", help="konuşma içeren wav (yoksa mikrofondan kayıt)")
     a.add_argument("--sure", type=float, default=8)
+    a.add_argument("--cihaz", help="mikrofon numarasi ya da adi (yoksa Windows varsayilani)")
     a.add_argument("--goster", action="store_true", help="tanınan metinleri de yaz")
     ARGS = a.parse_args()
     with open("config.json", encoding="utf-8-sig") as f:
@@ -203,11 +205,19 @@ def main():
             yaz(f"  tüm yollar: {sorted(j.get('paths', {}))}")
             yaz(f"  transkripsiyon yolu: {uc}  form alanları: {alanlar or '(şemada yok)'}")
 
-    ses = wav_oku(ARGS.wav) if ARGS.wav else kaydet(ARGS.sure)
+    cihaz = ARGS.cihaz
+    if cihaz is not None:
+        try:
+            cihaz = int(cihaz)
+        except ValueError:
+            pass
+    ses = wav_oku(ARGS.wav) if ARGS.wav else kaydet(ARGS.sure, cihaz)
     rms = float(np.sqrt(np.mean(np.square(ses)))) if len(ses) else 0.0
     yaz(f"\nses: {len(ses) / ORNEK:.1f} sn, rms {20 * np.log10(max(rms, 1e-9)):.1f} dB")
-    if rms < 0.003:
-        yaz("  UYARI: ses çok sessiz; mikrofon seçimi için python tools\\ses_teshis.py")
+    konusma_var = rms >= 0.003
+    if not konusma_var:
+        yaz("  UYARI: kayıt sessiz (mikrofon kapalı ya da yanlış cihaz). Konuşmalı prompt denemeleri (a, b) atlanır;")
+        yaz("  mikrofonu bulmak için: python tools\\ses_teshis.py  → sonra: python tools\\stt_kesfet.py --cihaz <no>")
 
     yaz("\n== 2) Zaman damgası ==")
     denemeler = [
@@ -235,10 +245,11 @@ def main():
     yaz(f"  SONUÇ: segment start/end {'VAR' if seg_var else 'YOK'}, kelime zamanı {'VAR' if kelime_var else 'YOK'}")
 
     yaz("\n== 3) prompt modele gidiyor mu ==")
-    if not taban:
-        yaz("  taban metin alınamadı; prompt denemesi atlandı.")
+    kanit = []
+    if not taban or not konusma_var:
+        yaz("  a/b atlandı: konuşmalı taban kayıt yok (yalnız sessizlik denemesi yapılıyor).")
+        t = t2 = ""
     else:
-        kanit = []
         # a) kasitli yazim kopyalama
         d, j, _ = stt.coz(ses, {"response_format": "verbose_json", "prompt": TUHAF_PROMPT})
         t = metin(j) if d == 200 else ""
@@ -253,6 +264,7 @@ def main():
             return sum(c.isupper() for c in s), sum(c in ".,!?" for c in s)
         yaz(f"  b) küçük harfli/noktalamasız prompt: HTTP {d}, büyük harf+noktalama taban {stil(taban)} → {stil(t2)}")
         kanit.append(bool(t2) and stil(t2) != stil(taban))
+    if True:
         # c) sessizlikte prompt
         sessiz = (np.random.RandomState(0).randn(ORNEK * 3) * 0.001).astype("float32")
         d0, j0, _ = stt.coz(sessiz, {"response_format": "verbose_json"})
@@ -264,8 +276,12 @@ def main():
         if ARGS.goster:
             yaz(f"      taban: {taban}\n      a: {t}\n      b: {t2}\n      sessiz: {s0!r} / {s1!r}")
         evet = sum(bool(k) for k in kanit)
-        yaz("  SONUÇ: prompt " + ("modele GİDİYOR" if evet >= 2 else "büyük olasılıkla YOK SAYILIYOR" if evet == 0
-                                   else "belirsiz (tek denemede etki var)") + f" ({evet}/3 deneme etkili)")
+        if len(kanit) == 1:
+            yaz("  SONUÇ: " + ("prompt modele GİDİYOR (sessizlikte prompt kelimesi çıktıya sızdı)" if evet else
+                               "sessizlik denemesinde etki yok; konuşmalı kayıtla tekrar dene"))
+        else:
+            yaz("  SONUÇ: prompt " + ("modele GİDİYOR" if evet >= 2 else "büyük olasılıkla YOK SAYILIYOR" if evet == 0
+                                       else "belirsiz (tek denemede etki var)") + f" ({evet}/{len(kanit)} deneme etkili)")
 
     with open(CIKTI, "w", encoding="utf-8") as f:
         f.write("\n".join(m(s) for s in SATIRLAR) + "\n")
