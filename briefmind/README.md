@@ -25,6 +25,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► bölüm özeti (JSON) ─► inc
 | `ayar.py` | `config.json` okuma/yazma |
 | `motor.py` | Parçalama, arka plan özetleme, konuşmacı hizalama, dayanak kontrolü, not üretimi |
 | `llm.py` | LLM istemcisi, bölüm/birleştirme promptları, token bütçeleri, notun deterministik temizliği |
+| `rag.py` | Toplantıya soru için hibrit arama: transkript pencereleri, BM25 (Türkçe kök), embedding, RRF; vektör önbelleği toplantı klasöründe (`rag_dizin.npz`) |
 | `metin.py` | Metin benzerliği (kelime kökü), Türkçe küçük harf, ad eşleşmesi |
 | `ses.py` | Ses yakalama (WASAPI loopback + mikrofon), VAD, STT istemcisi, tekrar/halüsinasyon filtreleri |
 | `yakalayici.py` | Teams altyazısını UI Automation ile okuma, toplantı adı, altyazıyı otomatik açma |
@@ -62,6 +63,8 @@ python app.py
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
 | `not_sablonu` | `genel` / `haftalik` / `karar` / `birebir` / `calistay` (Ayarlar → Not şablonu) |
 | `saklama_gun` | Notu üretilmiş toplantıların transkripti bu kadar gün sonra silinir; `0` kapalı (Ayarlar → Transkript saklama süresi) |
+| `embed_url` | (isteğe bağlı) Embedding servisi (OpenAI uyumlu `POST /v1/embeddings`, gövde `{"input": [...]}`). Doluysa "Toplantıya sor" hibrit arama yapar: kelime (BM25) + anlam (vektör), RRF ile birleştirilir. Boşsa ya da servis hata verirse yalnızca kelime araması. Servisin yollarını bulmak için: `python tools\servis_kesfet.py <adres>` |
+| `embed_boyut` / `embed_key` / `embed_proxy` | Vektör boyutu (varsayılan `1024`; 4096'lık Qwen3-Embedding vektörü kırpılıp normalize edilir), anahtar (gerekirse), Windows proxy'si |
 | `ca_bundle` | (isteğe bağlı) Kurum kök sertifikası dosyası (`.cer`, Base64). Doluysa LLM ve STT bağlantılarında TLS doğrulanır; boşsa doğrulama kapalıdır ve açılışta Olaylar'a bir kez yazılır. Aşağıdaki adımlara bakın. |
 
 ### TLS doğrulaması (`ca_bundle`)
@@ -138,5 +141,6 @@ sekmesinden elle (**Run workflow**) tetiklenince Windows'ta exe derlenir ve `Bri
 ## Gizlilik ve uyum
 
 - Ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir.
+- Embedding açıksa transkript pencereleri yalnızca kurum içi embedding servisine gönderilir; vektörler toplantı klasöründe (bilgisayarda) kalır, merkezi bir veritabanına yazılmaz.
 - Sözlük, `config.json` ve `toplantilar/` klasörü `.gitignore`'dadır; repoya girmez.
 - Kurum içi adresler yer tutucudur; gerçek adresler yalnızca `config.json`'da durur.

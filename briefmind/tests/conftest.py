@@ -20,3 +20,8 @@ import llm  # noqa: E402
 
 llm.OTOMATIK_TANI = False
 llm.SUNUCU_TOKENIZER = False
+
+# Testler embedding servisine gitmez (yerel config.json'da embed_url olsa bile)
+import rag  # noqa: E402
+
+rag.URL = ""

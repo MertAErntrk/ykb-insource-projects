@@ -22,6 +22,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 import ayar as ayar_mod
 import llm
+import rag
 import motor as motor_mod
 import not_araclari
 import outlook
@@ -42,6 +43,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.setStyleSheet(QSS)
         self.ayar = ayar_oku()
         llm.ayarla(self.ayar)                # uygulama klasorundeki config.json (LLM adresi, ca_bundle) gecerli
+        rag.ayarla(self.ayar)                # embedding (toplantiya soru icin anlamsal arama)
         self.sozluk = Sozluk()
         self.is_ = None
         self.motor = None
@@ -1360,6 +1362,7 @@ class Pencere(QtWidgets.QMainWindow):
                           "otomatik_not": self.a_otomatik_not.isChecked()})
         ayar_yaz(self.ayar)
         llm.ayarla(self.ayar)                  # LLM adresi/modeli hemen gecerli: yeniden baslatma gerekmez
+        rag.ayarla(self.ayar)
         self.durum.setText("Ayarlar kaydedildi")
         self.llm_tani()
 

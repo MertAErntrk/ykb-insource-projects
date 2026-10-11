@@ -19,6 +19,10 @@
  "saklama_gun": 0,
  "altyazi_otomatik": true,
  "altyazi_goster": false,
+ "embed_url": "https://<embedding-adresi>",
+ "embed_key": "",
+ "embed_boyut": 1024,
+ "embed_proxy": false,
  "ca_bundle": "",
  "ben": ""
 }

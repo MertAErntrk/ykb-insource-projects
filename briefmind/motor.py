@@ -25,6 +25,7 @@ import time
 from collections import deque
 
 import llm
+import rag
 import tarih as tarih_mod
 from metin import ad_geciyor, metin_benzerligi, tr_kucuk
 from sozluk import Sozluk, normalize
@@ -910,19 +911,24 @@ class Motor:
         return satirlar + list(self.mevcut)
 
     def soru_sor(self, soru):
-        """Toplantiya soru: transkript bolumleri (zaman damgali) uzerinden kurum ici LLM cevaplar."""
-        bolumler = []
+        """Toplantiya soru: transkript kucuk ortusen pencerelere bolunur, soruyla en ilgilileri hibrit
+        aramayla (BM25 + embedding, RRF; rag.py) secilir, kurum ici LLM cevaplar. Embedding ayarli
+        degilse ya da hata verirse yalnizca kelime aramasi kullanilir."""
+        satirlar = []
         for no in range(1, self.parca_no + 1):
             try:
-                v = self.parca_oku(no)
+                satirlar.extend(self.parca_oku(no)["satirlar"])
             except Exception:
                 continue
-            satirlar = "\n".join(f"[{s['ts']}] {s['speaker']}: {s['text']}" for s in v["satirlar"])
-            if satirlar:
-                bolumler.append((f"{v.get('baslangic', '')}–{v.get('bitis', '')}", satirlar))
-        if self.mevcut:
-            bolumler.append(("açık parça", "\n".join(f"[{s['ts']}] {s['speaker']}: {s['text']}" for s in self.mevcut)))
-        return llm.toplantiya_sor(soru, bolumler, self.baglam())
+        satirlar.extend(self.mevcut)
+        pen = rag.pencereler(satirlar)
+        if not pen:
+            return "Bu toplantının transkripti boş."
+        metinler = [p["metin"] for p in pen]
+        sira, yontem = rag.hibrit_sirala(soru, metinler, self.klasor, olay=self.log)
+        self.log(f"Soru: {len(pen)} pencere, arama: {yontem}")
+        bolumler = [(f"{p['bas']}–{p['son']}", p["metin"]) for p in pen]
+        return llm.toplantiya_sor(soru, bolumler, self.baglam(), sira=sira)
 
     def kapat(self):
         self.havuz.shutdown(wait=True)

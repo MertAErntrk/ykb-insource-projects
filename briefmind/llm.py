@@ -1335,16 +1335,20 @@ SORU_SISTEM = (
 )
 
 
-def toplantiya_sor(soru, bolumler, baglam, cikti=None):
+def toplantiya_sor(soru, bolumler, baglam, cikti=None, sira=None):
     """bolumler: [(aralik, '[ts] Kim: metin' satirlari)], kronolojik. Soruyla en ilgili bolumler baglama
-    sigdigi kadar secilir (kelime koku ortakligina gore), kronolojik sirayla verilir. Girdi butcesinden
-    ilk cagrinin GERCEK max_tokens'i (cevap + dusunme payi) dusulur."""
+    sigdigi kadar secilir (sira verilmezse kelime koku ortakligina gore; rag.hibrit_sirala sirayi verir),
+    kronolojik sirayla verilir. Girdi butcesinden ilk cagrinin GERCEK max_tokens'i (cevap + dusunme payi)
+    dusulur."""
     cikti = cikti or butce("soru")
     pay = butce("soru_dusunme")
     def kokler(m):
         return {k[:5] for k in re.findall(r"[a-z0-9]+", _sade(m)) if len(k) >= 3}
     sk = kokler(soru)
-    puanli = sorted(((len(sk & kokler(metin)), i) for i, (_, metin) in enumerate(bolumler)), reverse=True)
+    if sira is not None:
+        puanli = [(0, i) for i in sira if 0 <= i < len(bolumler)]
+    else:
+        puanli = sorted(((len(sk & kokler(metin)), i) for i, (_, metin) in enumerate(bolumler)), reverse=True)
     sigan = (min(BAGLAM_PENCERESI, SORU_GIRDI_UST) - MARJ - cikti - pay
              - token_say(SORU_SISTEM + baglam + soru) - 200)
     secilen, tok = [], 0
