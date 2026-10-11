@@ -85,8 +85,11 @@ def test_okuma_zamanlari_uia_okumasini_cevreler():
     y = _y()
     y.grup = object()
 
+    okuma_ani = []
+
     def yavas():
         time.sleep(0.05)
+        okuma_ani.append(saat_mod.simdi())                 # UIA okumasinin bittigi an
         return [(KIM_A, "IFRS dokuz raporunda PD kolonu string geliyor")]
 
     y._ciftler = yavas
@@ -95,7 +98,8 @@ def test_okuma_zamanlari_uia_okumasini_cevreler():
     sonra = saat_mod.simdi()
     o = y.okumalar[0]
     assert once <= o["bas_epoch"] and o["bit_epoch"] <= sonra
-    assert o["bit_epoch"] - o["bas_epoch"] >= 0.05                          # bas okuma BASLAMADAN, bit bittikten sonra alinir
+    # bas okuma BASLAMADAN, bit bittikten sonra alinir (sure sleep'e degil olculen ana bagli: Windows saat cozunurlugu)
+    assert o["bas_epoch"] <= okuma_ani[0] <= o["bit_epoch"] and o["bit_epoch"] > o["bas_epoch"]
 
 
 def test_okuma_fn_hatasi_okuyucuyu_durdurmaz_ve_oznitelik_atanabilir():
