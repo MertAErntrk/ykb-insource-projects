@@ -122,10 +122,23 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
 - **Jira/Planner CSV:** Not sekmesi → "Jira/Planner CSV" aksiyon tablosunu `aksiyonlar.csv` olarak kaydeder
   (sütunlar `Summary, Assignee, Due Date, Description, Issue Type`; UTF-8). Jira: *Issues → Import issues from CSV*.
   Planner: CSV Excel'de açılıp görevler kopyalanır. Doğrudan Jira'ya kayıt açılmaz (kimlik bilgisi gerekmez).
-- **Konuşma payı:** Geçmiş sekmesinde bir toplantı seçilince üstte "Konuşma payı: Elif %38, Berk %27, …"
+- **Konuşma payı:** Geçmiş sekmesinde bir toplantı seçilince üstte "Konuşma payı: Selin %38, Emre %27, …"
   (satırın süresi = sonraki satıra kadar, en fazla 15 sn). Nota yazılmaz; `meta.json` → `konusma_paylari`.
 - **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi.
 - **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
+
+## Ölçüm (Faz 0)
+
+Konuşmacı/WER ölçümü için **isteğe bağlı, yerel** kayıt: `config.json` → `"olcum_kaydi": true` (varsayılan `false`).
+Açıkken toplantı klasörüne `olcum/` yazılır (`toplantilar/` zaten `.gitignore`'da; repoya girmez): `klipler/NNNN.wav`
+(STT'ye giden klipler, 16 kHz mono), `klipler.jsonl` (zaman/örnek sayacı, ham STT metni), `okumalar.jsonl` (ham UIA
+panel okumaları). Kayıt işi `ses.SesServisi.olcum_kaydi_ac(klasor)` ve `Yakalayici.okuma_kaydi_ac(klasor)` ile bağlanır.
+
+```powershell
+python tools\etiketle.py toplantilar\<klasor> --bas 0 --bit 10   # ilk 10 dk'yı dinle, konuşmacı + metin etiketle (olcum/gercek.jsonl)
+python tools\olcum.py toplantilar\<klasor> --token               # WER, SER-kesin, belirsiz oran, halüsinasyon (yalnız sayı) + karakter/token
+python tools\replay.py toplantilar\<klasor> [--stt] [--bas 0 --bit 10]   # kaydı bugünkü hattan çevrimdışı geçirip metrikleri hesapla
+```
 
 ## Test
 
@@ -140,7 +153,8 @@ sekmesinden elle (**Run workflow**) tetiklenince Windows'ta exe derlenir ve `Bri
 
 ## Gizlilik ve uyum
 
-- Ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir.
+- Ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir. Tek istisna kapalı gelen
+  `olcum_kaydi` ayarıdır (yukarıdaki Ölçüm bölümü; yerel, repo dışı).
 - Embedding açıksa transkript pencereleri yalnızca kurum içi embedding servisine gönderilir; vektörler toplantı klasöründe (bilgisayarda) kalır, merkezi bir veritabanına yazılmaz.
 - Sözlük, `config.json` ve `toplantilar/` klasörü `.gitignore`'dadır; repoya girmez.
 - Kurum içi adresler yer tutucudur; gerçek adresler yalnızca `config.json`'da durur.

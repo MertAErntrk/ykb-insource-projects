@@ -21,6 +21,7 @@ def ayar_oku():
          "ben": "",
          "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
          "altyazi_turkce": True,           # altyazi bulununca konusulan dili Turkce yapmayi dene
+         "olcum_kaydi": False,             # Faz 0 PoC: klip + altyazi okumalarini toplanti klasorune yaz
          "otomatik_not": True,             # toplanti bitince incelemeyi bekleme, notu dogrudan uret
          "ca_bundle": ""}                  # kurum kok sertifikasi (.cer, Base64); bos: TLS dogrulamasi kapali
     global AYAR_HATASI

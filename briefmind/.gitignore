@@ -4,6 +4,9 @@ sozluk.json
 sozluk.txt
 sozluk.json.yedek-*
 toplantilar/
+# olcum kayitlari (ses, UIA okumalari, etiketler, replay ciktisi): yerel
+olcum/
+replay_*/
 hata.log
 *.wav
 logo1.jpeg

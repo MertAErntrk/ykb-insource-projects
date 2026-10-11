@@ -31,48 +31,48 @@ SORU = ("Bir yazılım ekibinin haftalık toplantısında 'karar' ile 'aksiyon' 
         "Türkçe ve kısa anlat.")
 
 PARAGRAF = ("Ayşe Demir sprint planlamasında rapor ekranının gecikmesini anlattı; Ahmet Yılmaz test ortamının "
-            "perşembeye hazır olacağını söyledi. Elif Kaya müşteri geri bildirimlerinin Jira'da toplanmasını "
+            "perşembeye hazır olacağını söyledi. Selin Kaya müşteri geri bildirimlerinin Jira'da toplanmasını "
             "önerdi ve ekip, kampanya modülünün canlıya geçişini bir hafta ertelemeye karar verdi. ")
 
-KATILIMCILAR = ["Ayşe Demir", "Ahmet Yılmaz", "Elif Kaya", "Can Öztürk"]
+KATILIMCILAR = ["Ayşe Demir", "Ahmet Yılmaz", "Selin Kaya", "Can Öztürk"]
 
 _BOLUM_SATIRLARI = [
     [("Ayşe Demir", "Günaydın, bugün rapor ekranındaki gecikmeyi ve kampanya modülünü konuşacağız."),
      ("Ahmet Yılmaz", "Rapor ekranı açılırken veritabanı sorgusu yaklaşık sekiz saniye sürüyor."),
-     ("Elif Kaya", "Müşteriler de bu gecikmeden şikâyet ediyor, geçen hafta üç kayıt açıldı."),
+     ("Selin Kaya", "Müşteriler de bu gecikmeden şikâyet ediyor, geçen hafta üç kayıt açıldı."),
      ("Can Öztürk", "Sorguya indeks eklersek süre bir saniyenin altına iner diye düşünüyorum."),
      ("Ayşe Demir", "Bunu deneyelim. Can, indeks çalışmasını sen üstlenebilir misin?"),
      ("Can Öztürk", "Olur, çarşambaya kadar test ortamında denerim."),
      ("Ahmet Yılmaz", "Test ortamı şu an kapalı, perşembe sabahı tekrar açılacak."),
      ("Ayşe Demir", "O zaman Can'ın denemesi perşembeye kalsın."),
-     ("Elif Kaya", "Ben müşteri kayıtlarını jandarma kaydı altında toplarım, yani Jira kaydı altında."),
-     ("Ayşe Demir", "Tamam, Elif Jira'da tek bir ana kayıt açsın, diğerlerini ona bağlasın."),
+     ("Selin Kaya", "Ben müşteri kayıtlarını jandarma kaydı altında toplarım, yani Jira kaydı altında."),
+     ("Ayşe Demir", "Tamam, Selin Jira'da tek bir ana kayıt açsın, diğerlerini ona bağlasın."),
      ("Ahmet Yılmaz", "Bir de raporun dışa aktarma düğmesi bazen boş dosya üretiyor."),
      ("Can Öztürk", "O hata dün komplo tit ile düzeldi, yani commit ile düzeldi, yarın canlıya çıkar."),
      ("Ayşe Demir", "Güzel. Rapor ekranı için karar şu: indeks çalışması bu sprintte yapılacak."),
-     ("Elif Kaya", "Müşteriye ne zaman dönüş yapacağımızı da yazalım."),
-     ("Ayşe Demir", "Perşembe akşamı sonuçları görünce Elif müşteriye bilgi versin.")],
+     ("Selin Kaya", "Müşteriye ne zaman dönüş yapacağımızı da yazalım."),
+     ("Ayşe Demir", "Perşembe akşamı sonuçları görünce Selin müşteriye bilgi versin.")],
     [("Ayşe Demir", "İkinci konu kampanya modülü. Canlıya geçiş tarihi bu cuma olarak planlanmıştı."),
      ("Ahmet Yılmaz", "Yük testleri tamamlanmadı, ödeme servisinde zaman aşımı görüyoruz."),
      ("Can Öztürk", "Zaman aşımı ödeme servisinin bağlantı havuzundan kaynaklanıyor olabilir."),
-     ("Elif Kaya", "Pazarlama ekibi kampanyayı duyurmak için tarih bekliyor."),
+     ("Selin Kaya", "Pazarlama ekibi kampanyayı duyurmak için tarih bekliyor."),
      ("Ayşe Demir", "Riskli görünüyor. Canlıya geçişi bir hafta erteleyelim mi?"),
      ("Ahmet Yılmaz", "Bence ertelemek doğru, yük testine en az üç gün daha lazım."),
      ("Can Öztürk", "Katılıyorum, bağlantı havuzunu büyütüp testi yeniden koşarım."),
      ("Ayşe Demir", "Karar: kampanya modülünün canlıya geçişi bir hafta ertelendi."),
-     ("Elif Kaya", "Pazarlama ekibine yeni tarihi ben iletirim, bugün öğleden sonra."),
+     ("Selin Kaya", "Pazarlama ekibine yeni tarihi ben iletirim, bugün öğleden sonra."),
      ("Ahmet Yılmaz", "Yük testi raporunu pazartesi paylaşırım."),
      ("Ayşe Demir", "Ödeme servisi ekibiyle ayrıca konuşmamız gerekir mi?"),
      ("Can Öztürk", "Bağlantı havuzu yetmezse evet, ama önce kendi testimizi bitirelim."),
-     ("Elif Kaya", "Kampanya görsellerinin onayı da bekleniyor, onu kim takip edecek?"),
+     ("Selin Kaya", "Kampanya görsellerinin onayı da bekleniyor, onu kim takip edecek?"),
      ("Ayşe Demir", "Görsel onayını şimdilik açık bırakalım, tasarım ekibine sorarız.")],
     [("Ayşe Demir", "Son olarak yeni ekip üyesinin oryantasyonu var."),
      ("Ahmet Yılmaz", "Erişim talepleri açıldı ama veritabanı yetkisi hâlâ onaylanmadı."),
-     ("Elif Kaya", "Oryantasyon belgesini güncelledim, paylaşım klasörüne koydum."),
+     ("Selin Kaya", "Oryantasyon belgesini güncelledim, paylaşım klasörüne koydum."),
      ("Can Öztürk", "İlk hafta benimle eşli çalışabilir, indeks işini birlikte yaparız."),
      ("Ayşe Demir", "Çok iyi. Ahmet, veritabanı yetkisinin takibini sen yapar mısın?"),
      ("Ahmet Yılmaz", "Yaparım, yarın güvenlik ekibine hatırlatırım."),
-     ("Elif Kaya", "Ekip içi sunum için bir tarih belirleyelim mi?"),
+     ("Selin Kaya", "Ekip içi sunum için bir tarih belirleyelim mi?"),
      ("Ayşe Demir", "Gelecek salı on birde kısa bir tanışma sunumu yapalım."),
      ("Can Öztürk", "Sunumu ben hazırlarım, yarım saatlik olur."),
      ("Ayşe Demir", "Toplantıyı burada bitirelim, herkese teşekkürler.")],
@@ -831,8 +831,8 @@ def boru_hatti(R, llm_mod=None, olay=None):
         cevap = llm.toplantiya_sor("Pazarlama ekibine yeni tarihi kim iletecek?", bolum_satirlari,
                                    "Toplantı: Sentetik ekip toplantısı")
         R.yaz(f"  toplantıya soru: {time.time() - t0:.1f}s → {cevap[:200]!r}")
-        if "Elif" not in cevap:
-            R.bulgu("DUSUK", "soru-cevap beklenen kişiyi (Elif Kaya) bulamadı")
+        if "Selin" not in cevap:
+            R.bulgu("DUSUK", "soru-cevap beklenen kişiyi (Selin Kaya) bulamadı")
     except Exception as e:
         R.bulgu("YUKSEK", f"toplantıya soru HATASI: {llm.hata_metni(e)}")
     cagri_tablosu(R, olay[n0:])

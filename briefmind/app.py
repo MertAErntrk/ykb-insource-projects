@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -28,7 +29,7 @@ import not_araclari
 import outlook
 from ayar import ayar_oku, ayar_yaz
 from gorunum import QSS, RENKLER, kart, md_to_html, svg_ikon  # noqa: F401  (md_to_html: app.md_to_html uyumu)
-from isler import LlmTaniIsi, ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi
+from isler import LlmTaniIsi, ParcaIsi, SoruIsi, TamamlamaIsi, YakalamaIsi, YenidenOzetlemeIsi, hata_logla
 from motor import Motor
 from sozluk import Sozluk
 
@@ -57,6 +58,7 @@ class Pencere(QtWidgets.QMainWindow):
         self._serit_bas = None               # not uretimi ilerleme seridinin baslangic zamani
         self.tamamla = None
         self.yeniden = None
+        self._not_kilit = False              # onceki toplantinin notu uretilirken Baslat kapali (yeni toplanti eski nota baglanmasin)
         self._kur()
         self._tls_bildir()
         self._llm_tani_isi = None
@@ -447,6 +449,8 @@ class Pencere(QtWidgets.QMainWindow):
         self.a_altyazi_oto.setChecked(bool(self.ayar.get("altyazi_otomatik", True)))
         self.a_altyazi_tr = QtWidgets.QCheckBox("Altyazı bulununca konuşulan dili Türkçe yapmayı dene (Teams seçimi hatırlar)")
         self.a_altyazi_tr.setChecked(bool(self.ayar.get("altyazi_turkce", True)))
+        self.a_olcum = QtWidgets.QCheckBox("Ölçüm kaydı (PoC): klipleri ve altyazı okumalarını yerel klasöre kaydet")
+        self.a_olcum.setChecked(bool(self.ayar.get("olcum_kaydi", False)))
         self.a_sablon = QtWidgets.QComboBox()
         for anahtar, (etiket, _) in llm.SABLONLAR.items():
             self.a_sablon.addItem(etiket, anahtar)
@@ -469,6 +473,7 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow("Ben", self.a_ben)
         f.addRow(self.a_altyazi_oto)
         f.addRow(self.a_altyazi_tr)
+        f.addRow(self.a_olcum)
         f.addRow(b_test)
         f.addRow(QtWidgets.QLabel("— LLM —", objectName="alt_bilgi"))
         f.addRow("LLM adresi", self.a_route)
@@ -699,6 +704,9 @@ class Pencere(QtWidgets.QMainWindow):
     def baslat(self):
         if self.is_ and self.is_.isRunning():
             return
+        if self._not_kilit:
+            self.log("Önceki toplantının notu üretiliyor; bitince yeni toplantı başlatılabilir.")
+            return
         if self.toplanti_secici.count() == 0 and not self.toplanti_secici.currentText().strip():
             self.toplantilari_yenile()
         yazili = self.toplanti_secici.currentText().strip()
@@ -737,6 +745,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.ayar["ben"] = self.a_ben.text().strip() or outlook.kullanici_adi()
         self.ayar["altyazi_otomatik"] = self.a_altyazi_oto.isChecked()
         self.ayar["altyazi_turkce"] = self.a_altyazi_tr.isChecked()
+        self.ayar["olcum_kaydi"] = self.a_olcum.isChecked()
         self.k_kaynak.deger.setText({"altyazi": "Altyazı", "ses": "Ses (Whisper)",
                                      "ikisi": "Ses + Altyazı"}[self.ayar["kaynak"]])
         self.baslangic = None            # altyazi/ses bulununca baslar
@@ -747,6 +756,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.is_.olay.connect(self.olay)
         self.is_.durum.connect(lambda m: self._durum_ayarla(m, "#EA580C" if "bekleniyor" in m.lower() or "görünmüyor" in m.lower() else "#14B8A6"))
         self.is_.inceleme_hazir.connect(self.inceleme_hazir)
+        self.is_.hata.connect(self.yakalama_hatasi)
         self.is_.start()
         QtCore.QTimer.singleShot(1500, lambda: setattr(self, "motor", getattr(self.is_, "motor", None)))
         self._ana_stil("Bitir", "tehlike")
@@ -759,6 +769,13 @@ class Pencere(QtWidgets.QMainWindow):
             self.b_ana.setEnabled(False)
             self._durum_ayarla("Bitiriliyor…", "#EA580C")
             self.ilerleme.show()
+
+    def yakalama_hatasi(self, mesaj):
+        """YakalamaIsi hata sinyali (ana thread). Motor.bitir + inceleme_hazir ayrica her yolda gelir."""
+        self.log(f"✖ {mesaj}")
+        self._durum_ayarla("Yakalama hatası", "#DC2626")
+        QtCore.QTimer.singleShot(0, lambda: QtWidgets.QMessageBox.warning(
+            self, "Yakalama hatası", mesaj[-800:] + "\n\nToplantı kaydı diskte kaldı; sürüyorsa not üretilecek."))
 
     def _satir_html(self, v):
         r = self._renk(v["speaker"])
@@ -876,6 +893,12 @@ class Pencere(QtWidgets.QMainWindow):
             otomatik = self.a_otomatik_not.isChecked()
         if kaynak == "canli":
             self.motor = self.is_.motor if self.is_ else self.motor
+            if self.motor is None:                    # yakalama motor kurulamadan coktu: sifirla, tekrar denenebilsin
+                self.ilerleme.hide()
+                self.b_ana.setEnabled(True)
+                self._ana_stil("Başlat", "birincil")
+                self._durum_ayarla("Yakalama başlatılamadı", "#DC2626")
+                return
         mevcut = {int(self.tablo.item(r, 0).text()) for r in range(self.tablo.rowCount())}
         for o in oneriler:
             if o["id"] not in mevcut:
@@ -985,13 +1008,34 @@ class Pencere(QtWidgets.QMainWindow):
         self.motor.sablon = self.ayar.get("not_sablonu", "genel")
         if not self.motor.ben:
             self.motor.ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
+        self._not_kilit = True                        # not hazir/hata/thread sonu gelene kadar Baslat kapali
+        if not self._yakalama_suruyor():              # canli toplantida 'Bitir' acik kalir
+            self.b_ana.setEnabled(False)
         self.tamamla = TamamlamaIsi(self.motor, kararlar)
         self.tamamla.olay.connect(self.olay)
         self.tamamla.bitti.connect(self.not_hazir)
         self.tamamla.hata.connect(self.not_hata)
+        self.tamamla.finished.connect(self._tamamla_sonlandi)
         self.tamamla.start()
 
+    def _yakalama_suruyor(self):
+        return bool(self.is_ and self.is_.isRunning())
+
+    def _not_kilidi_ac(self):
+        self._not_kilit = False
+        self.b_ana.setEnabled(True)
+
+    def _tamamla_sonlandi(self):
+        """Is parcacigi bitti; bitti/hata sinyali gelmeden olduyse (beklenmeyen) kilit yine de acilir."""
+        if self._not_kilit:
+            self._not_kilidi_ac()
+            self.ilerleme.hide()
+            self._serit_bitir()
+            self.b_uygula.setEnabled(self.motor is not None)    # not yeniden denenebilsin
+            self._durum_ayarla("Not üretilemedi", "#DC2626")
+
     def not_hata(self, mesaj):
+        self._not_kilidi_ac()
         self.ilerleme.hide()
         self._serit_bitir()
         self.b_uygula.setEnabled(self.motor is not None)
@@ -1001,6 +1045,7 @@ class Pencere(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.warning(self, "Not üretilemedi", mesaj[-800:])
 
     def not_hazir(self, md):
+        self._not_kilidi_ac()
         self.not_md = md
         self.not_goster.setHtml(md_to_html(md))
         self._not_gorunumu()
@@ -1304,7 +1349,13 @@ class Pencere(QtWidgets.QMainWindow):
         self.parca_isi = ParcaIsi(self.motor, no)
         self.parca_isi.olay.connect(self.olay)
         self.parca_isi.bitti.connect(self._parca_bitti)
+        self.parca_isi.hata.connect(self._parca_hata)
         self.parca_isi.start()
+
+    def _parca_hata(self, mesaj):
+        self.ilerleme.hide()
+        self._durum_ayarla("Parça özetlenemedi", "#DC2626")
+        QtWidgets.QMessageBox.warning(self, "Parça özetlenemedi", mesaj[-800:])
 
     def _parca_bitti(self, no):
         self.ilerleme.hide()
@@ -1358,6 +1409,7 @@ class Pencere(QtWidgets.QMainWindow):
                           "mikrofon_modu": "otomatik", "ben": self.a_ben.text().strip(),
                           "altyazi_otomatik": self.a_altyazi_oto.isChecked(),
                           "altyazi_turkce": self.a_altyazi_tr.isChecked(),
+                          "olcum_kaydi": self.a_olcum.isChecked(),
                           "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value(),
                           "otomatik_not": self.a_otomatik_not.isChecked()})
         ayar_yaz(self.ayar)
@@ -1651,18 +1703,73 @@ class Pencere(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
 def _hata_kaydet(tb):
-    with open("hata.log", "a", encoding="utf-8") as f:
-        f.write(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====\n{tb}")
+    hata_logla(tb)
+
+
+def _hata_kutusu(baslik, tb):
+    """Hata penceresi. YALNIZ ana thread'de cagrilir (Qt sinyal koprusu ya da ana thread'in kendi hatasi)."""
+    try:
+        QtWidgets.QMessageBox.critical(None, baslik, tb[-1500:])
+    except Exception:
+        pass
+
+
+class HataKoprusu(QtCore.QObject):
+    """Is parcacigi hatalari -> ana thread. Sinyal kuyruklu baglanir: slot her zaman bu nesnenin
+    (ana thread'de yaratilan) thread'inde calisir, QMessageBox hicbir zaman worker thread'de acilmaz."""
+    hata = QtCore.pyqtSignal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.hata.connect(self._goster, QtCore.Qt.QueuedConnection)
+
+    @QtCore.pyqtSlot(str, str)
+    def _goster(self, baslik, tb):
+        _hata_kutusu(baslik, tb)
+
+
+_KOPRU = None
+_ANA_THREAD = threading.current_thread()
+
+
+def hata_koprusu_kur():
+    """Ana thread'de bir kez cagrilir (QApplication'dan sonra); koprunun ana thread'e ait olmasi gerekir."""
+    global _KOPRU, _ANA_THREAD
+    _ANA_THREAD = threading.current_thread()
+    if _KOPRU is None:
+        _KOPRU = HataKoprusu()
+    return _KOPRU
+
+
+def _hata_bildir(baslik, tb):
+    """Log hata.log'a zaten yazildi. Ana thread'deysek dogrudan, degilse Qt sinyaliyle ana thread'e."""
+    if _KOPRU is not None:
+        _KOPRU.hata.emit(baslik, tb)
+    elif threading.current_thread() is _ANA_THREAD:
+        _hata_kutusu(baslik, tb)
 
 
 def _excepthook(tip, deger, tb_obj):
     import traceback
     tb = "".join(traceback.format_exception(tip, deger, tb_obj))
     _hata_kaydet(tb)
-    try:
-        QtWidgets.QMessageBox.critical(None, "BriefMind — hata", tb[-1500:])
-    except Exception:
-        pass
+    _hata_bildir("BriefMind — hata", tb)
+
+
+def _thread_excepthook(args):
+    """threading.excepthook (Python 3.8+): worker thread'de yakalanmayan istisna. Gunluk + ana thread'e sinyal."""
+    if args.exc_type is SystemExit:
+        return
+    import traceback
+    ad = getattr(args.thread, "name", "?")
+    tb = f"[thread {ad}]\n" + "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+    _hata_kaydet(tb)
+    _hata_bildir("BriefMind — arka plan hatası", tb)
+
+
+def hata_kancalari_kur():
+    sys.excepthook = _excepthook               # Qt slot'larindaki hatalar uygulamayi sessizce kapatmasin
+    threading.excepthook = _thread_excepthook  # worker thread hatalari: hata.log + ana thread'e sinyal
 
 
 def uygulama_klasoru():
@@ -1685,10 +1792,11 @@ def logo_ikonu():
 
 
 def main():
-    sys.excepthook = _excepthook               # Qt slot'larindaki hatalar uygulamayi sessizce kapatmasin
+    hata_kancalari_kur()
     os.chdir(uygulama_klasoru())                # config.json, sozluk.json, toplantilar/ hep bu klasorde
     try:
         app = QtWidgets.QApplication(sys.argv)
+        hata_koprusu_kur()                      # QApplication'dan sonra, ana thread'de
         app.setQuitOnLastWindowClosed(False)
         ikon = logo_ikonu()
         if ikon:

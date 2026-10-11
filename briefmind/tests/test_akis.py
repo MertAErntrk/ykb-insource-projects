@@ -11,7 +11,7 @@ import llm
 import motor as motor_mod
 from sozluk import Sozluk
 
-PARCA_OZETI = {"ozet": "Elif MVP prototipini ve test ortamını anlattı.", "konular": ["MVP prototipi"],
+PARCA_OZETI = {"ozet": "Selin MVP prototipini ve test ortamını anlattı.", "konular": ["MVP prototipi"],
                "kararlar": ["Pilot çağrı merkeziyle başlayacak"],
                "aksiyonlar": [{"madde": "MVP prototipini hazırlamak", "sorumlu": "belirsiz", "tarih": "-"}],
                "acik_sorular": [], "belirsiz_terimler": []}
@@ -47,10 +47,10 @@ def _toplanti(tmp_path, parca=3, ozetli=True, not_md=None, olay=None):
     k = tmp_path / "toplantilar" / "2026-09-23_strateji"
     (k / "parcalar").mkdir(parents=True)
     (k / "meta.json").write_text(json.dumps({"baslik": "Strateji", "tarih": "2026-09-23", "durum": "devam",
-                                             "katilimcilar": ["Elif Bala", "Cemil Kahveci"], "parca": parca,
+                                             "katilimcilar": ["Selin Kara", "Kemal Tuncer"], "parca": parca,
                                              "kaynak": "ses"}), encoding="utf-8")
     for no in range(1, parca + 1):
-        satirlar = [{"id": no, "ts": f"10:0{no}:00", "speaker": "Elif Bala",
+        satirlar = [{"id": no, "ts": f"10:0{no}:00", "speaker": "Selin Kara",
                      "text": f"MVP prototipini ben hazırlarım, komplo tit sonrası test ortamı {no}"}]
         (k / "parcalar" / f"parca_{no:03d}.json").write_text(json.dumps(
             {"sira": no, "neden": "token", "token": 100, "baslangic": satirlar[0]["ts"], "bitis": satirlar[0]["ts"],
@@ -61,7 +61,7 @@ def _toplanti(tmp_path, parca=3, ozetli=True, not_md=None, olay=None):
     olaylar = []
     m = motor_mod.Motor.yukle(str(k), Sozluk(str(tmp_path / "sozluk.json")),
                               olay=olay or (lambda t, v: olaylar.append((t, v))), duzelt=False,
-                              ben="Mert Ali Erentürk")
+                              ben="Deniz Can Öztürk")
     return m, k, olaylar
 
 
@@ -98,8 +98,8 @@ def test_notu_uret_adim_olaylari_ve_sorumlu_dogrulama(tmp_path, monkeypatch):
     assert adimlar == ["Kararlar ve aksiyonlar birleştiriliyor", "Özet paragrafı yazılıyor", "Dayanak kontrolü",
                        "Not kaydediliyor"]
     assert all(set(v) == {"metin", "no", "toplam"} for t, v in olaylar if t == "adim")
-    # K8: 'belirsiz' aksiyonun kaynak satirinda Elif 'ben hazirlarim' diyor -> sorumlu Elif Bala
-    assert "| MVP prototipini hazırlamak | Elif Bala |" in md
+    # K8: 'belirsiz' aksiyonun kaynak satirinda Selin 'ben hazirlarim' diyor -> sorumlu Selin Kara
+    assert "| MVP prototipini hazırlamak | Selin Kara |" in md
     assert json.loads((k / "meta.json").read_text(encoding="utf-8"))["durum"] == "tamam"
 
 

@@ -8,15 +8,15 @@ import motor as motor_mod
 import not_araclari
 
 SATIRLAR = [
-    {"ts": "10:02:00", "speaker": "Elif Bala", "text": "MVP prototipini ben hazırlarım, edite edilebilir olsun"},
-    {"ts": "10:05:30", "speaker": "Berk Nacar", "text": "Ara tabloyu Excel olarak bana iletin, Mert Ali ile incelerim"},
-    {"ts": "10:09:10", "speaker": "Cemil Kahveci", "text": "Follow-up toplantılarını 2-3 haftada bir yapalım"},
+    {"ts": "10:02:00", "speaker": "Selin Kara", "text": "MVP prototipini ben hazırlarım, edite edilebilir olsun"},
+    {"ts": "10:05:30", "speaker": "Emre Sancak", "text": "Ara tabloyu Excel olarak bana iletin, Deniz Can ile incelerim"},
+    {"ts": "10:09:10", "speaker": "Kemal Tuncer", "text": "Follow-up toplantılarını 2-3 haftada bir yapalım"},
 ]
 LISTELER = {"kararlar": ["Follow-up toplantıları 2-3 haftada bir yapılacak"],
-            "aksiyonlar": [{"madde": "Edite edilebilir MVP prototipi hazırlamak", "sorumlu": "Elif Bala", "tarih": "-"},
-                           {"madde": "Ara tabloyu Excel olarak incelemek", "sorumlu": "Berk Nacar, Mert Ali Erentürk",
+            "aksiyonlar": [{"madde": "Edite edilebilir MVP prototipi hazırlamak", "sorumlu": "Selin Kara", "tarih": "-"},
+                           {"madde": "Ara tabloyu Excel olarak incelemek", "sorumlu": "Emre Sancak, Deniz Can Öztürk",
                             "tarih": "-"},
-                           {"madde": "Örnekleri hazırlamak", "sorumlu": "Elif Bala", "tarih": "-"},
+                           {"madde": "Örnekleri hazırlamak", "sorumlu": "Selin Kara", "tarih": "-"},
                            {"madde": "Kayıtları iletmek", "sorumlu": "belirsiz", "tarih": "-"}],
             "acik_sorular": []}
 
@@ -35,16 +35,16 @@ def _klasor(tmp_path, durum="tamam", tarih="2026-06-01"):
 
 def test_kaynak_bulucu_ve_not_markdown():
     bul = motor_mod.kaynak_bulucu(SATIRLAR)
-    assert bul("Edite edilebilir MVP prototipi hazırlamak", "Elif Bala") == "10:02:00"
+    assert bul("Edite edilebilir MVP prototipi hazırlamak", "Selin Kara") == "10:02:00"
     assert bul("Follow-up toplantıları 2-3 haftada bir yapılacak") == "10:09:10"
     assert bul("Bütçe onayı alınacak") is None
     md = llm.not_markdown({"ozet": "Özet paragrafı burada.", "sonraki_adim": "-"}, LISTELER, bul)
     assert "- Follow-up toplantıları 2-3 haftada bir yapılacak ⏱10:09:10" in md
     assert "| # | Madde | Sorumlu | Tarih | Kaynak |" in md and "| ⏱10:02:00 |" in md
     assert "## Kişiye göre iş listesi" in md
-    assert "- Elif Bala (2): Edite edilebilir MVP prototipi hazırlamak; Örnekleri hazırlamak" in md
-    assert "- Mert Ali Erentürk (1): Ara tabloyu Excel olarak incelemek" in md
-    assert md.index("- belirsiz (1)") > md.index("- Elif Bala")          # belirsiz en sonda
+    assert "- Selin Kara (2): Edite edilebilir MVP prototipi hazırlamak; Örnekleri hazırlamak" in md
+    assert "- Deniz Can Öztürk (1): Ara tabloyu Excel olarak incelemek" in md
+    assert md.index("- belirsiz (1)") > md.index("- Selin Kara")          # belirsiz en sonda
     # dayanak kontrolu kisi listesini ve kaynak isaretlerini bozmaz
     yeni, atilan = motor_mod.dayanak_kontrolu("# T\n\n" + md, " ".join(s["text"] for s in SATIRLAR))
     assert "## Kişiye göre iş listesi" in yeni and "⏱10:09:10" in yeni
@@ -68,15 +68,15 @@ def test_sablon_talimati_baglama_eklenir(monkeypatch):
 def test_arama_ana_git_aksiyon_ayikla_eposta_word(tmp_path):
     k = _klasor(tmp_path)
     sonuc = not_araclari.ara("excel ILETIN", kok=str(tmp_path / "toplantilar"))
-    assert len(sonuc) == 1 and sonuc[0]["kim"] == "Berk Nacar" and sonuc[0]["ts"] == "10:05:30"
+    assert len(sonuc) == 1 and sonuc[0]["kim"] == "Emre Sancak" and sonuc[0]["ts"] == "10:05:30"
     pencere = not_araclari.ana_git(str(k), "10:05:30", pencere_sn=120)
     assert [x[0] for x in pencere] == ["10:05:30"] or any(x[3] and x[0] == "10:05:30" for x in pencere)
     md = llm.not_markdown({"ozet": "Özet.", "sonraki_adim": "-"}, LISTELER, motor_mod.kaynak_bulucu(SATIRLAR))
     aks = not_araclari.aksiyonlari_ayikla(md)
-    assert len(aks) == 4 and aks[0]["sorumlu"] == "Elif Bala" and aks[0]["kaynak"] == "⏱10:02:00"
+    assert len(aks) == 4 and aks[0]["sorumlu"] == "Selin Kara" and aks[0]["kaynak"] == "⏱10:02:00"
     epostalar = not_araclari.kisiye_ozel_epostalar(md, "Strateji", "2026-09-23")
     adlar = [e[0] for e in epostalar]
-    assert adlar[0] == "Elif Bala" and "belirsiz" not in adlar and "Mert Ali Erentürk" in adlar
+    assert adlar[0] == "Selin Kara" and "belirsiz" not in adlar and "Deniz Can Öztürk" in adlar
     assert "Örnekleri hazırlamak" in epostalar[0][2] and "Kayıtları iletmek" not in epostalar[0][2]
     yol = not_araclari.word_kaydet("# T\n\n" + md, str(tmp_path / "n.docx"))
     import docx
@@ -115,14 +115,14 @@ def test_toplantiya_soru_ilgili_bolumu_secer(monkeypatch):
 
     def sahte(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
         goren["icerik"] = mesajlar[1]["content"]
-        return "Elif Bala hazırlayacak ⏱10:02:00", "stop"
+        return "Selin Kara hazırlayacak ⏱10:02:00", "stop"
 
     monkeypatch.setattr(llm, "sor", sahte)
     monkeypatch.setattr(llm, "token_say", llm.token_tahmin)
     monkeypatch.setattr(llm, "BAGLAM_PENCERESI", 2600)                    # tek bolum sigacak kadar dar
     bolumler = [("09:00–09:10", "[09:01:00] Ali: Bütçe konuşuldu. " * 40),
-                ("10:00–10:10", "[10:02:00] Elif Bala: MVP prototipini ben hazırlarım"),
+                ("10:00–10:10", "[10:02:00] Selin Kara: MVP prototipini ben hazırlarım"),
                 ("11:00–11:10", "[11:01:00] Ayşe: Kampanya takvimi. " * 40)]
     cevap = llm.toplantiya_sor("MVP prototipini kim hazırlayacak?", bolumler, "Toplantı: x")
-    assert "Elif Bala" in cevap and "MVP prototipini" in goren["icerik"]
+    assert "Selin Kara" in cevap and "MVP prototipini" in goren["icerik"]
     assert "Kampanya takvimi" not in goren["icerik"]

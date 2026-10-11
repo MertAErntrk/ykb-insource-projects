@@ -5,6 +5,7 @@ import contextlib
 import datetime as dt
 import os
 import time
+import traceback
 
 from PyQt5 import QtCore
 
@@ -21,11 +22,22 @@ except Exception:                       # Windows disi ortamda import edilemez
     _UIA_THREAD = None
 
 
+def hata_logla(tb):
+    """Is parcacigi hatasini hata.log'a ekler (calisma klasoru); asla yeni hata uretmez."""
+    try:
+        with open("hata.log", "a", encoding="utf-8") as f:
+            f.write(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====\n{tb}")
+    except Exception:
+        pass
+
+
 class YakalamaIsi(QtCore.QThread):
-    """Toplanti boyunca calisir: altyazi -> motor. Bitince bekleyen onerileri yayar."""
+    """Toplanti boyunca calisir: altyazi -> motor. Bitince bekleyen onerileri yayar.
+    Her yolda (hata dahil) motor.bitir() bir kez cagrilir ve inceleme_hazir yayilir; hata ayrica hata sinyaliyle."""
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
     inceleme_hazir = QtCore.pyqtSignal(list)
+    hata = QtCore.pyqtSignal(str)
 
     def __init__(self, baslik, ctx, sozluk, duzelt, otobitir, ayar=None):
         super().__init__()
@@ -34,11 +46,56 @@ class YakalamaIsi(QtCore.QThread):
         self.motor = None
         self.ses_servisi = None
         self._dur = False
+        self._bitirildi = False
 
     def durdur(self):
         self._dur = True
 
     def run(self):
+        oneriler = []
+        try:
+            self._yakala()
+        except Exception as e:
+            hata_logla(traceback.format_exc())
+            self._bildir(f"Yakalama hatası: {type(e).__name__}: {e}")
+        finally:
+            oneriler = self._kapat()
+            self.inceleme_hazir.emit(oneriler)       # arayuz motoru baglar, Baslat'i acar, notu baslatir
+
+    def _bildir(self, mesaj):
+        """Hata: gunluge + hata sinyali (arayuz ana thread'de gosterir)."""
+        try:
+            self.olay.emit("log", f"✖ {mesaj}")
+            self.hata.emit(mesaj)
+        except Exception:
+            pass
+
+    def _kapat(self):
+        """Ses servisini durdurur, motor.bitir()'i EN FAZLA BIR KEZ cagirir -> oneriler (hata olursa [])."""
+        try:
+            if self.ses_servisi:
+                self.durum.emit("Ses kuyruğu boşaltılıyor…")
+                self.ses_servisi.durdur()
+        except Exception as e:
+            hata_logla(traceback.format_exc())
+            self._bildir(f"Ses servisi durdurulamadı: {type(e).__name__}: {e}")
+        if self.motor is None or self._bitirildi:
+            return []
+        self._bitirildi = True
+        try:
+            self.durum.emit("Parçalar tamamlanıyor…")
+            return self.motor.bitir() or []
+        except Exception as e:
+            hata_logla(traceback.format_exc())
+            self._bildir(f"Parçalar tamamlanamadı: {type(e).__name__}: {e}")
+            return []
+
+    def _ses_satiri(self, ts, kim, metin, akis):
+        # kulaklik durumu (True/False/None) motora her satirda aktarilir: mikrofon->baskasi yalniz False iken
+        self.motor.kulaklik = getattr(self.ses_servisi, "kulaklik", None)
+        return self.motor.ses_satiri(ts, kim, metin, akis)
+
+    def _yakala(self):
         tarih = dt.date.today()
         klasor = motor_mod.yeni_klasor(self.baslik, tarih)
         kaynak = self.ayar.get("kaynak", "altyazi")
@@ -48,6 +105,7 @@ class YakalamaIsi(QtCore.QThread):
                            kaynak=kaynak, ben=self.ayar.get("ben") or None,
                            sablon=self.ayar.get("not_sablonu", "genel"))
         self.olay.emit("log", f"Klasör: {klasor}")
+        olcum = bool(self.ayar.get("olcum_kaydi", False))
         if kaynak in ("ses", "ikisi"):
             try:
                 import ses as ses_mod
@@ -57,10 +115,12 @@ class YakalamaIsi(QtCore.QThread):
                     mod="otomatik",
                     mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
                     olay=lambda t, v: self.olay.emit(t, v),
-                    satir_fn=lambda ts, kim, metin, akis: self.motor.ses_satiri(ts, kim, metin, akis),
+                    satir_fn=self._ses_satiri,
                     model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
                     proxy=self.ayar.get("stt_proxy", True),   # false: Windows proxy'sini atla (kopmalar icin)
                     verify=ayar_mod.tls_dogrulama(self.ayar))
+                if olcum:
+                    self.ses_servisi.olcum_kaydi_ac(klasor)       # olcum/klipler/*.wav + klipler.jsonl
                 if not self.ses_servisi.baslat():
                     self.ses_servisi = None
                     self.motor.kaynak = "altyazi"
@@ -71,6 +131,12 @@ class YakalamaIsi(QtCore.QThread):
                 self.motor.kaynak = "altyazi"
                 self.olay.emit("kaynak_degisti", "altyazi")
         y = Yakalayici()
+        if olcum:
+            try:
+                y.okuma_kaydi_ac(klasor)                          # olcum/okumalar.jsonl
+                self.olay.emit("log", "Ölçüm kaydı açık: olcum/ klasörüne klip ve altyazı okumaları yazılıyor")
+            except Exception as e:
+                self.olay.emit("log", f"✖ ölçüm kaydı açılamadı: {e!r}")
         basladi = False
         cm = _UIA_THREAD() if _UIA_THREAD else contextlib.nullcontext()
         with cm:
@@ -145,11 +211,6 @@ class YakalamaIsi(QtCore.QThread):
                 ekran_okuyucu(False)
             for s in y.bitir():
                 self.motor.altyazi_satiri(s)
-        if self.ses_servisi:
-            self.durum.emit("Ses kuyruğu boşaltılıyor…")
-            self.ses_servisi.durdur()
-        self.durum.emit("Parçalar tamamlanıyor…")
-        self.inceleme_hazir.emit(self.motor.bitir())
 
 
 class TamamlamaIsi(QtCore.QThread):
@@ -171,6 +232,7 @@ class TamamlamaIsi(QtCore.QThread):
             md = self.m.notu_uret()
             self.m.kapat()
         except Exception as e:
+            hata_logla(traceback.format_exc())
             self.olay.emit("log", f"Not üretilemedi: {llm.hata_metni(e)}")
             self.hata.emit(llm.hata_metni(e))
             return
@@ -181,6 +243,7 @@ class ParcaIsi(QtCore.QThread):
     """Tek bir parcayi yeniden ozetler."""
     olay = QtCore.pyqtSignal(str, object)
     bitti = QtCore.pyqtSignal(int)
+    hata = QtCore.pyqtSignal(str)
 
     def __init__(self, m, no):
         super().__init__()
@@ -188,7 +251,13 @@ class ParcaIsi(QtCore.QThread):
 
     def run(self):
         self.m._olay = lambda t, v: self.olay.emit(t, v)
-        self.m.parca_yeniden(self.no)
+        try:
+            self.m.parca_yeniden(self.no)
+        except Exception as e:
+            hata_logla(traceback.format_exc())
+            self.olay.emit("log", f"✖ Parça {self.no} özetlenemedi: {llm.hata_metni(e)}")
+            self.hata.emit(llm.hata_metni(e))
+            return
         self.bitti.emit(self.no)
 
 

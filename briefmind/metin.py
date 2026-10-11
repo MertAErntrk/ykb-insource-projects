@@ -40,7 +40,7 @@ def tr_kucuk(s):
 
 
 def ad_geciyor(ad, metin):
-    """Kisi adi metinde kelime olarak geciyor mu? Ekli yazim ("Cemil'in", "Berk'e") de sayilir."""
+    """Kisi adi metinde kelime olarak geciyor mu? Ekli yazim ("Kemal'in", "Emre'e") de sayilir."""
     ad = (ad or "").strip()
     if len(ad) < 3:
         return False

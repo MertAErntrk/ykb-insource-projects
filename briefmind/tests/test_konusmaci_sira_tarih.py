@@ -51,7 +51,7 @@ def test_iki_isci_ters_bitirse_de_sira_korunur(monkeypatch):
 
 # ---------------------------------------------------------------- konusmaci
 
-def _motor(tmp_path, ben="Mert"):
+def _motor(tmp_path, ben="Deniz"):
     m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 29), duzelt=False, kaynak="ses", ben=ben)
     return m
 
@@ -84,13 +84,14 @@ def test_tek_kisi_konusuyorsa_zamana_gore_atar(tmp_path):
 
 def test_hoparlor_yankisi_mikrofon_satirini_konusana_yazar(tmp_path):
     m = _motor(tmp_path)
+    m.kulaklik = False                         # Faz0: yalniz kulaklik YOK diye biliniyorsa mikrofon satiri baskasina yazilir
     m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Test ortamı perşembe hazır olacak"})
     s = m.ses_satiri("10:00:02", "ben", "Test ortamı perşembe hazır olacak.", "mikrofon")
     assert s["speaker"] == "Ayşe Demir"
     # kullanicinin kendi sozu (altyazida kendi adiyla) 'ben' olarak kalir
-    m.altyazi_satiri({"ts": "10:00:10", "speaker": "Mert Ali Erentürk", "text": "Ben Jira kaydını açarım"})
+    m.altyazi_satiri({"ts": "10:00:10", "speaker": "Deniz Can Öztürk", "text": "Ben Jira kaydını açarım"})
     s2 = m.ses_satiri("10:00:11", "ben", "Ben Jira kaydını açarım.", "mikrofon")
-    assert s2["speaker"] == "Mert"
+    assert s2["speaker"] == "Deniz"
     m.kapat()
 
 

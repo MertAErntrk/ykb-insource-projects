@@ -6,6 +6,8 @@ arkada kalabilir ama simge durumuna kucultulmemeli.
 import ctypes
 import datetime as dt
 import difflib
+import json
+import os
 import re
 import time
 from collections import deque
@@ -135,6 +137,32 @@ class Yakalayici:
         self._okuma_no = 0
         self._son_adaylar = []                     # bir onceki okumanin adaylari, panel sirasiyla (bitir icin)
         self._son_gorunen = set()
+        self._okuma_yolu = None                    # olcum: okuma_kaydi_ac ile acilir (okumalar.jsonl)
+        self._okuma_sira = 0
+
+    def okuma_kaydi_ac(self, klasor):
+        """Faz 0 olcum kaydi (opt-in): her UIA panel okumasi <klasor>/olcum/okumalar.jsonl'e
+        {okuma_no, bas_epoch, bit_epoch, gorunen: [[konusmaci, metin], ...]} olarak eklenir. Yayim mantigina dokunmaz."""
+        try:
+            kok = os.path.join(klasor, "olcum")
+            os.makedirs(kok, exist_ok=True)
+            self._okuma_yolu = os.path.join(kok, "okumalar.jsonl")
+            return self._okuma_yolu
+        except Exception:
+            self._okuma_yolu = None
+            return None
+
+    def _okuma_yaz(self, bas_epoch, gorunen):
+        if not self._okuma_yolu or bas_epoch is None:
+            return
+        try:
+            self._okuma_sira += 1
+            satir = {"okuma_no": self._okuma_sira, "bas_epoch": round(bas_epoch, 3),
+                     "bit_epoch": round(time.time(), 3), "gorunen": [[k, n] for k, n in gorunen]}
+            with open(self._okuma_yolu, "a", encoding="utf-8") as f:
+                f.write(json.dumps(satir, ensure_ascii=False) + "\n")
+        except Exception:
+            self._okuma_yolu = None                # IO hatasi: kaydi kapat, okuyucu etkilenmesin
 
     def onerilen_aralik(self):
         """A7: dongunun bir sonraki okumaya kadar beklemesi. UIA agaci yuruyusu son 10 okumada ortalama
@@ -189,10 +217,12 @@ class Yakalayici:
                     return []
                 self.hazir, self.kayip_zamani = True, None
                 self.hazir_zamani = self.hazir_zamani or dt.datetime.now()
+            bas_epoch = time.time() if self._okuma_yolu else None
             gorunen = self._ciftler()
         except Exception:
             self.grup = None
             return []
+        self._okuma_yaz(bas_epoch, gorunen)
         if not gorunen:
             return []
         return self._isle(gorunen, dt.datetime.now().strftime("%H:%M:%S"))

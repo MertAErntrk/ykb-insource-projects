@@ -444,7 +444,7 @@ MAP_SISTEM = (
     "- konular: ele alınan başlıklar (kısa, 2-6 kelime).\n"
     "- kararlar: AÇIKÇA karara bağlanmış şeyler. Öneri, niyet ya da 'bakarız' düzeyindeki ifadeler karar "
     "DEĞİLDİR; onlar 'acik_sorular'a gider. Kararı vereni yalnızca gerçekten tartışmalı ya da tek kişinin "
-    "verdiği kararlarda, cümle içinde yaz ('Elif'in önerisiyle ...'); sonuna parantezle tek ad ekleme.\n"
+    "verdiği kararlarda, cümle içinde yaz ('Selin'in önerisiyle ...'); sonuna parantezle tek ad ekleme.\n"
     "- aksiyonlar: bir kişinin üstlendiği, BİTİNCE BELLİ OLAN somut işler; 'madde' alanı asla boş kalmaz. "
     "Sorumlusu belirsiz ve fiili genel ('anlamak', 'değerlendirmek', 'bakmak') olan ifadeler aksiyon değildir, "
     "'konular'a gider. Sorumlu katılımcı listesindeki yazımla, belli değilse 'belirsiz'; tarih toplantı "
@@ -1143,7 +1143,7 @@ SABLONLAR = {
 
 def kisi_bazli(aksiyonlar):
     """Aksiyonlari sorumluya gore gruplar: [(ad, [madde, ...])], en cok isi olan once, 'belirsiz' sonda.
-    'Elif Bala, Cemil Kahveci' gibi ortak sorumlu her iki kisiye de yazilir."""
+    'Selin Kara, Kemal Tuncer' gibi ortak sorumlu her iki kisiye de yazilir."""
     gruplar = {}
     for a in aksiyonlar:
         if not madde_dolu(a.get("madde")):
@@ -1197,8 +1197,8 @@ def not_markdown(genel, listeler, kaynak_fn=None):
 
 _GELECEK_FIIL = re.compile(r"[ae]c[ae]k(?:t[ıi]r|l[ae]r(?:d[ıi]r)?)?$")     # -ecek/-acak(tır), paylaşılacak...
 _SON_PARANTEZ = re.compile(r"\s*\([^()]*\)\s*\.?\s*$")
-_TEK_AD_PARANTEZ = re.compile(r"\s*\((\w+)\)\s*(\.?)\s*$")                  # "... (Elif)" / "... (Elif)."
-_ALINTI_PARANTEZ = re.compile(r"\s*\([^()]*['\"“”‘’][^()]*\)\s*\.?\s*$")   # "... (Cemil: '...')"
+_TEK_AD_PARANTEZ = re.compile(r"\s*\((\w+)\)\s*(\.?)\s*$")                  # "... (Selin)" / "... (Selin)."
+_ALINTI_PARANTEZ = re.compile(r"\s*\([^()]*['\"“”‘’][^()]*\)\s*\.?\s*$")   # "... (Kemal: '...')"
 _ANLAMA_SORUSU = ("kimdir", "hangi sistemdir", "katılımcı listesinde", "katılımcılar arasında",
                   "ne olduğu belirsiz", "ne olduğu anlaşılmadı")
 _BELIRSIZ = ("", "-", "belirsiz", "?")
@@ -1219,8 +1219,8 @@ def _gecen_adlar(metin, katilimcilar):
 def karar_aksiyon_ayikla(listeler, katilimcilar=None):
     """(a) bir aksiyona benzeyen karar (kelime koku benzerligi >= 0.6) kararlardan duser: ayni is iki yerde
     yazilmasin. (b) metninde bir katilimci adi gecen VE gelecek zaman/edilgen is fiiliyle biten karar
-    ('Girdi tablolari Cemil tarafindan paylasilacak') bir istir: aksiyonlara o kisiyle tasinir.
-    Sondaki '(Cemil onerdi, Elif onayladi)' gibi karar vereni gosteren parantez ad olarak sayilmaz."""
+    ('Girdi tablolari Kemal tarafindan paylasilacak') bir istir: aksiyonlara o kisiyle tasinir.
+    Sondaki '(Kemal onerdi, Selin onayladi)' gibi karar vereni gosteren parantez ad olarak sayilmaz."""
     aksiyonlar = [dict(a) for a in listeler.get("aksiyonlar") or []]
     kararlar = []
     for k in listeler.get("kararlar") or []:
@@ -1237,7 +1237,7 @@ def karar_aksiyon_ayikla(listeler, katilimcilar=None):
 
 
 def karar_parantez_temizle(kararlar):
-    """Karar sonundaki tek kelimelik '(Elif)' parantezi anlamsiz: kaldirilir. '(?)' belirsizlik isareti kalir."""
+    """Karar sonundaki tek kelimelik '(Selin)' parantezi anlamsiz: kaldirilir. '(?)' belirsizlik isareti kalir."""
     return [_TEK_AD_PARANTEZ.sub(r"\2", k).strip() or k for k in kararlar]
 
 

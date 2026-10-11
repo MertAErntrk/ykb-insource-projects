@@ -186,7 +186,7 @@ def konusma_paylari(satirlar):
 
 
 def konusma_payi_metni(paylar):
-    """[(ad, sn, yuzde)] -> 'Konuşma payı: Elif %38, Berk %27' (Gecmis detay paneli)."""
+    """[(ad, sn, yuzde)] -> 'Konuşma payı: Selin %38, Emre %27' (Gecmis detay paneli)."""
     if not paylar:
         return ""
     return "Konuşma payı: " + ", ".join(f"{p[0]} %{p[2]}" for p in paylar)

@@ -166,7 +166,7 @@ def kullanici_adi():
         tampon = ctypes.create_unicode_buffer(boy.value + 1)
         if ctypes.windll.secur32.GetUserNameExW(3, tampon, ctypes.byref(boy)):
             ad = tampon.value.strip()
-            if "," in ad:                                       # "Erentürk, Mert Ali" -> "Mert Ali Erentürk"
+            if "," in ad:                                       # "Öztürk, Deniz Can" -> "Deniz Can Öztürk"
                 soy, isim = [x.strip() for x in ad.split(",", 1)]
                 ad = f"{isim} {soy}"
             if ad:

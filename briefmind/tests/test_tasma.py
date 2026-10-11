@@ -170,7 +170,8 @@ def test_guncelleme_acik_parcada_yerinde_uygulanir(tmp_path):
     m.kapat()
 
 
-def test_k5_ile_eklenen_satirin_guncellemesi(tmp_path):
+def test_k5_ile_eklenen_satirin_guncellemesi(tmp_path, monkeypatch):
+    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
     m = _motor(tmp_path)
     m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın"})
     m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi B", "text": "Test ortamı perşembe hazır olacak"})
@@ -184,6 +185,7 @@ def test_k5_ile_eklenen_satirin_guncellemesi(tmp_path):
 
 
 def test_altyazi_tasmasinda_k5_askiya_alinir_whisper_etkilenmez(tmp_path, monkeypatch):
+    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
     saat = [1000.0]
     monkeypatch.setattr(motor_mod.time, "time", lambda: saat[0])
     olaylar = []
@@ -205,7 +207,8 @@ def test_altyazi_tasmasinda_k5_askiya_alinir_whisper_etkilenmez(tmp_path, monkey
     m.kapat()
 
 
-def test_k5_satir_basina_ust_sinir_ve_ayni_kisiden_bir(tmp_path):
+def test_k5_satir_basina_ust_sinir_ve_ayni_kisiden_bir(tmp_path, monkeypatch):
+    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
     m = _motor(tmp_path)
     for i, kim in enumerate(["Kisi A", "Kisi A", "Kisi B", "Kisi C", "Kisi D", "Kisi E"]):
         m.altyazi_satiri({"ts": "10:00:0%d" % (i % 4), "speaker": kim,
@@ -219,7 +222,8 @@ def test_k5_satir_basina_ust_sinir_ve_ayni_kisiden_bir(tmp_path):
     m.kapat()
 
 
-def test_k5_son_2_dakikada_yazilmis_metni_eklemez(tmp_path):
+def test_k5_son_2_dakikada_yazilmis_metni_eklemez(tmp_path, monkeypatch):
+    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
     m = _motor(tmp_path)
     m.altyazi_satiri({"ts": "10:00:01", "speaker": "Kisi A", "text": "Kampanya bütçesini yarın onaylarım"})
     m.altyazi_satiri({"ts": "10:00:02", "speaker": "Kisi B", "text": "Test ortamı hazır olacak"})

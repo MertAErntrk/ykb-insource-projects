@@ -15,7 +15,7 @@ import ses
 import yakalayici
 
 
-def _motor(tmp_path, kaynak="ses", ben="Mert"):
+def _motor(tmp_path, kaynak="ses", ben="Deniz"):
     return motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date(2026, 9, 29), duzelt=False, kaynak=kaynak, ben=ben)
 
 
@@ -25,7 +25,8 @@ def _transkript(m):
 
 # ---------------------------------------------------------------- K5 ayni anda konusma
 
-def test_cakismada_diger_konusmacinin_altyazisi_eklenir_bir_kez(tmp_path):
+def test_cakismada_diger_konusmacinin_altyazisi_eklenir_bir_kez(tmp_path, monkeypatch):
+    monkeypatch.setattr(motor_mod, "K5_UST", 3)      # K5 varsayilan kapali (Faz0); bu test K5 davranisini sinar
     m = _motor(tmp_path)
     m.altyazi_satiri({"ts": "10:00:01", "speaker": "Ayşe Demir", "text": "Kampanya bütçesini yarın onaylarım"})
     m.altyazi_satiri({"ts": "10:00:02", "speaker": "Ahmet Yılmaz", "text": "Test ortamı perşembe hazır olacak"})
@@ -59,7 +60,7 @@ def test_cakisma_yok_whisper_digerinin_sozunu_de_yazmissa(tmp_path):
 
 def test_cakisma_kullanicinin_kendi_altyazisini_eklemez(tmp_path):
     m = _motor(tmp_path)
-    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Mert Ali Erentürk", "text": "Jira kaydını ben açarım"})
+    m.altyazi_satiri({"ts": "10:00:01", "speaker": "Deniz Can Öztürk", "text": "Jira kaydını ben açarım"})
     m.altyazi_satiri({"ts": "10:00:02", "speaker": "Ahmet Yılmaz", "text": "Test ortamı hazır olacak"})
     m.ses_satiri("10:00:02", None, "Test ortamı hazır olacak.", "loopback")
     assert [x[1] for x in _transkript(m)] == ["ses"]        # kullanicinin sozu mikrofon akisindan gelir
@@ -232,15 +233,15 @@ def test_llm_bozuk_sertifika_uygulamayi_dusurmez(tmp_path):
 
 def test_konusma_paylari():
     satirlar = [
-        {"ts": "10:00:00", "speaker": "Elif Bala", "text": "Başlayalım"},
-        {"ts": "10:00:10", "speaker": "Berk Nacar", "text": "Tamam"},
-        {"ts": "10:00:15", "speaker": "Elif Bala", "text": "Bir"},
-        {"ts": "10:01:15", "speaker": "Cemil Kahveci", "text": "Mola sonrası devam edelim mi"},  # 60 sn -> 15 tavan
-        {"ts": "10:01:20", "speaker": "Berk Nacar", "text": "bir iki üç dört beş"},             # son satir: 5/2.5
+        {"ts": "10:00:00", "speaker": "Selin Kara", "text": "Başlayalım"},
+        {"ts": "10:00:10", "speaker": "Emre Sancak", "text": "Tamam"},
+        {"ts": "10:00:15", "speaker": "Selin Kara", "text": "Bir"},
+        {"ts": "10:01:15", "speaker": "Kemal Tuncer", "text": "Mola sonrası devam edelim mi"},  # 60 sn -> 15 tavan
+        {"ts": "10:01:20", "speaker": "Emre Sancak", "text": "bir iki üç dört beş"},             # son satir: 5/2.5
     ]
     p = not_araclari.konusma_paylari(satirlar)
-    assert p == [("Elif Bala", 25.0, 68), ("Berk Nacar", 7.0, 19), ("Cemil Kahveci", 5.0, 14)]
-    assert not_araclari.konusma_payi_metni(p) == "Konuşma payı: Elif Bala %68, Berk Nacar %19, Cemil Kahveci %14"
+    assert p == [("Selin Kara", 25.0, 68), ("Emre Sancak", 7.0, 19), ("Kemal Tuncer", 5.0, 14)]
+    assert not_araclari.konusma_payi_metni(p) == "Konuşma payı: Selin Kara %68, Emre Sancak %19, Kemal Tuncer %14"
     assert not_araclari.konusma_paylari([]) == [] and not_araclari.konusma_payi_metni([]) == ""
 
 
@@ -248,15 +249,15 @@ def test_konusma_paylari_meta_json_a_yazilir(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "bolum_ozetle", lambda *a, **k: {"ozet": "MVP konuşuldu.", "konular": [],
                                                               "kararlar": [], "aksiyonlar": []})
     m = _motor(tmp_path, kaynak="altyazi")
-    m.satir_ekle({"ts": "10:00:00", "speaker": "Elif Bala", "text": "MVP prototipini ben hazırlarım"})
-    m.satir_ekle({"ts": "10:00:10", "speaker": "Berk Nacar", "text": "Test ortamı hazır olacak"})
+    m.satir_ekle({"ts": "10:00:00", "speaker": "Selin Kara", "text": "MVP prototipini ben hazırlarım"})
+    m.satir_ekle({"ts": "10:00:10", "speaker": "Emre Sancak", "text": "Test ortamı hazır olacak"})
     m.parca_kapat("test")
     import concurrent.futures as cf
     cf.wait(m.isler)
     monkeypatch.setattr(llm, "birlestir", lambda *a, **k: "## Özet\nMVP konuşuldu.\n")
     not_md = m.notu_uret()
     meta = json.loads((tmp_path / "t" / "meta.json").read_text(encoding="utf-8"))
-    assert meta["durum"] == "tamam" and meta["konusma_paylari"][0][0] == "Elif Bala"
+    assert meta["durum"] == "tamam" and meta["konusma_paylari"][0][0] == "Selin Kara"
     assert "Konuşma payı" not in not_md
     m.kapat()
 
@@ -264,12 +265,12 @@ def test_konusma_paylari_meta_json_a_yazilir(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- N9 Jira/Planner CSV
 
 def test_jira_csv(tmp_path):
-    aks = [{"madde": "MVP prototipini hazırlamak", "sorumlu": "Elif Bala", "tarih": "2026-10-01 (Perşembe)",
+    aks = [{"madde": "MVP prototipini hazırlamak", "sorumlu": "Selin Kara", "tarih": "2026-10-01 (Perşembe)",
             "kaynak": "⏱10:02:00"},
-           {"madde": "Ara tabloyu incelemek", "sorumlu": "Berk Nacar, Mert Ali Erentürk", "tarih": "sprint sonu",
+           {"madde": "Ara tabloyu incelemek", "sorumlu": "Emre Sancak, Deniz Can Öztürk", "tarih": "sprint sonu",
             "kaynak": ""},
            {"madde": "Kayıtları iletmek", "sorumlu": "belirsiz", "tarih": "-", "kaynak": ""},
-           {"madde": "-", "sorumlu": "Elif Bala", "tarih": "-", "kaynak": ""}]
+           {"madde": "-", "sorumlu": "Selin Kara", "tarih": "-", "kaynak": ""}]
     yol = tmp_path / "aksiyonlar.csv"
     assert not_araclari.jira_csv(aks, str(yol), "Strateji (2026-09-23)") == 3
     ham = yol.read_bytes()
@@ -277,8 +278,8 @@ def test_jira_csv(tmp_path):
     with open(yol, encoding="utf-8-sig", newline="") as f:
         satirlar = list(csv.reader(f))
     assert satirlar[0] == ["Summary", "Assignee", "Due Date", "Description", "Issue Type"]
-    assert satirlar[1] == ["MVP prototipini hazırlamak", "Elif Bala", "2026-10-01",
+    assert satirlar[1] == ["MVP prototipini hazırlamak", "Selin Kara", "2026-10-01",
                            "BriefMind — Strateji (2026-09-23) · kaynak 10:02:00", "Task"]
-    assert satirlar[2][1:3] == ["Berk Nacar", ""]
-    assert "sorumlular: Berk Nacar, Mert Ali Erentürk" in satirlar[2][3]
+    assert satirlar[2][1:3] == ["Emre Sancak", ""]
+    assert "sorumlular: Emre Sancak, Deniz Can Öztürk" in satirlar[2][3]
     assert satirlar[3][:3] == ["Kayıtları iletmek", "", ""] and satirlar[3][4] == "Task"

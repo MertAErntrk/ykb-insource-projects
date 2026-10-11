@@ -313,9 +313,9 @@ def test_dar_pencerede_soru_dusunmesiz_ve_buyukte_ust_sinirli(monkeypatch):
 
     def sahte(mesajlar, max_tokens, sema=None, effort="medium", temperature=0.6, dusunme=True):
         cagrilar.append((max_tokens, dusunme, len(mesajlar[1]["content"])))
-        return "Elif ⏱10:00:00", "stop"
+        return "Selin ⏱10:00:00", "stop"
     monkeypatch.setattr(llm, "sor", sahte)
-    bolumler = [(f"{i}", f"[10:00:00] Elif: Bütçe {i}. " * 2000) for i in range(30)]   # ~16k token/bolum
+    bolumler = [(f"{i}", f"[10:00:00] Selin: Bütçe {i}. " * 2000) for i in range(30)]   # ~16k token/bolum
     monkeypatch.setattr(llm, "BAGLAM_PENCERESI", 8192)
     llm.toplantiya_sor("Bütçe?", bolumler, "Toplantı: x")
     assert cagrilar[-1][:2] == (1500, False) and len(cagrilar) == 1
@@ -386,14 +386,14 @@ def _sahte_boru_hatti_sor(mesajlar, max_tokens, sema=None, effort="medium", temp
     if gorev in ("bolum", "liste"):
         return json.dumps({"ozet": "Ekip rapor ekranındaki gecikmeyi ve kampanya takvimini konuştu.",
                            "konular": ["Rapor gecikmesi"], "kararlar": ["Kampanya bir hafta ertelendi"],
-                           "aksiyonlar": [{"madde": "Pazarlama ekibine yeni tarihi iletmek", "sorumlu": "Elif Kaya",
+                           "aksiyonlar": [{"madde": "Pazarlama ekibine yeni tarihi iletmek", "sorumlu": "Selin Kaya",
                                            "tarih": "-"}],
                            "acik_sorular": [], "belirsiz_terimler": []}, ensure_ascii=False), "stop"
     if gorev == "genel":
         return json.dumps({"ozet": "Toplantıda rapor ekranındaki gecikme, kampanya takvimi ve oryantasyon "
                                    "konuşuldu; kampanyanın bir hafta ertelenmesine karar verildi.",
-                           "sonraki_adim": "Elif Kaya yeni tarihi iletecek."}, ensure_ascii=False), "stop"
-    return "Pazarlama ekibine yeni tarihi Elif Kaya iletecek ⏱10:05:40", "stop"
+                           "sonraki_adim": "Selin Kaya yeni tarihi iletecek."}, ensure_ascii=False), "stop"
+    return "Pazarlama ekibine yeni tarihi Selin Kaya iletecek ⏱10:05:40", "stop"
 
 
 def test_teshis_boru_hatti_sahte_llm_ile(monkeypatch):
@@ -401,7 +401,7 @@ def test_teshis_boru_hatti_sahte_llm_ile(monkeypatch):
     R = llm_teshis.Rapor(yaz_fn=lambda s: None)
     not_md = llm_teshis.boru_hatti(R, llm, [])
     assert "## Kararlar" in not_md and "Kampanya bir hafta ertelendi" in not_md
-    assert "Elif Kaya" in not_md
+    assert "Selin Kaya" in not_md
     assert not [b for b in R.bulgular if b[0] == "YUKSEK"]
 
 

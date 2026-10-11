@@ -31,7 +31,7 @@ def sozluk_istemi():
         with open("sozluk.json", encoding="utf-8") as f:
             v = json.load(f)
         terimler = v.get("terimler", [])
-    kisiler = ["Mert Ali Erentürk"]                    # istersen toplanti katilimcilarini ekle
+    kisiler = ["Deniz Can Öztürk"]                    # istersen toplanti katilimcilarini ekle
     return "Toplantı notları. Geçen terimler: " + ", ".join(terimler[:40] + kisiler) + "."
 
 

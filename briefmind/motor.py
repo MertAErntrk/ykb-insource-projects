@@ -44,7 +44,7 @@ AYNI_SOZ = 0.45                 # Whisper cumlesi ile altyazi satiri ayni sozu t
 # Altyazi tasmasina karsi guvenlik agi (2026-09-30: panel her okumada yeniden yayiliyordu, bkz. GELISTIRME_PLANI 13)
 TASMA_SATIR_DK = 150            # son 60 sn'de bundan fazla altyazi satiri: tasma, K5/A6 eklemeleri askiya alinir
 TASMA_ASKI_SN = 60              # ... son asiri hizli satirdan sonra bu kadar sure
-K5_UST = 3                      # K5: Whisper satiri basina en fazla bu kadar altyazi satiri eklenir
+K5_UST = 0                      # K5: Whisper satiri basina en fazla bu kadar altyazi satiri eklenir (0: K5 kapali, varsayilan)
 TEKRAR_SN = 120                 # K5/A6: son 2 dk'da transkripte girmis bir satirla birebir ayni metin eklenmez
 # Bozuk (tasmis) kaydin algisi ve temizligi (transkript_temizle, tasma_var_mi)
 TASMA_ALGI_DK = 120             # dakikada bundan fazla satir
@@ -194,6 +194,7 @@ class Motor:
         self.seri = slug(baslik)             # toplanti serisi (sozluk kapsami, baglam ayirimi)
         self.kaynak = kaynak                 # altyazi | ses | ikisi
         self.ben = ben                       # mikrofon akisinin sahibi (kullanicinin adi)
+        self.kulaklik = None                 # True: kulaklik var | False: yok (hoparlor, eko) | None: bilinmiyor
         # altyazidan: {"ts", "speaker", "text", "kullanildi", "son"}. kullanildi: None | "ses" (bir Whisper
         # satiri bu sozu yazdi) | "altyazi" (altyazi metni transkripte girdi: K5 cakisma ya da A6 zaman asimi).
         # son: 'ikisi' modunda Whisper karsiliginin beklendigi son an (A6), digerlerinde None.
@@ -409,6 +410,8 @@ class Motor:
         """K5: Whisper satiri `kim`e yazildi; ±CAKISMA_SN icinde BASKA bir konusmacinin henuz kullanilmamis
         altyazi satiri var ve kelime koklerinin en fazla %30'u bu (ve civardaki) Whisper metninde geciyorsa
         Whisper o kisinin sozunu yazmamis demektir (iki kisi ayni anda konustu, baskin ses yazildi)."""
+        if K5_UST <= 0:
+            return []                       # K5 kapali (varsayilan): altyazi metni transkripte hic girmez
         if self._askida():
             return []                       # altyazi tasmasi: eklemeler askida
         hedef = _sn(ts)
@@ -436,10 +439,10 @@ class Motor:
             if any(k == g["speaker"] and abs(t - gs) <= CAKISMA_SN for k, t in self._k5_eklenen) or \
                     any(x["speaker"] == g["speaker"] for x in sonuc):
                 continue
+            if len(sonuc) >= K5_UST:
+                break                       # sinir EKLEMEDEN ONCE denetlenir
             sonuc.append(g)
             self._k5_eklenen.append((g["speaker"], gs))
-            if len(sonuc) >= K5_UST:
-                break
         sonuc.sort(key=lambda x: _sn(x["ts"]))
         return sonuc
 
@@ -476,9 +479,12 @@ class Motor:
             kim, benzer = (self.ben or "Ben"), None
             # Kulakliksiz (hoparlorle) calisilirken karsi tarafin sesi mikrofona da girer; eko tekillestirmesi
             # iki Whisper cikisi farkli yazinca kacirir. Altyazida bu cumleyi baskasi soylediyse ona yaz.
-            alt_kim, alt_benzer = self._konusmaci_bul(ts, metin, puanla=True)
-            if alt_kim and (alt_benzer or 0) >= 0.6 and not self._ben_mi(alt_kim):
-                kim = alt_kim
+            # Yalniz kulaklik YOK diye biliniyorsa (self.kulaklik is False); kulaklikli/bilinmeyen durumda
+            # mikrofon satiri kullanicinin kendisidir ("ben").
+            if self.kulaklik is False:
+                alt_kim, alt_benzer = self._konusmaci_bul(ts, metin, puanla=True)
+                if alt_kim and (alt_benzer or 0) >= 0.6 and not self._ben_mi(alt_kim):
+                    kim = alt_kim
         else:
             kim, benzer = self._konusmaci_bul(ts, metin, puanla=True)
             if benzer is not None:
@@ -525,7 +531,7 @@ class Motor:
         return yeni
 
     def _ben_mi(self, ad):
-        """Altyazidaki ad uygulamayi kullanan kisi mi? ('Mert' ~ 'Mert Ali Erenturk')"""
+        """Altyazidaki ad uygulamayi kullanan kisi mi? ('Deniz' ~ 'Deniz Can Ozturk')"""
         if not self.ben or not ad:
             return False
         a, b = set(normalize(self.ben).split()), set(normalize(ad).split())
@@ -534,7 +540,8 @@ class Motor:
     def _tek_konusmaci(self, ts, kim, pencere_sn=10):
         """ts cevresinde (±pencere) altyazida yalnizca `kim` mi konusuyor?"""
         hedef = _sn(ts)
-        return all(g["speaker"] == kim for g in self.konusmaci_izi if abs(hedef - _sn(g["ts"])) <= pencere_sn)
+        pencere = [g for g in self.konusmaci_izi if abs(hedef - _sn(g["ts"])) <= pencere_sn]
+        return bool(pencere) and all(g["speaker"] == kim for g in pencere)    # bos pencere: tek konusmaci DEGIL
 
     def _altyazi_kokleri(self, ts, pencere_sn=20):
         """ts cevresindeki (±pencere) altyazi satirlarinin kelime kokleri."""
@@ -983,7 +990,7 @@ _BIRINCI_TEKIL = re.compile(
 
 
 def _ayni_kisi(a, b):
-    """'Mert' ~ 'Mert Ali Erenturk': ilk ad ayniysa ayni kisi."""
+    """'Deniz' ~ 'Deniz Can Ozturk': ilk ad ayniysa ayni kisi."""
     a, b = normalize(a or "").split()[:1], normalize(b or "").split()[:1]
     return bool(a) and a == b
 
@@ -1018,7 +1025,7 @@ def sorumlu_dogrula(aksiyonlar, satirlar, ben=None):
         if any(_ayni_kisi(x, kim) for x in adlar):
             continue
         if any(ad_geciyor(x, s.get("text")) or ad_geciyor(x.split()[0], s.get("text")) for x in adlar):
-            continue                    # 'Berk'e ilet, o baksin' gibi: X satirda adiyla geciyor
+            continue                    # 'Emre'e ilet, o baksin' gibi: X satirda adiyla geciyor
         a["sorumlu"] = f"{sorumlu} (?)"
     return sonuc
 

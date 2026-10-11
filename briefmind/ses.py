@@ -11,11 +11,14 @@ cumle biter ve HEMEN STT'ye gider (GPU servisi ~10 ms). Sessizlik gelmezse 14 sn
 diye 0.3 sn on-yuk eklenir.
 
 Ses diske YAZILMAZ: parca bellekte tutulur, STT cevabi gelince silinir.
+Tek istisna: olcum kaydi (config 'olcum_kaydi', varsayilan kapali) acikken klipler <klasor>/olcum/ altina yazilir.
   pip install sounddevice soundcard numpy requests
 """
 import datetime as dt
 import io
 import itertools
+import json
+import os
 import queue
 import threading
 import time
@@ -101,6 +104,8 @@ class AkisYakalayici(threading.Thread):
         self._dur = threading.Event()
         self.hata = None
         self.toplam_sn = 0.0
+        self.toplam_ornek = 0                   # bu akisin 16 kHz'te yakaladigi toplam ornek (olcum: klip konumu)
+        self.epoch_capa = None                  # ilk blok geldiginde akisin sifirinci orneginin epoch'u (time.time)
 
     def durdur(self):
         self._dur.set()
@@ -142,6 +147,7 @@ class AkisYakalayici(threading.Thread):
     def run(self):
         tampon, enerji, bayrak = [], [], []                     # bloklar, RMS'leri, sesli mi
         sessiz_sn, parca_bas = 0.0, None
+        parca_ornek = 0                                         # parca_bas'in akis ornek sayaci (olcum)
         onyuk, aday = [], []                                    # on-yuk (blok, rms, sesli); acilis adayi bloklar
         taban = SESSIZ_ESIK                                     # uyarlanan gurultu tabani
         self._olay("log", f"  {self.kaynak} akışı açılıyor…")
@@ -152,6 +158,9 @@ class AkisYakalayici(threading.Thread):
                     continue
                 sn = len(blok) / ORNEK
                 self.toplam_sn += sn
+                if self.epoch_capa is None:
+                    self.epoch_capa = time.time() - len(blok) / ORNEK     # blok yeni bitti
+                self.toplam_ornek += len(blok)
                 rms = float(np.sqrt(np.mean(np.square(blok))))
                 # gurultu tabani: sessiz bloklarda hizli iner, yavas yukselir
                 taban = min(taban * 1.01 + 1e-6, rms) if rms < taban * 2 else taban
@@ -168,6 +177,7 @@ class AkisYakalayici(threading.Thread):
                     bayrak = [False] * (len(onyuk) - ACILIS_BLOK) + [True] * ACILIS_BLOK
                     aday, onyuk = [], []
                     parca_bas = dt.datetime.now() - dt.timedelta(seconds=len(tampon) * sn)
+                    parca_ornek = self.toplam_ornek - sum(len(b) for b in tampon)
                     sessiz_sn = 0.0
                     continue
                 tampon.append(blok)
@@ -177,18 +187,19 @@ class AkisYakalayici(threading.Thread):
                 uzunluk = sum(len(b) for b in tampon) / ORNEK
                 if ((uzunluk >= MIN_SN and sessiz_sn >= CUMLE_SESSIZLIK)          # cumle bitti
                         or (uzunluk >= TAVAN_SN and sessiz_sn >= NEFES_SESSIZLIK)):  # uzun konusma, nefes payi
-                    self._gonder(tampon, parca_bas, sum(bayrak) / len(tampon))
+                    self._gonder(tampon, parca_bas, sum(bayrak) / len(tampon), parca_ornek)
                     tampon, enerji, bayrak, sessiz_sn, parca_bas = [], [], [], 0.0, None
                 elif uzunluk >= ZORLA_SN:
                     # Sessizlik hic gelmedi. Tam ZORLA_SN'de kesmek kelimeyi ortadan boler, iki parca da
                     # Whisper'da bozuk cikar: son 1.5 sn'nin en sessiz blogunda bol, kalani sonraki parcaya.
                     bol = bolme_noktasi(enerji)
-                    self._gonder(tampon[:bol], parca_bas, sum(bayrak[:bol]) / bol)
+                    self._gonder(tampon[:bol], parca_bas, sum(bayrak[:bol]) / bol, parca_ornek)
                     parca_bas += dt.timedelta(seconds=sum(len(b) for b in tampon[:bol]) / ORNEK)
+                    parca_ornek += sum(len(b) for b in tampon[:bol])
                     tampon, enerji, bayrak = tampon[bol:], enerji[bol:], bayrak[bol:]
                     sessiz_sn = 0.0
             if tampon:
-                self._gonder(tampon, parca_bas, sum(bayrak) / len(tampon))
+                self._gonder(tampon, parca_bas, sum(bayrak) / len(tampon), parca_ornek)
         except Exception as e:
             self.hata = e
             ek = ""
@@ -196,7 +207,7 @@ class AkisYakalayici(threading.Thread):
                 ek = " (soundcard paketi kurulu mu? pip install soundcard)"
             self._olay("log", f"✖ {self.kaynak} akışı durdu: {e!r}{ek}")
 
-    def _gonder(self, tampon, basla, konusma_orani=1.0):
+    def _gonder(self, tampon, basla, konusma_orani=1.0, ornek_bas=None):
         ses = np.concatenate(tampon)
         if len(ses) / ORNEK < MIN_SN:                           # cok kisa parcayi atla
             return
@@ -213,7 +224,9 @@ class AkisYakalayici(threading.Thread):
             self._olay("stt_gecikme", {"kuyruk": birikmis, "atlandi": False})
         ses = normalize_et(ses)
         self.kuyruk.put({"kaynak": self.kaynak, "basla": basla, "bitis": dt.datetime.now(), "ses": ses,
-                         "no": next(self._sayac) if self._sayac is not None else None})
+                         "no": next(self._sayac) if self._sayac is not None else None,
+                         "ornek_bas": ornek_bas, "ornek_bit": None if ornek_bas is None else ornek_bas + len(ses),
+                         "epoch_capa": self.epoch_capa})
 
 
 def normalize_et(ses):
@@ -458,6 +471,103 @@ class SttIstemci:
                                      if v.get("text") else [])
 
 
+# ---------------------------------------------------------------- olcum kaydi (Faz 0, opt-in)
+
+class OlcumKaydi:
+    """config 'olcum_kaydi' acikken STT'ye giden her klibi yazar (yerel, repo disi; toplantilar/ .gitignore'da):
+      <klasor>/olcum/klipler/NNNN.wav   16 kHz mono int16 (STT'ye giden, normalize edilmis hali)
+      <klasor>/olcum/klipler.jsonl      {no, akis, bas, bit, ornek_bas, ornek_bit, sure, ts, tsler, raw,
+                                         segmentler, stt_sure[, stt_hata]}
+    bas/bit: klibin epoch saniyesi (akis sayaci + akis capasi); ornek_*: o akisin 16 kHz kumulatif ornek sayaci.
+    wav klip kuyruktan alininca, jsonl satiri STT sonucu gelince (raw ile birlikte) yazilir.
+    Is parcacigi guvenli; IO hatasinda bir kez bildirir ve kendini kapatir, yakalama dongusune istisna sizmaz."""
+
+    def __init__(self, klasor, olay=None):
+        self.kok = os.path.join(klasor, "olcum")
+        self.klip_klasor = os.path.join(self.kok, "klipler")
+        self.jsonl = os.path.join(self.kok, "klipler.jsonl")
+        self.acik = True
+        self._olay = olay or (lambda t, v: None)
+        self._kilit = threading.Lock()
+        self._bekleyen = {}                       # no -> yarim kayit (wav yazildi, sonuc bekleniyor)
+        self._ic_sayac = itertools.count()
+        self._ofset = 0                           # ayni klasore ikinci kayitta numaralar cakismasin
+        try:
+            os.makedirs(self.klip_klasor, exist_ok=True)
+            for ad in os.listdir(self.klip_klasor):
+                if ad.endswith(".wav") and ad[:-4].isdigit():
+                    self._ofset = max(self._ofset, int(ad[:-4]))
+        except Exception as e:
+            self._kapat(e)
+
+    def _kapat(self, e):
+        if self.acik:
+            self.acik = False
+            try:
+                self._olay("log", f"✖ ölçüm kaydı kapandı (disk hatası): {e!r}")
+            except Exception:
+                pass
+
+    def klip_yaz(self, p):
+        """Kuyruktan alinan klibin wav'ini yazar; p['_olcum_no'] atanir. Asla istisna firlatmaz."""
+        if not self.acik:
+            return
+        try:
+            sira = p.get("no")
+            no = self._ofset + 1 + (sira if sira is not None else next(self._ic_sayac))
+            with open(os.path.join(self.klip_klasor, f"{no:04d}.wav"), "wb") as f:
+                f.write(wav_bayt(p["ses"]))
+            sure = len(p["ses"]) / ORNEK
+            ob, capa = p.get("ornek_bas"), p.get("epoch_capa")
+            if ob is not None and capa is not None:
+                bas, bit = capa + ob / ORNEK, capa + p["ornek_bit"] / ORNEK
+            else:                                  # sayac yok (ornegin elle uretilmis klip): varis anlarindan
+                bit = p["bitis"].timestamp() if isinstance(p.get("bitis"), dt.datetime) else time.time()
+                bas = p["basla"].timestamp() if isinstance(p.get("basla"), dt.datetime) else bit - sure
+            kayit = {"no": no, "akis": p["kaynak"], "bas": round(bas, 3), "bit": round(bit, 3),
+                     "ornek_bas": ob, "ornek_bit": p.get("ornek_bit"), "sure": round(sure, 2),
+                     "ts": p["basla"].strftime("%H:%M:%S") if isinstance(p.get("basla"), dt.datetime) else None}
+            with self._kilit:
+                self._bekleyen[no] = kayit
+            p["_olcum_no"] = no
+        except Exception as e:
+            self._kapat(e)
+
+    def sonuc(self, p, ham, stt_sure, tsler=None, segmentler=None, hata=None):
+        """STT sonucu geldi (ya da hata): klip satirini tamamlayip jsonl'e ekler. Asla istisna firlatmaz."""
+        no = p.get("_olcum_no")
+        if no is None or not self.acik:
+            return
+        try:
+            with self._kilit:
+                kayit = self._bekleyen.pop(no, None)
+                if kayit is None:
+                    return
+                if tsler:
+                    kayit["ts"] = tsler[0]            # satirin tasiyacagi HH:MM:SS (ilk cumle)
+                kayit.update(tsler=list(tsler or []), raw=ham, stt_sure=stt_sure)
+                if segmentler:
+                    kayit["segmentler"] = segmentler
+                if hata:
+                    kayit["stt_hata"] = hata
+                with open(self.jsonl, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(kayit, ensure_ascii=False) + "\n")
+        except Exception as e:
+            self._kapat(e)
+
+
+def segment_ozeti(segmentler):
+    """Replay icin: STT segmentlerinin kucuk, JSON'a yazilabilir ozeti."""
+    sonuc = []
+    for s in segmentler or []:
+        o = {"start": s.get("start"), "end": s.get("end"), "text": (s.get("text") or "").strip()}
+        for k in ("avg_logprob", "no_speech_prob"):
+            if isinstance(s.get(k), (int, float)):
+                o[k] = round(float(s[k]), 3)
+        sonuc.append(o)
+    return sonuc
+
+
 # ---------------------------------------------------------------- servis
 
 class SesServisi:
@@ -465,7 +575,7 @@ class SesServisi:
     konusmaci: mikrofon akisi icin 'ben', loopback icin None (motor altyazidan esler)."""
 
     def __init__(self, stt_adres, ipucu_fn=None, mod="otomatik", mik_cihaz=None, olay=None, satir_fn=None,
-                 model="whisper", api_key="", proxy=True, verify=None):
+                 model="whisper", api_key="", proxy=True, verify=None, olcum_klasor=None):
         self.kuyruk = queue.Queue()
         self.stt = SttIstemci(stt_adres, ipucu_fn, model=model, api_key=api_key, proxy=proxy, verify=verify)
         self.mod = mod                       # otomatik | cift | tek
@@ -489,6 +599,15 @@ class SesServisi:
         self._sayac = itertools.count()
         self._sonraki = 0
         self._hazir = {}
+        self._olcum = None               # OlcumKaydi (opt-in); baslat'tan once ya da sonra acilabilir
+        if olcum_klasor:
+            self.olcum_kaydi_ac(olcum_klasor)
+
+    def olcum_kaydi_ac(self, klasor):
+        """Faz 0: STT'ye giden her klibi <klasor>/olcum/ altina yazar (bkz. OlcumKaydi). Dondurur: OlcumKaydi."""
+        self._olcum = OlcumKaydi(klasor, olay=self._olay)
+        self._olay("log", f"ölçüm kaydı AÇIK: klipler {self._olcum.kok} altına yazılıyor")
+        return self._olcum
 
     def baslat(self):
         if not self.stt.saglik():
@@ -532,10 +651,17 @@ class SesServisi:
                                      "kuyruk": self.kuyruk.qsize()})
             t0 = time.time()
             adaylar = []
+            olcum = self._olcum
+            ham, seg_ozet, hata = None, None, None
+            if olcum is not None:
+                olcum.klip_yaz(p)
             try:
                 once = self.stt.yeniden_deneme
                 segmentler = self.stt.coz(p["ses"])
                 self.cozulen += 1
+                if olcum is not None:
+                    ham = " ".join((s.get("text") or "").strip() for s in segmentler).strip()
+                    seg_ozet = segment_ozeti(segmentler)
                 if self.stt.yeniden_deneme != once:
                     self._olay("log", f"  · STT bağlantısı koptu, yeniden denendi ve kurtarıldı "
                                       f"(toplam {self.stt.yeniden_deneme})")
@@ -547,18 +673,29 @@ class SesServisi:
                     self._bicim_bildirildi = True
                     self._olay("log", "STT zaman damgası: " + ("segment bazlı (verbose_json)" if self.stt.verbose
                                                               else "yok (json) — cümleler süreye orantılı dağıtılır"))
-                for gorel, ham, s in cumlelere_bol(segmentler, sure):
-                    metin = tekrar_temizle(ham)
-                    if len(metin) < 2 or not sonuc_gecerli(s, metin):
-                        self.elenen += 1
-                        continue
-                    adaylar.append((p["basla"] + dt.timedelta(seconds=gorel), p["kaynak"], metin))
+                adaylar = self.adaylar_uret(segmentler, sure, p["basla"], p["kaynak"])
             except Exception as e:
                 self.son_hata = e
+                hata = repr(e)
                 self._olay("log", f"✖ STT hatası: {e!r}")
             finally:
+                if olcum is not None:
+                    olcum.sonuc(p, ham, round(time.time() - t0, 2), [a[0].strftime("%H:%M:%S") for a in adaylar],
+                                seg_ozet, hata)
                 p["ses"] = None                       # ses bellekten dusurulur
                 self._sirali_yay(p.get("no"), adaylar)   # hata olsa da numara kapanir, sira takilmaz
+
+    def adaylar_uret(self, segmentler, sure, basla, kaynak):
+        """STT segmentleri -> [(an, kaynak, metin)]: cumlelere bol, tekrar temizle, gecersizleri ele.
+        replay.py de ayni yolu kullanir."""
+        adaylar = []
+        for gorel, ham, s in cumlelere_bol(segmentler, sure):
+            metin = tekrar_temizle(ham)
+            if len(metin) < 2 or not sonuc_gecerli(s, metin):
+                self.elenen += 1
+                continue
+            adaylar.append((basla + dt.timedelta(seconds=gorel), kaynak, metin))
+        return adaylar
 
     def _sirali_yay(self, no, adaylar):
         with self._kilit:

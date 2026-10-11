@@ -27,7 +27,7 @@ def temizle(yol):
     tutulan, atilan, gorulen = [], [], set()
     for t in terimler:
         t2 = t.strip()
-        # "ODS'de", "Cemil'le" gibi ek almis ozel adlar -> kok ("ODS", "Cemil")
+        # "ODS'de", "Kemal'le" gibi ek almis ozel adlar -> kok ("ODS", "Kemal")
         if "'" in t2 and " " not in t2:
             t2 = t2.split("'")[0]
         if not terim_gibi_mi(t2):
