@@ -127,20 +127,25 @@ class ServerDefaultWebTests(unittest.TestCase):
                 self.assertEqual(identity["dimensions"], 4096)
                 self.assertEqual(identity["model"], "")
                 self.assertEqual(identity["model_version"], "")
-                self.assertFalse(identity["persistent_cache_safe"])
+                # v0.5: vector reuse is gated by the canary fingerprint, not by a persistent_cache_safe flag.
+                self.assertIsNotNone(identity["fingerprint"])
                 self.assertEqual(list(self.root.rglob("vectors-*.json")), [])
+                # v0.5: the LLM is consulted only for rows whose shown candidates are not strong; the exact
+                # HAV_LM match needs no review and weak candidates are no longer shown.
+                self.assertTrue(result["results"][0]["candidates"])
                 for row in result["results"]:
                     self.assertEqual(row["errors"], [])
-                    self.assertEqual(row["model_review"]["model"], "qwen38-27b")
-                    self.assertTrue(row["model_review"]["assessments"])
-                    self.assertEqual(row["model_review"]["assessments"][0]["evidence"], "HAV_LM")
-                    self.assertTrue(row["candidates"])
+                    if row.get("llm_requested"):
+                        self.assertEqual(row["model_review"]["model"], "qwen38-27b")
+                        self.assertTrue(row["model_review"]["assessments"])
+                    else:
+                        self.assertNotIn("model_review", row)
 
                 analysis_calls = [call for call in service.calls if call["phase"] == "analysis"]
                 embeddings = [call for call in analysis_calls if call["host"] == "embedding.invalid"]
                 reviews = [call for call in analysis_calls if call["host"] == "llm.invalid"]
                 self.assertGreaterEqual(len(embeddings), 3)  # Catalog plus both variable queries.
-                self.assertEqual(len(reviews), 2)
+                self.assertEqual(len(reviews), sum(1 for row in result["results"] if row.get("llm_requested")))
                 for call in embeddings:
                     self.assertEqual(call["path"], "/v1/embeddings")
                     self.assertEqual(set(call["body"]), {"input"})

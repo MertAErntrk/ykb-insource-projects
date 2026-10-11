@@ -1,11 +1,14 @@
 """Excel taşıma katmanı. Girdi metnini korur; hiçbir formülü çalıştırmaz."""
 from copy import copy
+import errno
 from datetime import date, datetime
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
+import tempfile
 import unicodedata
 import zipfile
 
@@ -14,7 +17,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from .errors import InputError
+from .errors import InputError, ReportWriteError
 
 HEADERS = ["Kategori", "Alan Adı", "Alan tipi", "Açıklama", "Halihazırda bildiriliyor mu", "Görüş", "Hazırlama süresi"]
 
@@ -123,6 +126,12 @@ def read_requests(path, column_mapping=None):
         r["input_errors"].append("Desteklenmeyen veya çözümlenemeyen Excel formülü; çalıştırılmadı.")
     return requests
 
+_ALIGN=Alignment(vertical="top",wrap_text=True)
+_HEAD_FILL=PatternFill("solid",fgColor="142C47")
+_HEAD_FONT=Font(color="FFFFFF",bold=True,size=11)
+_BODY_FONT=Font(name="Calibri",size=11,color="1E293B")
+_ZEBRA_FILL=PatternFill("solid",fgColor="F1F5F9")
+
 def _cell(sheet, row, col, value):
     if isinstance(value, (dict,list,tuple)):
         value=json.dumps(value,ensure_ascii=False,default=str)
@@ -130,15 +139,15 @@ def _cell(sheet, row, col, value):
     # Force every text to an OOXML string. Keeps exact original text without activating = or DDE.
     if isinstance(value,str):
         cell.data_type="s"
-    cell.alignment=Alignment(vertical="top",wrap_text=True)
+    cell.alignment=_ALIGN
     return cell
 
 def _table(wb,name,headers,rows):
     ws=wb.create_sheet(name)
     for col,h in enumerate(headers,1):
         cell=_cell(ws,1,col,h)
-        cell.fill=PatternFill("solid",fgColor="142C47")
-        cell.font=Font(color="FFFFFF",bold=True,size=11)
+        cell.fill=_HEAD_FILL
+        cell.font=_HEAD_FONT
         ws.column_dimensions[get_column_letter(col)].width=min(54,max(18,len(h)+4))
     ws.row_dimensions[1].height=34
     preferred={"Açıklama":64,"Gerekçe":64,"Satır hataları":54,"Tam kaynak yolu":72,"Boyut bazında kanıt, çelişki ve eksik":48,"Talebin kaynak metni":72,"Katalog kaynak metni":72,"Model yorumu (doğrulanmış karar değil)":64,"Modelin alıntıladığı kaynak":64,"Bilgi":36,"Değer":100}
@@ -147,9 +156,9 @@ def _table(wb,name,headers,rows):
     for rowno,values in enumerate(rows,2):
         for col,value in enumerate(values,1):
             c=_cell(ws,rowno,col,value)
-            c.font=Font(name="Calibri",size=11,color="1E293B")
+            c.font=_BODY_FONT
             if rowno%2==0:
-                c.fill=PatternFill("solid",fgColor="F1F5F9")
+                c.fill=_ZEBRA_FILL
         lines=1
         for col,value in enumerate(values,1):
             text=json.dumps(value,ensure_ascii=False,default=str) if isinstance(value,(dict,list,tuple)) else str(value or "")
@@ -161,9 +170,9 @@ def _table(wb,name,headers,rows):
     return ws
 
 LABELS={"supported":"Metadata ile destekleniyor","insufficient":"Kritik bilgi eksik","conflict":"İş tanımı çelişiyor","not_found_in_scope":"Taranan kapsamda eşleşme bulunamadı","incomplete":"İnceleme tamamlanamadı","present":"Aynı fiziksel ad var","absent_in_scope":"Tamamlanan kapsamda aynı ad yok","unknown":"Ad yokluğu doğrulanamadı","not_evaluated":"Üretim değerlendirilmedi","candidate":"Metriklerden üretim adayı","source_only":"Yalnız hareket kaynağı adayı"}
-DIMENSION_LABELS={"entity":"Varlık","grain":"Kayıt seviyesi","concept":"İş kavramı","transaction":"İşlem türü","direction":"İşlem yönü","measure":"Ölçüm","aggregation":"Toplulaştırma","grouping":"Gruplama seviyesi","window":"Zaman penceresi","window_bounds":"Pencere sınırları","reference_date":"Referans tarihi","person_key":"Tekil kişi anahtarı","unit":"Birim","codes":"Kod listesi","zero_policy":"Sıfır payda kuralı","null_policy":"NULL kuralı","numerator":"Pay","denominator":"Payda","business_scope":"İş kapsamı"}
+DIMENSION_LABELS={"entity":"Varlık","grain":"Kayıt seviyesi","concept":"İş kavramı","transaction":"İşlem türü","direction":"İşlem yönü","measure":"Ölçüm","aggregation":"Toplulaştırma","grouping":"Gruplama seviyesi","window":"Zaman penceresi","window_bounds":"Pencere sınırları","reference_date":"Referans tarihi","person_key":"Tekil kişi anahtarı","unit":"Birim","codes":"Kod listesi","zero_policy":"Sıfır payda kuralı","null_policy":"NULL kuralı","numerator":"Pay","denominator":"Payda","business_scope":"İş kapsamı","data_type":"Veri tipi","qualifier":"Ek nitelemeler"}
 CHECK_LABELS={"compatible":"Uyumlu","conflict":"Çelişkili","missing":"Bilgi eksik"}
-REASON_LABELS={"unparsed_description_qualifier":"Açıklamada otomatik yorumlanamayan iş nitelemeleri var.","unparsed_formula_qualifier":"Formülde otomatik yorumlanamayan ek koşul var.","no_verified_derivation":"Üretim için doğrulanmış yeterli kanıt bulunamadı.","ready_feature_supported":"Hazır alan metadata ile destekleniyor.","duplicate_name":"Aynı alan adı birden fazla talepte geçiyor.","ambiguous_ratio_name":"Alan adından oran yapısı kesin çıkarılamıyor.","unsupported_formula":"Formül izin verilen basit bölme yapısında değil.","cycle":"Bağımlılıklarda döngü var.","unresolved_operands":"Pay veya payda talebi kesin olarak çözümlenemedi.","movement_sources_only; aggregation_not_verified":"Hareket kaynağı adayı var; toplulaştırmanın doğruluğu kanıtlanmadı.","verified_operands; expert_review_required":"Hazır metrikler ve bağlantı koşulları destekleniyor; uzman kararı gerekli.","cross_object_relationship_unverified":"Farklı nesneler arasındaki ilişki doğrulanmadı."}
+REASON_LABELS={"unparsed_description_qualifier":"Açıklamada otomatik yorumlanamayan iş nitelemeleri var.","unparsed_formula_qualifier":"Formülde otomatik yorumlanamayan ek koşul var.","no_verified_derivation":"Üretim için doğrulanmış yeterli kanıt bulunamadı.","ready_feature_supported":"Hazır alan metadata ile destekleniyor.","duplicate_name":"Aynı alan adı birden fazla talepte geçiyor.","ambiguous_ratio_name":"Alan adından oran yapısı kesin çıkarılamıyor.","unsupported_formula":"Formül izin verilen basit bölme yapısında değil.","cycle":"Bağımlılıklarda döngü var.","unresolved_operands":"Pay veya payda talebi kesin olarak çözümlenemedi.","movement_sources_only; aggregation_not_verified":"Hareket kaynağı adayı var; toplulaştırmanın doğruluğu kanıtlanmadı.","verified_operands; expert_review_required":"Hazır metrikler ve bağlantı koşulları destekleniyor; uzman kararı gerekli.","cross_object_relationship_unverified":"Farklı nesneler arasındaki ilişki doğrulanmadı.","insufficient_evidence":"Uyumlu olduğu doğrulanan boyut sayısı yetersiz.","ambiguous_grain":"Açıklamada birden fazla kayıt seviyesi geçiyor."}
 
 def reason_text(value):
     value=str(value)
@@ -176,24 +185,126 @@ def reason_text(value):
         if prefix in labels:return labels[prefix]+": "+DIMENSION_LABELS.get(rest,rest)
     return value
 
+ROW_STATUS_LABELS={"found":"Aday bulundu","weak_only":"Yalnız zayıf aday","none_in_scope":"Seçili kapsamda güvenilir aday yok","none_partial":"Aday yok — anlamsal arama kapsamı tam değil","not_evaluated":"İncelenemedi","not_searched":"Aranmadı"}
+NAME_MATCH_LABELS={"exact":"Birebir ad","normalized":"Kısaltma/normalize ad","partial":"Kısmi ad benzerliği","none":"Ad benzemiyor"}
+MEANING_LABELS={"strong":"Güçlü anlam uyumu","likely":"Olası uyum","weak":"Zayıf – doğrulanmalı","different":"Anlam farkı var","no_description":"Kolon açıklaması yok"}
+SCOPE_LABELS={"full":"tam","partial":"kısmi","none":"yok"}
+# Kodlar çakışmadığı için (not_evaluated) mevcut anahtarlar korunur; yalnız yeni anahtarlar eklenir.
+for _d in (ROW_STATUS_LABELS,NAME_MATCH_LABELS,MEANING_LABELS):
+    for _k,_v in _d.items():
+        LABELS.setdefault(_k,_v)
+MODEL_CHANGED_WARNING="Uyarı: Bu satırın sonucu farklı bir model çıktısına dayanıyor olabilir; model analiz sırasında değişti."
+MAX_SHOWN=3
+
+def _candidate_source_path(c):
+    s=c.get("source",{})
+    return ".".join(str(s.get(k) or "") for k in ("schema","object","column") if s.get(k))
+
+def _difference_text(d):
+    text=f"{DIMENSION_LABELS.get(d.get('dimension'),d.get('dimension') or '')}: istenen {d.get('requested') if d.get('requested') not in (None,'') else '—'} / katalogda {d.get('actual') if d.get('actual') not in (None,'') else '—'}"
+    if d.get("text"):text+=f" — {d['text']}"
+    return text
+
+def _evidence_text(c):
+    lines=[_difference_text(d) for d in c.get("differences",[])]
+    lines+=[str(e) for e in c.get("evidence",[])]
+    return "\n".join(lines)
+
+def _coverage_text(r):
+    cov=r.get("coverage")
+    if not cov:return ""
+    parts=["Katalog: "+("tam" if cov.get("catalog_complete") else "eksik")]
+    parts.append("Anlamsal kapsam: "+SCOPE_LABELS.get(cov.get("semantic_scope"),str(cov.get("semantic_scope") or "")))
+    if cov.get("index_coverage") is not None:
+        parts.append(f"İndeks: %{round(float(cov['index_coverage'])*100)}")
+    return "\n".join(parts)
+
+def _status_text(r):
+    text=ROW_STATUS_LABELS.get(r.get("row_status"),r.get("row_status") or "")
+    if r.get("model_changed"):text=(text+"\n" if text else "")+MODEL_CHANGED_WARNING
+    return text
+
+def _count_rows(path,sheet="Sonuçlar"):
+    wb=load_workbook(path,read_only=True)
+    try:
+        return sum(1 for _ in wb[sheet].iter_rows(min_col=1,max_col=1))
+    finally:
+        wb.close()
+
+def _classify_os_error(exc):
+    code=getattr(exc,"winerror",None)
+    if code==112 or getattr(exc,"errno",None)==errno.ENOSPC:return "disk_full"
+    if code==32:return "locked"
+    if isinstance(exc,PermissionError) or code==5 or getattr(exc,"errno",None) in (errno.EACCES,errno.EPERM):
+        return "permission"
+    return "other"
+
 def write_results(input_path, output_path, requests, results, run_info):
     if Path(input_path).resolve()==Path(output_path).resolve():
         raise InputError("Sonuç dosyası giriş dosyasının üzerine yazılamaz.")
+    destination=Path(output_path)
+    temp=None
+    try:
+        wb=_build_workbook(input_path,requests,results,run_info)
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        fd,temp_name=tempfile.mkstemp(prefix=destination.stem+".",suffix=".writing.xlsx",dir=str(destination.parent))
+        os.close(fd)
+        temp=Path(temp_name)
+        try:
+            wb.save(temp)
+        finally:
+            wb.close()
+        try:
+            rows=_count_rows(temp)
+        except Exception:
+            raise ReportWriteError("invalid") from None
+        if rows!=len(requests)+1:
+            raise ReportWriteError("invalid")
+        os.replace(temp,destination)
+        temp=None
+        return str(destination)
+    except ReportWriteError:
+        raise
+    except InputError:
+        raise
+    except OSError as exc:
+        raise ReportWriteError(_classify_os_error(exc)) from None
+    except Exception:
+        raise ReportWriteError("other") from None
+    finally:
+        if temp is not None:
+            try:os.unlink(temp)
+            except OSError:pass
+
+def _build_workbook(input_path, requests, results, run_info):
     wb=Workbook()
     wb.remove(wb.active)
     original_headers=list(dict.fromkeys(k for r in requests for k in r["original"] if norm(k)!=norm("Talep Kimliği")))
-    headers=["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"]+original_headers+["Olası şema","Olası tablo","Olası kolon","Katalog kolon açıklaması","Fiziksel ad kontrolü","Semantik uyum","Üretim ihtimali","Gerekçe","Satır hataları","Bağımlılıklar","Uzman kararı"]
+    candidate_headers=[h for n in range(1,MAX_SHOWN+1) for h in (f"Aday {n} kaynak",f"Aday {n} kolon açıklaması",f"Aday {n} ad eşleşmesi",f"Aday {n} iş anlamı",f"Aday {n} farklar ve kanıt",f"Aday {n} diğer konumlar")]
+    headers=["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"]+original_headers+["Satır durumu","Kapsam"]+candidate_headers+["Fiziksel ad kontrolü","Semantik uyum","Üretim ihtimali","Gerekçe","Satır hataları","Bağımlılıklar","Uzman kararı"]
     result_map={r["row_id"]:r for r in results}
     rows=[]
     for req in requests:
-        r=result_map[req["row_id"]]
-        best=next((c for c in r["candidates"] if c["status"]=="supported"),r["candidates"][0] if r["candidates"] else {})
-        source=best.get("source",{})
-        rows.append([req["row_id"],req["sheet"],req["excel_row"]]+[req["original"].get(h) for h in original_headers]+[source.get(k,"") for k in ("schema","object","column","column_comment")]+[LABELS.get(r["physical_name"],r["physical_name"]),LABELS.get(r["semantic_status"],r["semantic_status"]),LABELS.get(r["production_status"],r["production_status"]),"\n".join(reason_text(v) for v in r["reasons"]),"\n".join(r["errors"]),r.get("dependencies",[]),r.get("expert_decision","")])
+        r=result_map.get(req["row_id"])
+        if r is None:
+            r={"row_status":"not_searched","physical_name":"","semantic_status":"","production_status":"","reasons":[],"errors":[],"candidates":[]}
+        cands=list(r.get("candidates",[]))[:MAX_SHOWN]
+        cells=[]
+        for n in range(MAX_SHOWN):
+            if n<len(cands):
+                c=cands[n]
+                cells+=[_candidate_source_path(c),c.get("source",{}).get("column_comment",""),NAME_MATCH_LABELS.get(c.get("name_match"),c.get("name_match") or ""),MEANING_LABELS.get(c.get("meaning"),c.get("meaning") or ""),_evidence_text(c),"\n".join(c.get("locations",[]))]
+            else:
+                cells+=[""]*6
+        pn,ss,ps=(r.get("physical_name",""),r.get("semantic_status",""),r.get("production_status",""))
+        rows.append([req["row_id"],req["sheet"],req["excel_row"]]+[req["original"].get(h) for h in original_headers]+[_status_text(r),_coverage_text(r)]+cells+[LABELS.get(pn,pn),LABELS.get(ss,ss),LABELS.get(ps,ps),"\n".join(reason_text(v) for v in r.get("reasons",[])),"\n".join(r.get("errors",[])),r.get("dependencies",[]),r.get("expert_decision","")])
     ws=_table(wb,"Sonuçlar",headers,rows)
     for h in ("Açıklama","Gerekçe","Satır hataları"):
         if h in headers:
             ws.column_dimensions[get_column_letter(headers.index(h)+1)].width=64
+    for n in range(1,MAX_SHOWN+1):
+        for suffix in ("kolon açıklaması","farklar ve kanıt"):
+            ws.column_dimensions[get_column_letter(headers.index(f"Aday {n} {suffix}")+1)].width=48
     expert_col=get_column_letter(len(headers))
     dv=DataValidation(type="list",formula1='"İncelenmedi,Onaylandı,Reddedildi,Ek bilgi bekleniyor"')
     ws.add_data_validation(dv)
@@ -203,14 +314,19 @@ def write_results(input_path, output_path, requests, results, run_info):
     evidence_rows=[]
     for r in results:
         reviews={a["catalog_id"]:a for a in r.get("model_review",{}).get("assessments",[])}
-        for c in r["candidates"]:
+        shown=[(c,"Gösterildi") for c in r.get("candidates",[])]
+        shown+=[(c,"Reddedildi: "+str(c.get("rejected_reason") or "neden belirtilmedi")) for c in r.get("rejected_candidates",[])]
+        for c,display in shown:
             advice=reviews.get(c["catalog_id"],{})
-            candidates.append([r["row_id"],c["catalog_id"],c.get("path","")]+[c.get("source",{}).get(k,"") for k in ("schema","object","column","data_type","column_comment","table_comment")]+[LABELS.get(c["status"],c["status"]),c.get("score",0),", ".join(c.get("retrieval",[])),"\n".join(f"{DIMENSION_LABELS.get(x['dimension'],x['dimension'])}: {CHECK_LABELS.get(x['status'],x['status'])}" for x in c.get("checks",[])),"\n".join(reason_text(v) for v in c.get("reasons",[])),advice.get("note",""),advice.get("evidence","")])
+            candidates.append([r["row_id"],c["catalog_id"],display,c.get("path","") or _candidate_source_path(c)]+[c.get("source",{}).get(k,"") for k in ("schema","object","column","data_type","column_comment","table_comment")]+[NAME_MATCH_LABELS.get(c.get("name_match"),c.get("name_match") or ""),MEANING_LABELS.get(c.get("meaning"),c.get("meaning") or ""),LABELS.get(c.get("status"),c.get("status") or ""),c.get("score",0),", ".join(c.get("retrieval",[])),"\n".join(f"{DIMENSION_LABELS.get(x['dimension'],x['dimension'])}: {CHECK_LABELS.get(x['status'],x['status'])}" for x in c.get("checks",[])),"\n".join(reason_text(v) for v in c.get("reasons",[])),advice.get("note",""),advice.get("evidence","")])
             for check in c.get("checks",[]):
                 proof=check.get("evidence",{})
                 evidence_rows.append([r["row_id"],c["catalog_id"],DIMENSION_LABELS.get(check["dimension"],check["dimension"]),CHECK_LABELS.get(check["status"],check["status"]),check.get("requested"),check.get("actual"),proof.get("request",""),proof.get("candidate",""),proof.get("request_source",""),proof.get("candidate_source","")])
-    _table(wb,"Adaylar",["Talep Kimliği","Katalog Kimliği","Tam kaynak yolu","Şema","Tablo","Kolon","Veri tipi","Kolon açıklaması","Tablo açıklaması","Semantik durum","Arama skoru (olasılık değil)","Arama yöntemleri","Boyut bazında kanıt, çelişki ve eksik","Gerekçe","Model yorumu (doğrulanmış karar değil)","Modelin alıntıladığı kaynak"],candidates)
-    _table(wb,"Çalışma bilgisi",["Bilgi","Değer"],list(run_info.items()))
+    _table(wb,"Adaylar",["Talep Kimliği","Katalog Kimliği","Gösterim","Tam kaynak yolu","Şema","Tablo","Kolon","Veri tipi","Kolon açıklaması","Tablo açıklaması","Ad eşleşmesi","İş anlamı","Semantik durum","Arama skoru (olasılık değil)","Arama yöntemleri","Boyut bazında kanıt, çelişki ve eksik","Gerekçe","Model yorumu (doğrulanmış karar değil)","Modelin alıntıladığı kaynak"],candidates)
+    info=list(run_info.items())
+    if any(r.get("model_changed") for r in results):
+        info.append(("Uyarı","Analiz sırasında model değişti; etkilenen satırlarda 'Satır durumu' sütununda uyarı var."))
+    _table(wb,"Çalışma bilgisi",["Bilgi","Değer"],info)
     _table(wb,"Kanıtlar",["Talep Kimliği","Katalog Kimliği","Boyut","Uyum","Talep değeri","Katalog değeri","Talebin kaynak metni","Katalog kaynak metni","Talep kanıt türü","Katalog kanıt türü"],evidence_rows)
     # Preserve all original rows, sheets, ordering, formulas-as-text, styles, and supplied user fields.
     source=_load(input_path)
@@ -239,13 +355,7 @@ def write_results(input_path, output_path, requests, results, run_info):
             copied.merge_cells(str(merged))
         copied.freeze_panes=original.freeze_panes
     source.close()
-    destination=Path(output_path)
-    destination.parent.mkdir(parents=True,exist_ok=True)
-    temp=destination.with_name(destination.stem+".writing.xlsx")
-    wb.save(temp)
-    wb.close()
-    temp.replace(destination)
-    return str(destination)
+    return wb
 
 def prepare_requests(input_path,output_path,requests=None):
     """Create a separate editable workbook carrying immutable row IDs.

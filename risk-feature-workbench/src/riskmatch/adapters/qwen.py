@@ -71,20 +71,32 @@ class EmbeddingAdapter:
         self.max_batch = _bounded_int(self.config.get("max_batch"),
                                      1 if self.model_selection == "server_default" else 16,
                                      1, 64, "max_batch")
+        # Optional asymmetric wrappers (e.g. an instruction prefix on queries only). Default: text as is.
+        self.templates = {}
+        for kind in ("query", "document"):
+            template = self.config.get(kind + "_template") or "{text}"
+            if not isinstance(template, str) or template.count("{text}") != 1 or len(template) > 1000:
+                raise ConfigError("Embedding " + kind + "_template tek bir {text} içeren kısa bir metin olmalı.")
+            self.templates[kind] = template
         contract = {key: self.config.get(key) for key in
                     ("endpoint", "model", "model_version", "dimensions", "request_template", "response_path")}
+        contract["templates"] = self.templates
         contract["model_selection"] = self.model_selection
         self.cache_identity = hashlib.sha256(json.dumps(contract, sort_keys=True, ensure_ascii=False,
                                                         separators=(",", ":")).encode()).hexdigest()
         self.transport = transport if transport is not None else _ReusableHTTPS()
 
-    def embed(self, texts):
+    def embed(self, texts, kind="document"):
         if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
             raise ConfigError("Embedding girdisi metin listesi olmalı.")
+        if kind not in self.templates:
+            raise ConfigError("Embedding türü query veya document olmalı.")
         if not texts:
             return []
         if any(len(text) > 8000 for text in texts):
             raise ConfigError("Embedding metni uzunluk sınırını aşıyor.")
+        if self.templates[kind] != "{text}":
+            texts = [self.templates[kind].replace("{text}", text) for text in texts]
         vectors = []
         for start in range(0, len(texts), self.max_batch):
             batch = texts[start : start + self.max_batch]

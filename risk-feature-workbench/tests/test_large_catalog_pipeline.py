@@ -55,7 +55,8 @@ def catalog(record_count=10000):
                         "catalog_id": "column-{:05d}".format(number), "schema": "DM_CAD",
                         "object": "FEATURES_{:04d}".format(number // 20),
                         "column": "FIELD{:05d}".format(number), "data_type": "NUMBER",
-                        "column_comment": "Risk metric value {:05d}".format(number),
+                        # v0.5 document text is column + comment; the marker identifies catalog embeddings.
+                        "column_comment": "Risk metric value {:05d} {}".format(number, CATALOG_MARKER),
                         "table_comment": CATALOG_MARKER, "metadata_version": "test-v1"})
     return {"records": records, "scope": deepcopy(SCOPE), "version": "fixed-catalog-v1",
             "complete": True, "errors": [], "captured_at": "2026-10-11T00:00:00Z"}
@@ -148,11 +149,14 @@ class LargeCatalogPipelineTests(unittest.TestCase):
         self.assertEqual(len(result["results"]), 273)
         self.assertEqual(len(streamed), 273)
         self.assertEqual(len({entry["row"]["row_id"] for entry in streamed}), 273)
+        # v0.5: before the first row only the background sample (<=128) and that row's short list (<=10)
+        # are embedded; the full index is the background indexer's job, never the analysis'.
         self.assertGreater(streamed[0]["catalog_calls"], 0)
-        self.assertLessEqual(streamed[0]["catalog_calls"], 48)
+        self.assertLessEqual(streamed[0]["catalog_calls"], 128 + 10)
         self.assertLess(streamed[0]["catalog_calls"], len(service.catalog_texts))
-        self.assertLessEqual(len(service.catalog_texts), 256)
-        self.assertLessEqual(len(service.query_texts), 273)
+        self.assertLessEqual(len(service.catalog_texts), 128 + 10 * 273)
+        self.assertLess(len(service.catalog_texts), len(snapshot["records"]))
+        self.assertLessEqual(len(service.query_texts), 273 + 8 + 2)  # Plus fingerprint and end-of-job canaries.
         self.assertEqual(len(service.catalog_texts), len(set(service.catalog_texts)))
         self.assertEqual(service.llm_calls, 0)
         for name, row in zip(names, result["results"]):
@@ -161,28 +165,39 @@ class LargeCatalogPipelineTests(unittest.TestCase):
             self.assertTrue(any(candidate["source"]["column"] == name for candidate in row["candidates"]))
             self.assertNotEqual(row["semantic_status"], "not_found_in_scope")
             self.assertNotIn("model_review", row)
-        self.assertTrue(any("embedding" in reason.casefold() for reason in result["results"][-1]["reasons"]))
+        # Partial semantic coverage is disclosed on the row instead of an embedding-budget note.
+        self.assertEqual(result["results"][-1]["retrieval_info"]["semantic_scope"], "partial")
+        self.assertTrue(any("anlamsal" in reason.casefold() for reason in result["results"][-1]["reasons"]))
         print("Large catalog fixture: 10000 columns / 273 requests; first row {:.3f}s; total {:.3f}s; "
               "catalog embeddings {}; query embeddings {}; LLM calls {}".format(
                   streamed[0]["elapsed"], elapsed, len(service.catalog_texts), len(service.query_texts), service.llm_calls))
 
-    def test_unknown_model_vectors_and_checkpoints_are_not_reused_between_fast_runs(self):
+    def test_unknown_model_vectors_are_reused_only_under_the_same_fingerprint(self):
+        # v0.5: an unknown (server_default) model's stored vectors are reused when the canary fingerprint
+        # namespace matches; a service producing different vectors gets a new namespace and no reuse.
         snapshot = catalog(128)
         service = ControlledModelService()
+
+        def namespace(result):
+            return result["run_info"]["Model doğrulaması"]["embedding"]["fingerprint"]["namespace"]
+
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             source, output = folder / "dictionary.xlsx", folder / "results.xlsx"
             write_workbook(source, ["FIELD00127", "FIELD00126"])
-            self.run_analysis(source, output, snapshot, service)
+            first = self.run_analysis(source, output, snapshot, service)
             first_texts = list(service.catalog_texts)
-            first_queries = list(service.query_texts)
             service.catalog_texts.clear()
-            service.query_texts.clear()
             second = self.run_analysis(source, output, snapshot, service, resume=True)
             self.assertTrue(first_texts)
-            self.assertEqual(service.catalog_texts, first_texts)
-            self.assertEqual(service.query_texts, first_queries)
-            self.assertEqual(second["run_info"]["Devam edilen satır"], 0)
+            self.assertEqual(service.catalog_texts, [])
+            self.assertEqual(namespace(second), namespace(first))
+            changed = ControlledModelService()
+            changed.response_bytes = json.dumps({"data": [{"embedding": [0.0, 1.0] + [0.0] * 4094}]}).encode("utf-8")
+            third = self.run_analysis(source, output, snapshot, changed, resume=True)
+            self.assertNotEqual(namespace(third), namespace(first))
+            self.assertTrue(changed.catalog_texts)
+            self.assertEqual(third["run_info"]["Devam edilen satır"], 0)
             self.assertFalse(list((folder / "runtime").rglob("vectors-*.json")))
 
     def test_unavailable_embedding_keeps_lexical_evidence_and_exposes_degradation(self):
@@ -196,6 +211,7 @@ class LargeCatalogPipelineTests(unittest.TestCase):
         self.assertGreater(service.attempts, 0)
         self.assertLessEqual(service.attempts, 2)
         self.assertEqual(service.llm_calls, 0)
+        self.assertEqual(result["run_info"]["Tamamlanma"], "Eksik / teknik hata")
         for row in result["results"]:
             self.assertEqual(row["errors"], [])
             self.assertEqual(row["physical_name"], "present")
@@ -237,7 +253,7 @@ class LargeCatalogPipelineTests(unittest.TestCase):
         self.assertEqual(service.llm_calls, 0)
         self.assertNotIn("llm", result["run_info"]["Model doğrulaması"])
 
-    def retry_known_model_run(self, service, llm_review):
+    def retry_known_model_run(self, service, llm_review, runs=2):
         config = fast_config()
         config["llm_review"] = llm_review
         config["embedding"].update(model_selection="explicit", model="pinned", model_version="v1", max_batch=1)
@@ -249,22 +265,27 @@ class LargeCatalogPipelineTests(unittest.TestCase):
             first = self.run_analysis(source, output, catalog(1), service, config=config)
             first_calls = service.attempts
             service.fail, service.llm_down = False, False
-            second = self.run_analysis(source, output, catalog(1), service, config=config, resume=True)
-        return first, second, first_calls
+            for _ in range(runs - 1):
+                before_last = service.attempts
+                last = self.run_analysis(source, output, catalog(1), service, config=config, resume=True)
+        return first, last, first_calls, before_last
 
     def test_stable_model_resume_retries_embedding_after_transient_failure(self):
         service = RecoveringModelService(embedding_down=True)
-        first, second, first_calls = self.retry_known_model_run(service, llm_review=False)
+        first, second, first_calls, _ = self.retry_known_model_run(service, llm_review=False)
         self.assertEqual(first["results"][0]["errors"], [])
-        self.assertTrue(first["results"][0]["retrieval_info"]["embedding_skipped"])
+        # v0.5: the failed fingerprint call drops the run to name/text search; the run is marked incomplete.
+        self.assertEqual(first["run_info"]["Tamamlanma"], "Eksik / teknik hata")
+        self.assertTrue(first["run_info"]["Uyarılar"])
         self.assertEqual(second["run_info"]["Devam edilen satır"], 0)
         self.assertGreater(service.attempts, first_calls)
         self.assertFalse(second["results"][0]["retrieval_info"]["embedding_skipped"])
-        self.assertIn("embedding", second["results"][0]["candidates"][0]["retrieval"])
+        # v0.5: the retried run embeds the query again (frozen index is empty, so no semantic channel hit is required).
+        self.assertTrue(second["results"][0]["retrieval_info"]["query_embedded"])
 
     def test_stable_model_resume_retries_llm_review_after_transient_failure(self):
         service = RecoveringModelService(llm_down=True)
-        first, second, first_calls = self.retry_known_model_run(service, llm_review=True)
+        first, second, first_calls, _ = self.retry_known_model_run(service, llm_review=True)
         self.assertEqual(first["results"][0]["errors"], [])
         self.assertNotIn("model_review", first["results"][0])
         self.assertEqual(second["run_info"]["Devam edilen satır"], 0)
@@ -274,10 +295,12 @@ class LargeCatalogPipelineTests(unittest.TestCase):
 
     def test_complete_stable_model_results_still_resume_without_extra_calls(self):
         service = RecoveringModelService()
-        first, second, first_calls = self.retry_known_model_run(service, llm_review=True)
+        # v0.5: the 2nd run re-searches because index coverage grew (first-run vectors were stored); once
+        # coverage is stable the row resumes and only the 8 fingerprint canaries are sent (new Resources per run).
+        first, third, first_calls, before_third = self.retry_known_model_run(service, llm_review=True, runs=3)
         self.assertIn("model_review", first["results"][0])
-        self.assertEqual(second["run_info"]["Devam edilen satır"], 1)
-        self.assertEqual(service.attempts, first_calls)
+        self.assertEqual(third["run_info"]["Devam edilen satır"], 1)
+        self.assertEqual(service.attempts - before_third, 8)
 
 
 class ProductionPreparationTests(unittest.TestCase):

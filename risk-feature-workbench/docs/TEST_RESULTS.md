@@ -1,3 +1,55 @@
+# v0.5 ölçümleri
+
+> **Sentetik veri; gerçek doğruluk değil.** Gerçek doğruluk iş bilgisayarında etiketli Excel ile ölçülür (`scripts/is_pc_dogrulama.ps1`).
+
+Düzenek: `tests/benchmark_fixture.py` (220 dolgu tablo, **5.803 kolon**, 273 talep satırı: 51 elle yazılmış + 222 deterministik; 54 satır YOK = %19,8; 219 pozitif), sahte Oracle ve sahte embedding servisi. `hash` = n-gram vektörü, `e5` = yalnız geliştirme ortamında multilingual-e5-large (**önbellekli**; e5 süreleri model hesabını içermez). Hit@3, P@3 ve YOK'ta öneri varsayılan kapıyla havuz üzerinden hesaplandı. Kod: 419cccf + çalışma ağacı (P12, P17 ve `semantics.py` süre birimi düzeltmesi sonrası); tek koşu, tekrar yok.
+
+```
+PYTHONPATH="src;tests" python scripts/evaluate.py --fixture --embedder hash|e5 --filler-tables 220 --fixture-rows 273 --group-size 25 --rows N --out DIR
+... --variant nolex|nolex_full|garbled   # zor varyantlar
+... --consistency-sizes 25,10,1          # tutarlılık matrisi (son boyut ayrıca ters sırada)
+```
+
+| Embedder | Satır | Hit@3 | P@3 | YOK'ta öneri | İlk sonuç (s) | Toplam (s) | row_status |
+|---|---|---|---|---|---|---|---|
+| hash | 1 | 1,00 | 1,00 | - | 0,12 | 0,41 | found 1 |
+| hash | 5 | 1,00 | 1,00 | - | 0,12 | 0,50 | found 5 |
+| hash | 10 | 1,00 | 0,967 | - | 0,12 | 0,58 | found 10 |
+| hash | 273 | 0,977 | 0,974 | 0/54 | 0,11 | 9,41 | found 167, weak_only 47, none_in_scope 59 |
+| e5 | 1 | 1,00 | 1,00 | - | 0,25 | 0,50 | found 1 |
+| e5 | 5 | 1,00 | 0,933 | - | 0,25 | 0,62 | found 5 |
+| e5 | 10 | 1,00 | 0,967 | - | 0,20 | 0,73 | found 10 |
+| e5 | 273 | 0,913 | 0,950 | 0/54 | 0,27 | 12,53 | found 167, weak_only 33, none_in_scope 73 |
+
+Embedding çağrısı: indeks **3.885** (katalog, bir kez; indeksleme havuz aşamasında yapılır), satır başına **0,86** sorgu çağrısı (273 satırda 234; tekrarlı metinler önbellekten; 5 satırda 1,0). Uçtan uca aşamada ek çağrı 0 (vektörler önbellekte). hash ve e5 için sayılar aynıdır. `--rows` yalnız ölçülen satırı kısar; katalog ve indeks aynıdır.
+
+**Tutarlılık** (hash, 273 satır, referans grup 25 ileri): grup 10 → 1,000 (0 farklı satır), grup 1 → 1,000 (0), grup 1 ters sıra → 1,000 (0). Toplam süre: grup 10 15,1 sn, grup 1 105,8 sn (ters 106,0 sn); referans 8,9 sn.
+
+**Zor varyantlar** (273 satır):
+
+| Varyant | Embedder | Hit@3 | P@3 | Havuz recall | YOK'ta öneri |
+|---|---|---|---|---|---|
+| normal | hash | 0,977 | 0,974 | 1,00 | 0/54 |
+| eş anlamlı grup ve açılım kapalı (`nolex`) | hash | 0,918 | 0,932 | 0,977 | 2/54 |
+| sözlük tamamen boş (`nolex_full`) | hash | 0,904 | 0,905 | 0,968 | 22/54 |
+| talep adı bozuk (`garbled`) | hash | 0,795 | 0,966 | 0,950 | 1/54 |
+| normal | e5 | 0,913 | 0,950 | 1,00 | 0/54 |
+| `nolex` | e5 | 0,895 | 0,893 | 0,991 | 1/54 |
+| `nolex_full` | e5 | 0,776 | 0,855 | 0,982 | 20/54 |
+| `garbled` | e5 | 0,699 | 0,920 | 0,959 | 1/54 |
+
+`nolex` yalnız eş anlamlı gruplarını ve açılımlarını kapatır; yapısal ve genel kelime listeleri kalır. `nolex_full` sözlüğün tamamını boşaltır (eski "sözlük kapalı" koşusu; indeks ve semantik çözümleme boş `Lexicon` ile). `garbled`: ad bazlı crc32 ile ünlü düşürme / 3 harfe kısaltma / alt çizgi kaldırma.
+
+**51 satırlık el yazımı küme** (`--fixture`, `--consistency`; 41 pozitif, 10 YOK):
+
+| Embedder | Hit@3 | P@3 | YOK'ta öneri |
+|---|---|---|---|
+| hash | 0,976 | 0,992 | 0/10 |
+| e5 | 0,951 | 0,983 | 0/10 |
+| none (yalnız sözcüksel) | 0,854 | 0,990 | 0/10 |
+
+Dikkat çekenler: 273 satırda hash Hit@3 0,977, e5 0,913; ikisinde de YOK satırlarında öneri 0/54. Grup boyutu ve sıra değişince sonuçlar özdeş (3 karşılaştırmada 0 farklı satır). Yalnız `nolex` YOK'ta öneriyi 0'dan 1-2'ye, Hit@3'ü hash'te 0,06, e5'te 0,02 düşürüyor; `nolex_full` YOK'ta öneriyi 22/54 (hash) ve 20/54'e (e5) çıkarıyor, Hit@3 hash'te 0,07, e5'te 0,14 düşüyor. Ad bozulunca Hit@3 hash'te 0,18, e5'te 0,21 düşüyor; YOK'ta öneri 1/54 kalıyor. Havuz recall her varyantta 0,95 ve üstü. Tek koşu, tekrar yok.
+
 # Web sürümü doğrulaması — 0.4.0
 
 2026-10-11 tarihinde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 üzerinde doğrulandı. Kurum Oracle/Qwen servislerine bağlanılmadı; otomatik ve tarayıcı testlerinde Oracle bağlantısı ile model HTTP taşıması kontrollü olarak taklit edildi.

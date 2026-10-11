@@ -127,6 +127,20 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(transport.requests[0][0], EMBED["endpoint"])
         self.assertEqual(transport.requests[0][1], {"model": "configured-id", "inputs": ["ilk", "ikinci"]})
 
+    def test_embedding_query_and_document_templates_wrap_text_and_change_identity(self):
+        transport = Transport({"vectors": [{"values": [1, 0]}]})
+        adapter = EmbeddingAdapter({**EMBED, "query_template": "Instruct: find column\nQuery: {text}"},
+                                   transport=transport)
+        adapter.embed(["son 3 ay {x}"], kind="query")
+        adapter.embed(["MUS_YAS"])
+        self.assertEqual(transport.requests[0][1]["inputs"], ["Instruct: find column\nQuery: son 3 ay {x}"])
+        self.assertEqual(transport.requests[1][1]["inputs"], ["MUS_YAS"])
+        self.assertNotEqual(adapter.cache_identity, EmbeddingAdapter(EMBED, transport=transport).cache_identity)
+        with self.assertRaises(ConfigError):
+            EmbeddingAdapter({**EMBED, "query_template": "no placeholder"}, transport=transport)
+        with self.assertRaises(ConfigError):
+            adapter.embed(["x"], kind="other")
+
     def test_embedding_rejects_bad_shape_and_timeout(self):
         with self.assertRaises(IntegrationError):
             EmbeddingAdapter(EMBED, transport=Transport({"vectors": [{"values": [1]}]})).embed(["x"])

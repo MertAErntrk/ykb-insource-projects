@@ -1,7 +1,8 @@
 import unittest
 
 from riskmatch.semantics import (
-    assess_production, build_dependencies, evaluate_candidate, normalize, parse_definition,
+    assess_production, build_dependencies, differences, evaluate_candidate, normalize, parse_definition,
+    type_class,
 )
 
 
@@ -24,6 +25,12 @@ def record(definition=None, column="OTHER_NAME", cid="c1"):
     result = {"catalog_id": cid, "column": column, "column_comment": "", "source_database": "synthetic", "environment": "test", "container": "DEMO", "schema": "RISK", "object": "FEATURES", "key_columns": ["CUSTOMER_ID", "APPLICATION_DATE"]}
     if definition is not None:
         result["definition"] = definition
+    return result
+
+
+def described(comment, column="OTHER_NAME"):
+    result = record(column=column)
+    result["column_comment"] = comment
     return result
 
 
@@ -114,19 +121,38 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "conflict")
         self.assertIn("conflict:unit", outcome["reasons"])
 
-    def test_unhandled_qualifiers_never_supported(self):
-        for qualifier in ("Yalnız kredi kartı başvuruları", "Türkiye müşterileri", "net gelir", "vergiler düşüldükten sonra", "2025 yılı itibarıyla", "iptal edilmiş başvurular", "kurumsal müşteri hariç"):
+    def test_unhandled_qualifiers_are_notes(self):
+        # Unparsed words are reported, not used to lower the status.
+        for qualifier in ("Yalnız kredi kartı başvuruları", "Türkiye müşterileri", "net gelir", "vergiler düşüldükten sonra", "2025 yılı itibarıyla", "iptal edilmiş başvurular"):
             req = request("income", "Başvuru bazında beyan edilen gelir TRY. " + qualifier)
             rec = record(column="income")
             rec["column_comment"] = "Başvuru bazında beyan edilen gelir TRY."
             with self.subTest(qualifier=qualifier):
-                self.assertNotEqual(evaluate_candidate(req, rec)["status"], "supported")
+                outcome = evaluate_candidate(req, rec)
+                self.assertTrue(any(r.startswith("ayrıştırılamayan ifade: talep") for r in outcome["reasons"]))
+                self.assertNotIn("window", parse_definition("income", qualifier)["facts"])
 
-    def test_equal_unknown_qualifiers_still_need_review(self):
+    def test_negated_scope_never_supported(self):
+        req = request("income", "Başvuru bazında beyan edilen gelir TRY. kurumsal müşteri hariç")
+        rec = record(column="income")
+        rec["column_comment"] = "Başvuru bazında beyan edilen gelir TRY."
+        self.assertNotEqual(evaluate_candidate(req, rec)["status"], "supported")
+
+    def test_different_unknown_qualifiers_need_review(self):
+        req = request("income", "Başvuru bazında beyan edilen net gelir TRY.")
+        rec = record(column="income")
+        rec["column_comment"] = "Başvuru bazında beyan edilen brüt gelir TRY."
+        outcome = evaluate_candidate(req, rec)
+        self.assertEqual(outcome["status"], "insufficient")
+        self.assertIn("missing:qualifier", outcome["reasons"])
+
+    def test_equal_unknown_qualifiers_are_notes(self):
         text = "Başvuru bazında beyan edilen gelir TRY. Bölge grubuna göre."
         rec = record(column="income")
         rec["column_comment"] = text
-        self.assertEqual(evaluate_candidate(request("income", text), rec)["status"], "insufficient")
+        outcome = evaluate_candidate(request("income", text), rec)
+        self.assertEqual(outcome["status"], "supported")
+        self.assertIn("ayrıştırılamayan ifade: talep 'bolge grubuna gore'", outcome["reasons"])
 
     def test_supported_different_name_requires_all_evidence(self):
         self.assertEqual(evaluate_candidate(request(definition=complete()), record(complete()))["status"], "supported")
@@ -154,9 +180,10 @@ class EvaluationTests(unittest.TestCase):
     def test_critical_unknown_never_supported(self):
         for dimension in ("grain", "reference_date", "person_key", "window_bounds", "direction", "null_policy"):
             with self.subTest(dimension=dimension):
+                # Known on the request, unknown on the candidate.
                 incomplete = complete()
                 incomplete["facts"].pop(dimension)
-                self.assertEqual(evaluate_candidate(request(definition=incomplete), record(incomplete))["status"], "insufficient")
+                self.assertEqual(evaluate_candidate(request(definition=complete()), record(incomplete))["status"], "insufficient")
 
     def test_model_inference_never_evidence(self):
         actual = complete()
@@ -176,11 +203,99 @@ class EvaluationTests(unittest.TestCase):
     def test_blank_comments_name_not_proof(self):
         self.assertEqual(evaluate_candidate(request("EFT_LW"), record(column="EFT_LW"))["status"], "insufficient")
 
-    def test_same_ambiguous_text_insufficient(self):
+    def test_same_text_supported_when_all_stated_facts_agree(self):
         desc = "Müşterinin son haftada kaç farklı kişi ile EFT ilişkisine girdiği."
         rec = record(column="EFT_LW")
         rec["column_comment"] = desc
-        self.assertEqual(evaluate_candidate(request("EFT_LW", desc), rec)["status"], "insufficient")
+        self.assertEqual(evaluate_candidate(request("EFT_LW", desc), rec)["status"], "supported")
+
+    def test_identical_description_supported(self):  # (a)
+        text = "Musteri bazinda son 3 ay toplam havale tutari TL"
+        self.assertEqual(evaluate_candidate(request("X", text), described(text))["status"], "supported")
+
+    def test_numeric_windows(self):  # (b)
+        outcome = evaluate_candidate(request("X", "son 12 ay toplam havale"), described("son 3 ay toplam havale"))
+        self.assertEqual(outcome["status"], "conflict")
+        self.assertIn("conflict:window", outcome["reasons"])
+        self.assertEqual(parse_definition("AVG_BAL_3M", "")["facts"]["window"]["value"], "last_3_months")
+        self.assertEqual(parse_definition("X", "son 1 yıl")["facts"]["window"]["value"], parse_definition("X", "son 12 ay")["facts"]["window"]["value"])
+        self.assertEqual(parse_definition("X", "son 14 gün")["facts"]["window"]["value"], "last_2_weeks")
+        diff = differences(outcome)
+        self.assertEqual(diff[0]["dimension"], "window")
+        self.assertEqual(diff[0]["text"], "Dönem farklı: talep son 12 ay, kolon son 3 ay")
+
+    def test_count_vs_amount(self):  # (c)
+        outcome = evaluate_candidate(request("X", "Musteri bazinda son 3 ay havale adedi"), described("Musteri bazinda son 3 ay havale tutari TL"))
+        self.assertEqual(outcome["status"], "conflict")
+        self.assertIn("conflict:measure", outcome["reasons"])
+        texts = {d["dimension"]: d["text"] for d in differences(outcome)}
+        self.assertIn("talep adet", texts["measure"])
+        self.assertIn("kolon tutar", texts["measure"])
+        self.assertEqual(parse_definition("X", "havale sayısı")["facts"]["measure"]["value"], "count")
+        self.assertEqual(parse_definition("X", "toplam havale adedi")["facts"]["aggregation"]["value"], "count")
+
+    def test_time_unit_count_is_duration(self):
+        # "gün sayısı" measures a duration, not a count of events.
+        facts = parse_definition("X", "Son 12 ayda ortalama gecikme gün sayısı")["facts"]
+        self.assertEqual(facts["measure"]["value"], "duration")
+        self.assertEqual(facts["aggregation"]["value"], "mean")
+        outcome = evaluate_candidate(request("X", "Son 12 ayda ortalama gecikme gün sayısı"), described("Son 12 ayda ortalama gecikme gün"))
+        self.assertNotEqual(outcome["status"], "conflict")
+        facts = parse_definition("X", "Aylık ortalama işlem adedi")["facts"]
+        self.assertEqual(facts["measure"]["value"], "count")
+        self.assertEqual(facts["aggregation"]["value"], ["count", "mean"])
+        # The period word is the unit, so an identical duration definition can be supported.
+        same = "Kredi gecikme gün sayısı"
+        self.assertEqual(parse_definition("X", same)["facts"]["unit"]["value"], "day")
+        self.assertEqual(evaluate_candidate(request("X", same), described(same))["status"], "supported")
+        # A window before "adet" is not a duration; possessive "günü sayısı" is the same duration as "gün sayısı".
+        self.assertEqual(parse_definition("X", "Son 3 ay adet havale işlemi")["facts"]["measure"]["value"], "count")
+        outcome = evaluate_candidate(request("X", "İşlem yapılan gün sayısı"), described("İşlem günü sayısı"))
+        self.assertNotIn("conflict:measure", outcome["reasons"])
+
+    def test_grain_difference(self):  # (d)
+        outcome = evaluate_candidate(request("X", "Kredi bazinda son 3 ay toplam havale tutari TL"), described("Musteri bazinda son 3 ay toplam havale tutari TL"))
+        self.assertEqual(outcome["status"], "conflict")
+        self.assertIn("conflict:grain", outcome["reasons"])
+        diff = differences(outcome)
+        self.assertEqual(diff[0]["dimension"], "grain")
+        self.assertIn("talep kredi", diff[0]["text"])
+        self.assertIn("kolon müşteri", diff[0]["text"])
+        self.assertTrue(all(d["dimension"] != "grain" for d in diff[1:]))
+        self.assertNotIn("grain", parse_definition("MUS_TOPLAM_KREDI_ADEDI", "")["facts"])
+
+    def test_data_type_conflict(self):  # (e)
+        text = "Musteri bazinda son 3 ay toplam havale tutari TL"
+        req = request("X", text)
+        req["data_type"] = "Tarih"
+        rec = described(text)
+        rec["data_type"] = "NUMBER(18,2)"
+        outcome = evaluate_candidate(req, rec)
+        self.assertEqual(outcome["status"], "conflict")
+        self.assertIn("conflict:data_type", outcome["reasons"])
+        for wanted, actual in (("Flag", "VARCHAR2(1)"), ("Sayısal", "NUMBER"), ("", "DATE")):
+            req["data_type"], rec["data_type"] = wanted, actual
+            self.assertEqual(evaluate_candidate(req, rec)["status"], "supported")
+        self.assertEqual([type_class(x) for x in ("TIMESTAMP(6)", "Metin", "Evet/Hayır", "FLOAT")], ["date", "text", "unknown", "number"])
+
+    def test_blank_comment_is_insufficient_not_conflict(self):  # (f)
+        outcome = evaluate_candidate(request("X", "Musteri bazinda son 3 ay toplam havale tutari TL"), described(""))
+        self.assertEqual(outcome["status"], "insufficient")
+        self.assertIn("Kolon açıklamasında dönem bilgisi yok", [d["text"] for d in differences(outcome)])
+
+    def test_differences_order_is_conflict_first(self):
+        outcome = evaluate_candidate(request("X", "Musteri bazinda son 12 ay toplam havale tutari TL"), described("son 3 ay havale tutari"))
+        statuses = [next(c["status"] for c in outcome["checks"] if c["dimension"] == d["dimension"]) for d in differences(outcome)]
+        self.assertEqual(statuses, sorted(statuses))
+        self.assertEqual(differences(outcome), differences(outcome))
+
+    def test_differences_accept_structured_values(self):
+        # Regression: dict-valued facts (e.g. ratio operands, bounds) crashed the label lookup.
+        check = {"dimension": "window_bounds", "status": "conflict", "requested": {"start": 1, "end": 3},
+                 "actual": {"start": 0, "end": 3}}
+        text = differences({"checks": [check]})[0]["text"]
+        self.assertIn("end=3", text)
+        self.assertIn("start=1", text)
 
     def test_ratio_reverse_and_null(self):
         a = parse_definition("ratio", "A / B; payda sıfırsa -1; NULL ise NULL")

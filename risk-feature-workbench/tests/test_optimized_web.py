@@ -72,7 +72,7 @@ class OptimizedWebTests(unittest.TestCase):
         deadline=time.monotonic()+4
         while time.monotonic()<deadline:
             value=self.client.get("/api/jobs/"+identity).json
-            if value["status"] not in ("running","cancelling"):return value
+            if value["status"] not in ("running","cancelling","reporting"):return value
             time.sleep(.01)
         self.fail("Worker did not finish")
 
@@ -151,9 +151,11 @@ class OptimizedWebTests(unittest.TestCase):
 
     def test_shell_has_accessible_analysis_choices_and_cancellation(self):
         page=self.client.get("/").text
-        for value in ('id="search-mode"','value="fast" selected','id="llm-review"',
-                      'id="cancel-analysis"','id="progress-time"','aria-describedby="search-mode-help"'):
+        for value in ('id="llm-review"','id="cancel-analysis"','id="progress-time"'):
             self.assertIn(value,page)
+        # v0.5 has a single search form; the search-mode choice was removed from the shell on purpose.
+        for value in ('id="search-mode"','aria-describedby="search-mode-help"'):
+            self.assertNotIn(value,page)
         # All dynamic warnings are added through node(), which assigns textContent.
         source=(Path(__file__).resolve().parents[1]/"src/riskmatch/static/app.js").read_text("utf-8")
         self.assertIn('el.textContent=text',source)

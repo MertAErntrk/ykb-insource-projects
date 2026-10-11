@@ -128,7 +128,7 @@ class CatalogFailureWebTests(unittest.TestCase):
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             result = self.client.get("/api/jobs/" + identity)
-            if result.json["status"] != "running":
+            if result.json["status"] not in ("running", "cancelling", "reporting"):
                 return result.json
             time.sleep(.02)
         self.fail("Bulk workbook job did not finish")
@@ -184,14 +184,16 @@ class CatalogFailureWebTests(unittest.TestCase):
         self.assertEqual(result["progress"]["completed"], ROW_COUNT)
         self.assertEqual(result["progress"]["total"], ROW_COUNT)
         self.assertEqual(len(result["results"]), ROW_COUNT)
-        self.assertEqual(service.llm_calls, ROW_COUNT)
+        # v0.5: LLM review only for rows with non-strong shown candidates; every requested review is made.
+        self.assertEqual(service.llm_calls, sum(1 for row in result["results"] if row.get("llm_requested")))
         self.assertGreaterEqual(service.embedding_calls, ROW_COUNT + 1)
         for number, row in enumerate(result["results"], 1):
             self.assertEqual(row["errors"], [])
             self.assertEqual(row["request"]["name"], "HAV_LM_" + str(number))
             self.assertEqual(row["request"]["reported"], "Evet")
-            self.assertEqual(row["model_review"]["model"], "qwen38-27b")
-            self.assertTrue(row["model_review"]["assessments"])
+            if row.get("llm_requested"):
+                self.assertEqual(row["model_review"]["model"], "qwen38-27b")
+                self.assertTrue(row["model_review"]["assessments"])
         self.assertNotIn("SECRET_SENTINEL", json.dumps(result))
         response = self.client.get("/api/jobs/" + result["id"] + "/download")
         self.assertEqual(response.status_code, 200)

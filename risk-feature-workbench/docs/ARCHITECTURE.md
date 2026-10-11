@@ -1,6 +1,78 @@
 # Mimari değerlendirme ve karar kaydı
 
-## 0.4.0 büyük katalog optimizasyonu
+## 0.5.0 mimarisi (güncel)
+
+Hedef sırası: doğru eşleşme, güvenilir çalışma, makul süre. 0.4'teki "hızlı/tam arama modu" ayrımı kalktı: her satır aynı kanallardan geçer. Eski `search_mode`, `candidate_limit`, `embedding_budget`, `limit`, `expanded_limit` anahtarları yapılandırmada zararsızdır, yok sayılır. Aşağıdaki "0.4.0" ve sonraki bölümler geçmiş karar kaydıdır; arama akışı için bu bölüm esastır.
+
+### Akış
+
+```
+Excel (bir kez yüklenir, web.py /api/upload)  ->  satır seçimi (İlk N / Sıradaki 10 / Tümü) -> gruplar (10/25/50)
+  -> pipeline.analyze (grup başına; checkpoint)
+       1. Katalog:  resources.catalog -> önbellek (imza kontrolü) | Oracle taraması
+       2. Embedding: resources.embedding -> model parmak izi (8 kanarya) -> ad alanı (namespace)
+       3. İndeks:   HybridIndex (katalog sürümü + ad alanı + ayar); dondurulmuş anlamsal küme
+       4. Satır başına havuz (retrieval.py): exact ad | sözlükle normalize ad | alan ağırlıklı BM25 | anlamsal
+            -> sıra birleştirme (RRF) -> en çok pool_size (30) aday
+       5. Sıralama + gösterim kapısı (ranking.py): z-skoru, kosinüs, kelime örtüşmesi, konu kelimesi
+            -> en çok 3 aday (0/1/2 de olabilir) + reddedilen yakın adaylar ayrı listede
+       6. LLM (isteğe bağlı): yalnız gösterilen aday var ve hiçbiri meaning=strong değilse
+       7. İş sonu: 2 kanaryayla model yeniden doğrulaması -> değişmişse tüm satırlar model_changed
+  -> web: sonuçlar akışla (partial_results) gelir -> Excel yazılır (excelio.py) -> "Tamamlandı"
+```
+
+Not: "Skor" yüzde değildir; sıralama için kullanılır, doğruluk olasılığı değildir.
+
+### Modüller
+
+| Modül | Sorumluluk |
+|---|---|
+| `web.py`, `web_services.py` | Flask + Waitress, yalnız 127.0.0.1. Oturum, CSRF, iş yönetimi (tek işçi), akış, durdur, rapor, indeks paneli. |
+| `pipeline.py` | Grup analizi: katalog, embedding bağlamı, indeks, satır döngüsü, LLM, checkpoint, model yeniden doğrulaması, `run_info`. Disk/kilit hatalarında checkpoint ve son çalıştırma yazımı hataya dayanıklıdır. |
+| `resources.py` | Süreç geneli paylaşılan kaynaklar: `Resources` (katalog önbelleği, tek vektör deposu, parmak izli ad alanları, en çok 2 indeks LRU), `EmbeddingGate` (tek uçuş), `BackgroundIndexer`. |
+| `catalog_cache.py` | Katalog anlık görüntüsü önbelleği (bellek + `runtime` altında JSON). Anahtar: kullanıcı+DSN+kapsam+şema karması (ham değerler saklanmaz). Yalnız tam (`complete`) katalog yazılır. |
+| `vectorstore.py` | SQLite vektör deposu, ad alanı başına; model parmak izi (kanarya) ve doğrulama; bozulursa `tainted` işaretlenir. |
+| `retrieval.py` | `HybridIndex`: kanallar, havuz, dondurulmuş anlamsal küme, devre kesici, kapsam bilgisi. |
+| `ranking.py` | Gösterim kapısı (`GATE_DEFAULTS`), `name_match` ve `meaning` sınıfları, farklar ve kanıt, `row_status`. |
+| `lexicon.py`, `data/lexicon.json` | Kısaltma/eş anlam sözlüğü; ad normalizasyonu. |
+| `semantics.py` | Boyut bazlı (varlık, pencere, yön, ...) deterministik karşılaştırma; çelişki ve eksik kanıtı `differences` olarak verir. |
+| `excelio.py` | Excel okuma ve rapor yazma (geçici dosya + doğrulama + `os.replace`). |
+| `adapters/oracle.py`, `adapters/qwen.py` | Katalog okuma (yalnız metadata) ve embedding/LLM çağrıları. |
+
+### Önbellek ve geçersiz kılma
+
+- **Katalog:** ömür 8 saat (`Resources.catalog_ttl_seconds=28800`). Önbellek varsa önce ucuz bir Oracle imzası alınır; imza saklananla aynıysa önbellek kullanılır, farklıysa veya imza alınamazsa yeniden taranır. İmza alınamazsa yeni tarama önbelleğe yazılmaz. Eksik (`complete=False`) katalog hiç önbelleğe yazılmaz. "Kataloğu yenile" (`/api/catalog/refresh`) girdiyi siler ve yeniden tarar.
+- **Vektörler:** metin karması başına bir kez, model ad alanı altında saklanır. Parmak izi: 8 kanarya metninin vektörleri saklananlarla karşılaştırılır; yeterince benzerse (kosinüs ve Gram farkı eşikleri `vectorstore.py` içinde) aynı ad alanı, değilse yeni ad alanı açılır. Bağlam parmak izi 600 sn önbelleklenir. `VectorStore.prune` vardır ancak uygulama kodunda çağrılmaz; eski ad alanlarının otomatik temizliği yoktur.
+- **İndeks:** anahtar = katalog sürümü + ad alanı + indeks ayarları. Katalog sürümü, model veya ayar değişince yeni indeks kurulur.
+- **Model değişimi:** iş sonunda 2 kanaryayla yeniden doğrulama; farklıysa ad alanı `tainted` olur, ilgili bağlam/indeks/indeksleyiciler düşer ve işteki tüm satırlar `model_changed` işaretlenir (Excel'de uyarı). Doğrulama yapılamazsa iş "Eksik" sayılır.
+- **Checkpoint:** grup başına; yalnız hatasız, embedding'i atlanmamış, `model_changed` olmayan ve aynı indeks kapsamıyla üretilmiş satırlar yeniden kullanılır.
+
+### Hata yolları
+
+| Durum | Davranış |
+|---|---|
+| Oracle zaman aşımı (`DPY-4024`), izin (`ORA-00942`/`ORA-01031`), kimlik hatası | Güvenli kodla bildirilir; ham sürücü metni gösterilmez. Okunmuş kayıtlar korunur. |
+| Katalog hiç okunamadı | Arama başlamaz, sonuç satırı üretilmez ("Katalog okunamadı"). |
+| Katalog eksik (kısmi) | Arama sürer; `catalog_complete=false`; satır `none_in_scope` olamaz, "DB'de yok" denmez. Önbelleğe yazılmaz. |
+| Embedding 401/403/404, 429, 5xx, zaman aşımı | 429/500/502/503/504 ve ağ hatası `max_retries` (varsayılan 1, en çok 2) kadar yeniden denenir; sonra `IntegrationError` (HTTP kodu mesajda, ham yanıt yok). Satır için embedding atlanır (`embedding_skipped`), ad ve kelime kanıtıyla devam edilir. |
+| Bozuk vektör (sayı/boyut uyuşmuyor) | `IntegrationError`; aynı şekilde atlanır. |
+| Devre kesici | Arama sırasında art arda 3 embedding hatası -> `circuit_open`: iş sonuna kadar (sonraki iş başında sıfırlanır) embedding çağrılmaz, uyarı yazılır. Arka plan indeksleyici art arda 5 hatada durur (durum `failed`). |
+| LLM hatası | Kaynak kanıtı silinmez; yalnız `model_review` eksik kalır. |
+| Rapor yazılamaz (dosya açık, izin yok, disk dolu, doğrulanamadı) | `ReportWriteError`; mevcut rapor değişmez; sonuçlar ekranda kalır; iş `report_failed`, "yeniden dene" (`/api/jobs/<id>/report`) ile tekrarlanır. |
+| Checkpoint/vektör deposu diske yazılamaz | Çalışma sürer, `run_info` uyarısı yazılır; vektör deposu hataları `VectorStoreError` olarak sarılır. Disk kilidi/dolu için ayrıntı davranışı kurumda **doğrulanmadı**. |
+
+### Eşzamanlılık
+
+- **Tek uçuş kapısı:** `EmbeddingGate` aynı anda en çok bir embedding çağrısı gönderir; bekleyen arama çağrıları bekleyen indeks çağrılarından önce gider (arama önceliği).
+- **Arka plan indeksleyici:** eksik katalog metinlerini kapıdan düşük öncelikle, vektörleştirir (daemon iş parçacığı; durumlar: running, done, stopped, failed; başlat/durdur/ilerleme/kalan süre web panelinden). Aynı anahtar için tek indeksleyici paylaşılır.
+- **Dondurulmuş anlamsal küme:** indeksin anlamsal kümesi kurulurken ve `refresh_index()` ile sabitlenir. Çalışan bir işin kümesini indeksleyici değiştirmez; bu yüzden bir satırın havuzu yalnız (satır, katalog, dondurulmuş küme) üçlüsüne bağlıdır ve satır sırasından bağımsızdır. Yeni vektörler sonraki işte görünür.
+- **Web:** oturum başına tek etkin analiz (ikincisi 409); iş sayısı üst sınırı 20, yüklenen dosya üst sınırı 30.
+
+### Yapılandırma (`retrieval`)
+
+`pool_size` (5–60, varsayılan 30), `lexical_k` (5–200, 40), `semantic_k` (0–200, 30), `shortlist_embed` (0–50, 10), `background_size` (16–512, 128), `gate` (sözlük; boşsa `ranking.GATE_DEFAULTS`: `z_min` 2.5, `c_min` 0.5, `z_strong` 4.0, `c_low` 0.3, `margin` 1.5, `lexical_min_coverage` 0.8, `lexical_min_tokens` 2, `max_shown` 3, `max_rejected` 5, `require_subject` true). `gate` içinde bilinmeyen anahtar hata verir.
+
+## 0.4.0 büyük katalog optimizasyonu (geçmiş kayıt)
 
 Önceki akış ilk değişkenin embedding aramasında bütün katalog vektörlerini hazırlıyor, sonra her sorguyu bütün vektörlerle Python'da karşılaştırıyordu. 273 satır, 273 katalog kaydı değildir: 10.000 kolon ve 4096 boyutta bir geçiş 2,73 milyon vektör karşılaştırması oluşturur. İkinci maliyet, üretim kanıtı değerlendirmesinde aynı katalog tanımlarının her talep için tekrar çözümlenmesiydi.
 

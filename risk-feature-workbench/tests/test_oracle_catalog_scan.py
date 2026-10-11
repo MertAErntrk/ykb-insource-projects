@@ -27,6 +27,7 @@ class Database:
         self.connections = []
         self.fetch_sizes = []
         self.after_fetch = None
+        self.group_failures = {}
 
     def connect(self, **kwargs):
         connection = Connection(self)
@@ -57,7 +58,8 @@ class Cursor:
         self.schema = self.binds.get("schema_name")
         self.database.calls.append((sql, self.binds))
         self.phase = next((phase for phase in ["ALL_OBJECTS", "ALL_TAB_COLUMNS", "ALL_COL_COMMENTS", "ALL_TAB_COMMENTS", "ALL_CONSTRAINTS"] if phase in sql), "CONTEXT")
-        failure = self.database.execute_failures.get((self.schema, self.phase))
+        failure = (self.database.execute_failures.get((self.schema, self.phase))
+                   or self.database.group_failures.get((self.phase, self.binds.get("object_0"))))
         if failure:
             raise RuntimeError(failure)
         objects = self.database.data.get(self.schema, {})
@@ -122,7 +124,11 @@ class OracleCatalogScanTests(unittest.TestCase):
                 continue
             self.assertIn(":schema_name", sql)
             self.assertIn("ROWNUM <= :row_limit", sql)
-            self.assertNotIn("ORDER BY", sql)
+            if "ALL_OBJECTS" in sql or "ALL_TAB_COLUMNS" in sql:
+                self.assertIn("ORDER BY", sql)
+                self.assertLess(sql.index("ORDER BY"), sql.index("ROWNUM"))
+            else:
+                self.assertNotIn("ORDER BY", sql)
             self.assertIn(binds["schema_name"], CONFIG["schemas"])
             if "ALL_TAB_COLUMNS" in sql:
                 self.assertNotIn("JOIN", sql)
@@ -163,13 +169,79 @@ class OracleCatalogScanTests(unittest.TestCase):
         self.assertEqual(result["scan_stats"]["schemas_completed"], 1)
 
     def test_record_cap_prevents_absence_and_skips_remaining_schemas(self):
-        database = Database({"A": catalog(5), "B": catalog()})
+        objects = {"T1": {"kind": "TABLE", "columns": ["F"]}, "T2": {"kind": "TABLE", "columns": ["F"]}}
+        database = Database({"A": objects, "B": catalog()})
         result = self.run_scan(database, schemas=["A", "B"], max_records=2)
         self.assertEqual(len(result["records"]), 2)
         self.assertFalse(result["complete"])
         self.assertTrue(any("sınır" in error for error in result["errors"]))
         self.assertTrue(any(check["schema"] == "B" and check["status"] == "skipped" for check in result["checks"]))
         self.assertFalse(any(binds.get("schema_name") == "B" for _, binds in database.calls))
+
+    def test_record_order_from_database_does_not_change_records_or_version(self):
+        forward = {"A": {"T"+str(i): {"kind": "TABLE", "columns": ["C"+str(j) for j in range(3)]} for i in range(5)}}
+        backward = {"A": {name: {"kind": info["kind"], "columns": list(reversed(info["columns"]))}
+                          for name, info in reversed(list(forward["A"].items()))}}
+        keys = [(name, "P", "PK_"+name, "C0", 1) for name in forward["A"]]
+        first = self.run_scan(Database(forward, key_rows=keys), schemas=["A"])
+        second = self.run_scan(Database(backward, key_rows=list(reversed(keys))), schemas=["A"])
+        self.assertEqual(first["records"] and [r["catalog_id"] for r in first["records"]],
+                         [r["catalog_id"] for r in second["records"]])
+        self.assertEqual(first["version"], second["version"])
+        self.assertEqual(len(first["records"]), 15)
+
+    def test_helper_timeout_marks_only_that_group_and_scan_continues(self):
+        objects = {"T"+str(i).zfill(3): {"kind": "TABLE", "columns": ["F1", "F2"]} for i in range(30)}
+        database = Database({"A": objects})
+        database.group_failures[("ALL_COL_COMMENTS", "T000")] = "DPY-4024 PRIVATE_PASSWORD_SENTINEL"
+        result = self.run_scan(database, schemas=["A"])
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["records"]), 60)
+        first = [r for r in result["records"] if r["object"] < "T025"]
+        second = [r for r in result["records"] if r["object"] >= "T025"]
+        self.assertEqual(len(second), 10)
+        self.assertTrue(all("column_comment" in r["missing"] and r["column_comment"] == "" for r in first))
+        self.assertTrue(all("column_comment" not in r["missing"] and r["column_comment"] for r in second))
+        self.assertEqual(result["coverage"]["failed_groups"], 1)
+        self.assertEqual(len(database.connections), 2)
+        self.assertTrue(any("DPY-4024" in error for error in result["errors"]))
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+
+    def test_record_cap_never_cuts_a_group_in_half_and_names_dropped_objects(self):
+        objects = {"T"+str(i).zfill(3): {"kind": "TABLE", "columns": ["F1"] if i < 25 else ["F1", "F2"]}
+                   for i in range(28)}
+        result = self.run_scan(Database({"A": objects}), schemas=["A"], max_records=30)
+        self.assertEqual(len(result["records"]), 25)
+        self.assertFalse(result["complete"])
+        coverage = result["coverage"]
+        self.assertEqual(coverage["objects_total"], 28)
+        self.assertEqual(coverage["objects_scanned"], 25)
+        self.assertEqual(coverage["columns"], 25)
+        self.assertEqual(coverage["truncated_objects"], ["A.T025", "A.T026", "A.T027"])
+        self.assertFalse({"A."+r["object"] for r in result["records"]} & set(coverage["truncated_objects"]))
+
+    def test_coverage_is_present_and_clean_on_full_scan(self):
+        result = self.run_scan(Database())
+        self.assertEqual(result["coverage"], {"objects_total": 3, "objects_scanned": 3, "columns": 3,
+                                              "truncated_objects": [], "failed_groups": 0})
+
+    def test_signature_uses_one_query_per_schema_and_is_deterministic(self):
+        database = Database()
+        adapter = OracleAdapter(dict(CONFIG), credentials=CREDS, connector=database.connect)
+        first, second = adapter.signature(), adapter.signature()
+        self.assertEqual(first, second)
+        queries = [sql for sql, _ in database.calls]
+        self.assertEqual(len(queries), 6)
+        self.assertTrue(all("COUNT(*)" in sql and "LAST_DDL_TIME" in sql for sql in queries))
+        self.assertTrue(all(connection.closed for connection in database.connections))
+
+    def test_signature_error_is_safe(self):
+        database = Database(execute_failures={("B", "ALL_OBJECTS"): "DPY-4024 PRIVATE_PASSWORD_SENTINEL"})
+        adapter = OracleAdapter(dict(CONFIG), credentials=CREDS, connector=database.connect)
+        with self.assertRaises(IntegrationError) as caught:
+            adapter.signature()
+        self.assertIn("DPY-4024", str(caught.exception))
+        self.assertNotIn("PRIVATE_", str(caught.exception))
 
     def test_exact_last_batch_record_limit_can_still_be_complete(self):
         result = self.run_scan(Database({"A": catalog(2)}), schemas=["A"], max_records=2)

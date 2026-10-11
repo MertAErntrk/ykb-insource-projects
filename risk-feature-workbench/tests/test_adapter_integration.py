@@ -99,13 +99,8 @@ class IntegrationTests(unittest.TestCase):
         changed["request_template"] = {"inputs": "{texts}"}
         second = EmbeddingAdapter(changed)
         self.assertNotEqual(first.cache_identity, second.cache_identity)
-        record = {"catalog_id": "c1", "source_database": "risk", "environment": "dev",
-                  "container": "PDB1", "schema": "RISK_DWH", "object": "T", "column": "X",
-                  "metadata_version": "v1"}
-        snap = {"records": [record], "scope": BASE["oracle"], "version": "v1"}
-        with tempfile.TemporaryDirectory() as directory:
-            self.assertNotEqual(HybridIndex(snap, first, directory)._cache_path([0]),
-                                HybridIndex(snap, second, directory)._cache_path([0]))
+        # v0.5: HybridIndex has no per-adapter vector file; cache_identity selects the embedding gate and
+        # stored vectors are keyed by the canary fingerprint namespace (test_vectorstore/test_resources).
 
     def test_real_oracle_failure_stops_without_output_or_demo_fallback(self):
         from riskmatch.pipeline import analyze

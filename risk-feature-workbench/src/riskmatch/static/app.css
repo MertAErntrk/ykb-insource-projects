@@ -15,3 +15,13 @@
 .analysis-failure{border-left:4px solid var(--red)}.analysis-failure h2{color:var(--red)}#failure-message{overflow-wrap:anywhere}
 
 #progress-time{font-variant-numeric:tabular-nums;margin-bottom:0}#cancel-analysis{min-width:100px;min-height:44px}.retrieval-note{color:var(--amber)}.retrieval-warnings p{margin:7px 0 0}#search-mode-help{line-height:1.7}#progress-detail{overflow-wrap:anywhere}
+
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.row-picker{border-top:1px solid var(--line);padding-top:16px;margin:18px 0}.row-picker h3{margin:0}.row-picker .button-row{margin-bottom:12px}.group-size{max-width:200px;margin-top:6px}.row-list{max-height:320px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px}.row-list td{padding:8px 12px}.row-list input{width:17px;min-height:17px;margin:0;accent-color:var(--blue)}.row-list thead th{position:sticky;top:0}
+#index-panel progress{margin:8px 0}#index-panel .button-row{margin-top:10px}#index-panel .secondary{min-height:36px;padding:6px 12px}
+#progress-warning{margin:10px 0}#report-message{overflow-wrap:anywhere}#progress-card .button-row{margin-top:10px}
+.metrics{grid-template-columns:repeat(5,1fr)}
+.badge.rs-found{background:#e5f4eb;color:var(--green)}.badge.rs-weak_only{background:#fff3d9;color:var(--amber)}.badge.rs-none_in_scope{background:#edf1f5;color:#455b6e}.badge.rs-none_partial,.badge.rs-not_evaluated{background:#fdebee;color:var(--red)}
+.tag-row{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 10px}.badge.nm-exact,.badge.mn-supported{background:#e5f4eb;color:var(--green)}
+.candidate.rejected{background:#fafbfc;border-style:dashed}.candidate ul{margin:4px 0 10px}#detail-content>.notice{margin:12px 0}
+@media(max-width:600px){.metrics{grid-template-columns:1fr 1fr}}

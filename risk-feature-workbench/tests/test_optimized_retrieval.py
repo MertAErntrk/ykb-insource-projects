@@ -1,20 +1,23 @@
-"""Bounded semantic reranking for large real catalogs, without network access."""
+"""Large-catalog retrieval: bounded work per row, scope first, controlled degradation."""
 
 import copy
 import sys
 import tempfile
+import time
 import unittest
-from array import array
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from riskmatch.errors import AnalysisCancelled, InputError
+from riskmatch.errors import AnalysisCancelled
 from riskmatch.retrieval import HybridIndex
+from test_retrieval import HashEmbed, frozen_namespace
 
 
 SCOPE = {"source_database": "EDWLIVE", "environment": "live",
          "container": "EDWLIVE", "schemas": ["DM_CAD", "OTHER"]}
+WORDS = ["kredi", "kart", "mevduat", "bakiye", "limit", "gecikme", "tutar", "faiz", "odeme", "basvuru"]
 
 
 def record(identifier, column, comment="", schema="DM_CAD"):
@@ -28,134 +31,103 @@ def snapshot(records):
     return {"scope": copy.deepcopy(SCOPE), "records": records, "version": "v1", "complete": True}
 
 
-class CountingEmbedding:
-    model = "controlled-test"
-    model_version = "v1"
-    dimensions = 4096
-    max_batch = 1
-    persistent_cache_safe = False
+def catalog(size):
+    return snapshot([record(i, "%s_%s_%05d" % (WORDS[i % 10].upper(), WORDS[i // 10 % 10].upper(), i),
+                            "%s %s son %d ay" % (WORDS[i % 7], WORDS[i % 3], i % 12 + 1)) for i in range(size)])
 
-    def __init__(self, fail=False, invalid=False):
-        self.calls = []
-        self.fail = fail
-        self.invalid = invalid
 
-    def embed(self, texts):
-        self.calls.append(list(texts))
-        if self.fail:
-            raise RuntimeError("provider-secret-that-must-not-leak")
-        if self.invalid:
-            return [[0.0] * self.dimensions for _ in texts]
-        return [[1.0] + [0.0] * (self.dimensions - 1) for _ in texts]
+def requests(count):
+    return [{"name": "%s_%s_%05d" % (WORDS[n % 10].upper(), WORDS[n % 9].upper(), 9999 - n),
+             "description": "%s son %d ay %s" % (WORDS[n % 4], n % 12 + 1, WORDS[n % 6])} for n in range(count)]
 
 
 class OptimizedRetrievalTests(unittest.TestCase):
-    def test_10000_columns_273_queries_have_bounded_vectors_and_comparisons(self):
-        data = snapshot([record(i, "TARGET_%05d" % i, "application amount") for i in range(10000)])
-        embedding = CountingEmbedding()
-        progress = []
-        index = HybridIndex(data, embedding, candidate_limit=24, embedding_budget=256,
-                            progress=progress.append)
-        self.assertEqual(embedding.calls, [])
-        for number in range(273):
-            hits = index.search({"name": "TARGET_%05d" % (9999 - number)})
-            self.assertEqual(hits[0]["catalog_id"], str(9999 - number))
-            self.assertLessEqual(index.last_search_info["candidate_count"], 24)
-            self.assertTrue(index.last_search_info["candidate_limited"])
-        self.assertEqual(index.stats["catalog_vectors_embedded"], 256)
-        self.assertLessEqual(index.stats["query_vectors_embedded"], 273)
-        self.assertLessEqual(len(embedding.calls), 256 + 273)
-        self.assertLessEqual(index.stats["vector_comparisons"], 273 * 24)
-        self.assertTrue(index.stats["embedding_budget_exhausted"])
-        self.assertEqual(progress[0]["items_completed"], 0)
-        self.assertLessEqual(progress[0]["items_total"], 24)
-        self.assertTrue(all(item["phase"] == "embedding" for item in progress))
+    def test_10000_columns_273_lexical_searches_under_5_seconds(self):
+        data = catalog(10000)
+        start = time.perf_counter()
+        index = HybridIndex(data)
+        built = time.perf_counter() - start
+        start = time.perf_counter()
+        for request in requests(273):
+            self.assertLessEqual(len(index.search(request)), 30)
+        hit = index.search({"name": data["records"][4321]["column"]})[0]
+        self.assertEqual((hit["catalog_id"], hit["_features"]["name_level"]), ("4321", "exact"))
+        elapsed = time.perf_counter() - start
+        print("\n10k lexical: build %.2fs, 273 searches %.2fs" % (built, elapsed))
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(index.last_search_info["semantic_scope"], "none")
+
+    def test_3000_columns_273_hybrid_searches_with_frozen_index_under_15_seconds(self):
+        data = catalog(3000)
+        embed = HashEmbed()
+        index = HybridIndex(data, embed=embed)
+        frozen_namespace(index, embed)
+        self.assertEqual(index.index_coverage, 1.0)
+        start = time.perf_counter()
+        for request in requests(273):
+            hits = index.search(request)
+            self.assertEqual(index.last_search_info["semantic_scope"], "full")
+            self.assertLessEqual(len(hits), 30)
+        elapsed = time.perf_counter() - start
+        print("\n3k hybrid (frozen full): 273 searches %.2fs, stats %s" % (elapsed, index.stats))
+        self.assertLess(elapsed, 15.0)
+        self.assertEqual(index.stats["document_calls"], 0)  # frozen fill happened outside the index
 
     def test_no_lexical_match_never_embeds_arbitrary_catalog_prefix(self):
-        embedding = CountingEmbedding()
+        embed = HashEmbed()
         index = HybridIndex(snapshot([record(i, "TOTAL", "amount") for i in range(100)]),
-                            embedding, candidate_limit=24, embedding_budget=256)
+                            embed=embed, background_size=0)
         self.assertEqual(index.search({"name": "unrelatedfoobar"}), [])
-        self.assertEqual(embedding.calls, [])
-        self.assertTrue(index.last_search_info["candidate_limited"])
-        self.assertTrue(index.last_search_info["embedding_skipped"])
-        self.assertIn("kısa liste", index.last_search_info["warning"])
+        self.assertEqual([kind for kind, _ in embed.calls], ["query"])
 
     def test_scope_is_applied_before_shortlist_and_provider_calls(self):
-        embedding = CountingEmbedding()
+        embed = HashEmbed()
         index = HybridIndex(snapshot([record("a", "AMOUNT", "allowed"),
                                       record("b", "AMOUNT", "FORBIDDEN", schema="OTHER")]),
-                            embedding, candidate_limit=24, embedding_budget=256)
+                            embed=embed, background_size=0)
         hits = index.search({"name": "AMOUNT", "scope": {"schemas": ["DM_CAD"]}})
         self.assertEqual([hit["catalog_id"] for hit in hits], ["a"])
-        self.assertNotIn("FORBIDDEN", str(embedding.calls))
-        previous = len(embedding.calls)
+        self.assertNotIn("FORBIDDEN", str(embed.calls))
+        previous = len(embed.calls)
         self.assertEqual(index.search({"name": "AMOUNT", "scope": {"environment": "elsewhere"}}), [])
-        self.assertEqual(len(embedding.calls), previous)
+        self.assertEqual(len(embed.calls), previous)
 
-    def test_exact_physical_match_reserves_slot_even_at_end_of_catalog(self):
-        embedding = CountingEmbedding()
-        data = snapshot([record(i, "OTHER", "target target target") for i in range(100)] +
+    def test_exact_physical_match_ranks_first_even_at_end_of_catalog(self):
+        data = snapshot([record(i, "OTHER_%d" % i, "target target target") for i in range(100)] +
                         [record("last", "TARGET", "")])
-        index = HybridIndex(data, embedding, candidate_limit=1, embedding_budget=1)
-        hits = index.search({"name": "TARGET"})
+        hits = HybridIndex(data, pool_size=5).search({"name": "TARGET"})
         self.assertEqual(hits[0]["catalog_id"], "last")
         self.assertIn("exact", hits[0]["_retrieval"])
-        self.assertTrue(embedding.calls[0][0].startswith("TARGET "))
+        self.assertEqual(hits[0]["_features"]["name_level"], "exact")
+        self.assertEqual(len(hits), 5)
 
-    def test_identical_catalog_text_deduplicates_and_expansion_reuses_query(self):
-        embedding = CountingEmbedding()
+    def test_query_vector_is_cached_per_job(self):
+        embed = HashEmbed()
         index = HybridIndex(snapshot([record("a", "LIMIT", "credit limit"),
-                                      record("b", "LIMIT", "credit limit")]),
-                            embedding, candidate_limit=24, embedding_budget=10)
+                                      record("b", "LIMIT", "credit limit")]), embed=embed)
         request = {"name": "LIMIT", "description": "credit limit"}
         index.search(request, limit=1)
-        calls = len(embedding.calls)
-        expanded = index.search(request, limit=24, expanded=True)
-        self.assertEqual(len(expanded), 2)
-        self.assertEqual(len(embedding.calls), calls)
-        self.assertEqual(index.stats["catalog_vectors_embedded"], 1)
+        calls = len(embed.calls)
+        # v0.5: identical (column, comment) copies collapse into one record; the copy moves to _locations.
+        hits = index.search(request, limit=24, expanded=True)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(len(hits[0]["_locations"]), 1)
+        self.assertEqual(len(embed.calls), calls)
         self.assertEqual(index.stats["query_vectors_embedded"], 1)
         self.assertEqual(index.stats["query_cache_hits"], 1)
-        self.assertIsInstance(next(iter(index._text_vectors.values())), array)
 
-    def test_exhausted_budget_preserves_lexical_candidates_and_discloses_skip(self):
-        embedding = CountingEmbedding()
-        index = HybridIndex(snapshot([record("a", "ALPHA"), record("b", "OMEGA")]),
-                            embedding, candidate_limit=24, embedding_budget=1)
-        index.search({"name": "ALPHA"})
-        previous = len(embedding.calls)
-        result = index.search({"name": "OMEGA"})
-        self.assertEqual(result[0]["catalog_id"], "b")
-        self.assertNotIn("embedding", result[0]["_retrieval"])
-        self.assertEqual(len(embedding.calls), previous)
-        self.assertTrue(index.last_search_info["embedding_skipped"])
-        self.assertEqual(index.last_search_info["embedding_skipped_count"], 1)
-        self.assertIn("bütçesine", index.last_search_info["warning"])
-
-    def test_provider_failure_opens_circuit_and_never_leaks_raw_error(self):
-        embedding = CountingEmbedding(fail=True)
-        index = HybridIndex(snapshot([record("a", "LIMIT", "credit limit")]),
-                            embedding, candidate_limit=24, embedding_budget=256)
-        for number in range(273):
-            hits = index.search({"name": "LIMIT", "description": "item %d" % number})
-            self.assertEqual(hits[0]["catalog_id"], "a")
-        self.assertEqual(len(embedding.calls), 1)
+    def test_invalid_vector_degrades_to_lexical(self):
+        index = HybridIndex(snapshot([record("a", "LIMIT")]),
+                            embed=lambda texts, kind: [[0.0, 0.0] for _ in texts])
+        hit = index.search({"name": "LIMIT"})[0]
+        self.assertEqual(hit["catalog_id"], "a")
+        self.assertIsNone(hit["_features"]["cos"])
         self.assertEqual(index.stats["embedding_failures"], 1)
-        self.assertTrue(index.stats["circuit_open"])
-        self.assertTrue(index.last_search_info["embedding_skipped"])
-        self.assertNotIn("provider-secret", index.last_search_info["warning"])
-
-    def test_invalid_vector_degrades_to_lexical_and_opens_circuit(self):
-        index = HybridIndex(snapshot([record("a", "LIMIT")]), CountingEmbedding(invalid=True),
-                            candidate_limit=24, embedding_budget=256)
-        self.assertEqual(index.search({"name": "LIMIT"})[0]["catalog_id"], "a")
-        self.assertTrue(index.stats["circuit_open"])
         self.assertEqual(index.stats["catalog_vectors_embedded"], 0)
 
     def test_cancellation_before_first_network_call_and_between_batches(self):
         for stop_at in (0, 1):
-            embedding = CountingEmbedding()
+            embed = HashEmbed()
             state = {"stop": False}
 
             def update(event):
@@ -163,40 +135,30 @@ class OptimizedRetrievalTests(unittest.TestCase):
                     state["stop"] = True
 
             index = HybridIndex(snapshot([record("a", "LIMIT"), record("b", "LIMIT")]),
-                                embedding, candidate_limit=24, embedding_budget=256,
-                                cancelled=lambda: state["stop"], progress=update)
+                                embed=embed, cancelled=lambda: state["stop"], progress=update)
             with self.assertRaises(AnalysisCancelled):
                 index.search({"name": "LIMIT"})
-            self.assertEqual(len(embedding.calls), stop_at)
+            self.assertEqual(len(embed.calls), stop_at)
             self.assertFalse(index.stats["circuit_open"])
 
-    def test_unversioned_cache_is_local_to_index_and_ignores_disk(self):
-        embedding = CountingEmbedding()
-        data = snapshot([record("a", "LIMIT")])
+    def test_legacy_embedding_object_and_deprecated_options_are_accepted(self):
+        class Legacy:
+            def __init__(self):
+                self.kinds = []
+
+            def embed(self, texts, kind="document"):
+                self.kinds.append(kind)
+                return HashEmbed()(texts, kind)
+
+        legacy = Legacy()
         with tempfile.TemporaryDirectory() as directory:
-            for _ in range(2):
-                index = HybridIndex(data, embedding, cache_dir=directory,
-                                    candidate_limit=24, embedding_budget=256)
-                index.search({"name": "LIMIT"})
-            self.assertEqual(len(embedding.calls), 4)
+            index = HybridIndex(snapshot([record("a", "LIMIT")]), embedding=legacy, cache_dir=directory,
+                                candidate_limit=24, embedding_budget=0)
+            self.assertEqual(index.search({"name": "LIMIT"})[0]["catalog_id"], "a")
             self.assertEqual(list(Path(directory).iterdir()), [])
-
-    def test_full_mode_keeps_all_candidates_and_emits_per_batch_progress(self):
-        embedding = CountingEmbedding()
-        progress = []
-        index = HybridIndex(snapshot([record("a", "ALPHA"), record("b", "OMEGA")]),
-                            embedding, progress=progress.append)
-        hits = index.search({"name": "unrelated"}, strategy="embedding")
-        self.assertEqual(len(hits), 2)
-        self.assertEqual(len(embedding.calls), 3)
-        self.assertIn((0, 2), [(item["items_completed"], item["items_total"]) for item in progress])
-        self.assertIn((2, 2), [(item["items_completed"], item["items_total"]) for item in progress])
-
-    def test_configuration_bounds(self):
-        for options in ({"candidate_limit": 0}, {"candidate_limit": True},
-                        {"embedding_budget": -1}, {"embedding_budget": False}):
-            with self.assertRaises(InputError):
-                HybridIndex(snapshot([]), **options)
+        self.assertIn("query", legacy.kinds)
+        self.assertIn("document", legacy.kinds)
+        self.assertFalse(index.last_search_info["candidate_limited"])
 
 
 if __name__ == "__main__":

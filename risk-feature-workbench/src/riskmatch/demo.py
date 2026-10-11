@@ -47,7 +47,7 @@ class DemoEmbedding:
     model_version="1"
     dimensions=512
 
-    def embed(self,texts):
+    def embed(self,texts,kind="document"):
         result=[]
         for text in texts:
             normalized=str(text).replace("İ","I").replace("ı","i").casefold()

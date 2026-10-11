@@ -39,6 +39,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.json)
     def tearDown(self):
         self.app.extensions["riskmatch"]["executor"].shutdown(wait=True)
+        for current in self.app.extensions["riskmatch"]["connections"].values():
+            if current.get("resources") is not None:current["resources"].close()
         self.tmp.cleanup()
     def upload(self):
         result=self.client.post("/api/upload",data={"file":(workbook(),"dictionary.xlsx")},headers=self.headers)
@@ -49,7 +51,7 @@ class WebTests(unittest.TestCase):
         deadline=time.monotonic()+15
         while time.monotonic()<deadline:
             result=self.client.get("/api/jobs/"+identity)
-            if result.json["status"]!="running":return result.json
+            if result.json["status"] not in ("running","cancelling","reporting"):return result.json
             time.sleep(.02)
         self.fail("Background job did not complete")
     def test_shell_real_only_and_security_headers(self):
@@ -109,7 +111,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(candidate["source"]["object"],"CUSTOMER_METRIC")
         self.assertEqual(candidate["source"]["column"],"HAV_LM")
         self.assertNotEqual(result["results"][0]["semantic_status"],"supported")
-        self.assertEqual(result["run_info"]["Arama yaklaşımı"],"bm25")
+        # v0.5 names the no-model search "lexical" (it still includes exact/normalized name channels).
+        self.assertEqual(result["run_info"]["Arama yaklaşımı"],"lexical")
         response=self.client.get("/api/jobs/"+result["id"]+"/download")
         self.assertEqual(response.status_code,200)
         output=load_workbook(io.BytesIO(response.data));heads=[c.value for c in output["Adaylar"][1]]
@@ -164,8 +167,11 @@ class WebTests(unittest.TestCase):
         adapter=OracleAdapter({**ORACLE,"max_records":1},credentials={"user":"u","password":"p","dsn":"d"},connector=lambda **kwargs:connection)
         snapshot=adapter.scan()
         self.assertFalse(snapshot["complete"])
-        self.assertEqual(len(snapshot["records"]),1)
+        # 0.5: a 25-object group is kept or dropped whole, so the cut is deterministic and named.
+        self.assertEqual(len(snapshot["records"]),0)
+        self.assertEqual(snapshot["coverage"]["truncated_objects"],["RISK_DWH.CUSTOMER_METRIC"])
         self.assertTrue(any("sınır" in error for error in snapshot["errors"]))
+        self.assertFalse(any("erişilebilir kolon görülmedi" in error for error in snapshot["errors"]))
 
     def test_credentials_are_per_connection_not_global_environment(self):
         received=[]

@@ -81,7 +81,9 @@ class WorkflowTests(unittest.TestCase):
                 "schemas":["RISK_DWH","ANOTHER_SCHEMA"]},headers=self.headers)
             self.assertEqual(response.status_code,202,response.json)
             result=self.finish(response.json["id"])
-        self.assertEqual(seen,[["ANOTHER_SCHEMA","RISK_DWH"]])
+        # v0.5 connects for the catalog signature and for the scan; every connection gets both schemas.
+        self.assertTrue(seen)
+        self.assertTrue(all(schemas==["ANOTHER_SCHEMA","RISK_DWH"] for schemas in seen),seen)
         self.assertFalse(result["run_info"]["Tarama tamamlandı"])
         self.assertEqual(result["results"][0]["physical_name"],"unknown")
 

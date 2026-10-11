@@ -10,6 +10,7 @@ dist/
 !.env.example
 config.local.json
 *.local.json
+config/real.json
 runtime/
 private/
 wallet/
@@ -24,3 +25,6 @@ wallet/
 !examples/**/*.xlsx
 !examples/*.xlsx
 !src/riskmatch/data/*.xlsx
+
+# Gelistirme kod haritasi (Graphify); uygulama bagimliligi degildir
+graphify-out/

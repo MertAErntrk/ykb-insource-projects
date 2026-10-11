@@ -4,6 +4,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from copy import deepcopy
+
+from riskmatch.config import DEFAULTS
 from riskmatch.demo import demo_snapshot,DemoEmbedding
 from riskmatch.errors import IntegrationError,CatalogScanError
 from riskmatch.excelio import read_requests
@@ -81,17 +84,34 @@ class PipelineTests(unittest.TestCase):
             atomic_json(path,value)
             if str(path).endswith(".json") and "checkpoints" in str(path):
                 count+=1
-                if count==4:raise KeyboardInterrupt()
+                # v0.5 checkpoints after row 1, then every 10 rows; the 2nd write is after row 10.
+                if count==2:raise KeyboardInterrupt()
         with tempfile.TemporaryDirectory() as directory:
             out=Path(directory)/"out.xlsx"
             with patch("riskmatch.pipeline.atomic_json",side_effect=interrupted):
                 with self.assertRaises(KeyboardInterrupt):analyze(SAMPLE,out)
             result=analyze(SAMPLE,out)
-            self.assertEqual(result["run_info"]["Devam edilen satır"],4)
+            self.assertEqual(result["run_info"]["Devam edilen satır"],10)
             self.assertEqual(len(result["results"]),28)
 
+    def test_state_file_write_failure_keeps_results_and_report(self):
+        from riskmatch.pipeline import atomic_json
+        def full_disk(path,value):
+            if any(part in str(path) for part in ("checkpoints","last_run","feature_dependencies")):
+                raise OSError(28,"No space left on device")
+            atomic_json(path,value)
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)/"out.xlsx"
+            with patch("riskmatch.pipeline.atomic_json",side_effect=full_disk):
+                result=analyze(SAMPLE,out,state_dir=Path(directory)/"state")
+            self.assertEqual(len(result["results"]),28)
+            self.assertTrue(out.exists())
+            self.assertEqual(result["run_info"]["Tamamlanma"],"Tamamlandı")
+            self.assertTrue(any("Ara durum dosyası yazılamadı" in w for w in result["run_info"]["Uyarılar"]))
+            self.assertNotIn("No space",json.dumps(result["run_info"],ensure_ascii=False))
+
     def test_real_scan_failure_has_no_demo_fallback(self):
-        config={"mode":"real","oracle":{"source_database":"TEST","environment":"TEST","container":"TEST","schemas":["RISK"]},"embedding":{},"llm":{},"naming":{},"retrieval":{"limit":8,"expanded_limit":24}}
+        config={"mode":"real","oracle":{"source_database":"TEST","environment":"TEST","container":"TEST","schemas":["RISK"]},"embedding":{},"llm":{},"naming":{},"retrieval":deepcopy(DEFAULTS["retrieval"])}
         with tempfile.TemporaryDirectory() as directory,patch("riskmatch.pipeline.load_config",return_value=config),patch("riskmatch.adapters.oracle.OracleAdapter") as oracle,patch("riskmatch.adapters.qwen.EmbeddingAdapter"),patch("riskmatch.adapters.qwen.LLMAdapter"),patch("riskmatch.demo.demo_snapshot",side_effect=AssertionError("Must not run")):
             oracle.return_value.scan.side_effect=IntegrationError("DB offline RAW_SECRET")
             updates=[]

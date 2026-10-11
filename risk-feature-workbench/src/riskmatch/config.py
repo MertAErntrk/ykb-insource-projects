@@ -7,7 +7,11 @@ from .errors import ConfigError
 
 DEFAULTS = {
     "mode": "demo",
-    "retrieval": {"limit": 8, "expanded_limit": 24, "search_mode": "full", "candidate_limit": 24, "embedding_budget": 256},
+    # limit/expanded_limit/search_mode/candidate_limit/embedding_budget are accepted for old config files
+    # but no longer change the search: every row gets the same channels and pool (0.5).
+    "retrieval": {"limit": 8, "expanded_limit": 24, "search_mode": "full", "candidate_limit": 24, "embedding_budget": 256,
+                  "pool_size": 30, "lexical_k": 40, "semantic_k": 30, "shortlist_embed": 10, "background_size": 128,
+                  "gate": {}},
     "llm_review": True,
     "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}},
 }
@@ -36,10 +40,14 @@ def load_config(path=None, mode="demo", *, data=None):
     config["retrieval"] = retrieval
     if retrieval["search_mode"] not in {"fast", "full"}:
         raise ConfigError("Arama biçimi fast veya full olmalı.")
-    for field, low, high in (("candidate_limit", 8, 100), ("embedding_budget", 0, 2048)):
+    for field, low, high in (("candidate_limit", 8, 100), ("embedding_budget", 0, 2048),
+                             ("pool_size", 5, 60), ("lexical_k", 5, 200), ("semantic_k", 0, 200),
+                             ("shortlist_embed", 0, 50), ("background_size", 16, 512)):
         value = retrieval[field]
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-            raise ConfigError("Arama bütçesi geçersiz: " + field)
+            raise ConfigError("Arama ayarı geçersiz: " + field)
+    if not isinstance(retrieval["gate"], dict):
+        raise ConfigError("retrieval.gate nesne olmalı.")
     if not isinstance(config.get("llm_review"), bool):
         raise ConfigError("llm_review true veya false olmalı.")
     naming=config.get("naming")

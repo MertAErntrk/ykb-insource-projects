@@ -43,7 +43,24 @@
   },
   "retrieval": {
     "limit": 8,
-    "expanded_limit": 24
+    "expanded_limit": 24,
+    "pool_size": 30,
+    "lexical_k": 40,
+    "semantic_k": 30,
+    "shortlist_embed": 10,
+    "background_size": 128,
+    "gate": {
+      "z_min": 2.5,
+      "c_min": 0.5,
+      "z_strong": 4.0,
+      "c_low": 0.3,
+      "margin": 1.5,
+      "lexical_min_coverage": 0.8,
+      "lexical_min_tokens": 2,
+      "max_shown": 3,
+      "max_rejected": 5,
+      "require_subject": true
+    }
   },
   "naming": {
     "windows": {
@@ -53,5 +70,5 @@
       "L3M": "last_3_months"
     }
   },
-  "notes": "config.local.json adıyla kopyalayın. Gerçek mod ve bağlantı izni açıkça seçilmeden bağlantı kurulmaz. TLS doğrulaması kapatılmaz."
+  "notes": "config/real.json adıyla kopyalayın (git dışında tutulur). Gerçek mod ve bağlantı izni açıkça seçilmeden bağlantı kurulmaz. TLS doğrulaması kapatılmaz."
 }

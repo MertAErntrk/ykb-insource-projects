@@ -15,12 +15,80 @@ DIMENSIONS = (
     "entity", "grain", "concept", "transaction", "direction", "measure",
     "aggregation", "grouping", "window", "window_bounds", "reference_date",
     "person_key", "unit", "codes", "zero_policy", "null_policy", "numerator",
-    "denominator", "business_scope",
+    "denominator", "business_scope", "data_type", "qualifier",
 )
+# Not facts parsed from text: data_type comes from the request/catalog type
+# columns, qualifier compares unparsed residual words.
+DERIVED_DIMENSIONS = {"data_type", "qualifier"}
 WINDOWS = {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}
 TRUSTED_SOURCES = {"description", "verified_metadata", "naming_rule"}
 IDENTIFIER = r"[^\W\d]\w*"
 FORMULA = re.compile(rf"^\s*({IDENTIFIER})\s*/\s*({IDENTIFIER})\s*(?:[;.]|$)", re.UNICODE)
+GRAINS = (("kredi karti", "credit_card"), ("kart", "card"), ("kredi", "loan"), ("islem", "transaction"), ("hesap", "account"), ("musteri", "customer"), ("basvuru", "application"))
+WINDOW_UNIT_NAMES = {"gun": "day", "hafta": "week", "ay": "month"}
+WINDOW_UNIT_TEXT = {"day": "gün", "week": "hafta", "month": "ay"}
+DURATION_UNITS = {"gun": "day", "hafta": "week", "ay": "month", "yil": "year", "saat": "hour", "dakika": "minute"}
+TYPE_CLASSES = (
+    ("date", {"tarih", "date", "timestamp", "datetime", "zaman"}),
+    ("number", {"sayi", "sayisal", "number", "numeric", "int", "integer", "float", "decimal", "double", "real", "bigint", "smallint", "tutar", "oran", "adet", "binary"}),
+    ("text", {"metin", "text", "varchar2", "varchar", "char", "clob", "nvarchar2", "nchar", "nclob", "string", "karakter", "alfanumerik"}),
+)
+_LEXICON = None
+
+
+def _lexicon():
+    global _LEXICON
+    if _LEXICON is None:
+        from . import lexicon
+        _LEXICON = lexicon.load()
+    return _LEXICON
+
+
+def _window_value(number, unit):
+    """(N, birim) -> canonical window. A year is 12 months and a multiple of 7
+    days is weeks; weeks and months are never converted into each other."""
+    if unit == "ytd":
+        return "ytd"
+    if unit == "yil":
+        number, unit = number * 12, "ay"
+    if unit == "gun" and number % 7 == 0:
+        number, unit = number // 7, "hafta"
+    # "2025 yılı" is a date, not a window.
+    if unit not in WINDOW_UNIT_NAMES or not 0 < number <= 366:
+        return None
+    name = WINDOW_UNIT_NAMES[unit]
+    return "last_" + name if number == 1 else "last_%d_%ss" % (number, name)
+
+
+def _lexicon_windows(text):
+    values = []
+    for number, unit in _lexicon().window(text):
+        value = _window_value(number, unit)
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _window_text(value):
+    match = re.match(r"^last_(?:(\d+)_)?(day|week|month)s?$", str(value))
+    if value == "ytd":
+        return "yılbaşından beri"
+    if not match:
+        return str(value)
+    return "son " + (match.group(1) or "1") + " " + WINDOW_UNIT_TEXT[match.group(2)]
+
+
+def type_class(value):
+    """Free-form request type or catalog data_type -> date|number|text|unknown.
+    Flag/boolean is unknown: it may be NUMBER(1) or VARCHAR2(1)."""
+    text = re.sub(r"\(.*", "", normalize(value))
+    if not text or re.search(r"flag|bool|evet|hayir", text):
+        return "unknown"
+    words = [w for w in re.split(r"[^a-z0-9]+", text) if w]
+    for name, words_of_class in TYPE_CLASSES:
+        if words and words[0] in words_of_class:
+            return name
+    return "unknown"
 
 
 def normalize(text):
@@ -63,6 +131,10 @@ def parse_definition(name, description, naming=None):
     suffixes = str(name or "").split("_")
     name_window = windows.get(suffixes[-1].upper()) if suffixes else None
     has_two_windows = len(suffixes) > 2 and suffixes[-2].upper() in windows and name_window
+    if not name_window and not has_two_windows:
+        # Explicit numeric windows in a name (3M, 12AY, SON_6_AY); several are ambiguous.
+        found = _lexicon_windows(name)
+        name_window = found[0] if len(found) == 1 else None
     formula_match = FORMULA.match(clean)
     if formula_match:
         numerator, denominator = formula_match.groups()
@@ -123,13 +195,18 @@ def parse_definition(name, description, naming=None):
         issues.append("unsupported_scope_negation")
     if re.search(r"\bmusteri(?:nin|ye|ler|si)?\b", text):
         put("entity", "customer")
-    if "musteri bazinda" in text or "her musteri icin" in text:
-        put("grain", "customer")
-    if "hesap bazinda" in text:
-        put("grain", "account")
-    if "basvuru bazinda" in text or "her basvuru icin" in text:
-        put("grain", "application")
-        put("entity", "application")
+    # Grain only from explicit "X bazında/bazlı/başına" or "her X için"; name
+    # prefixes (MUS_, KRD_) are not reliable evidence of grain.
+    grains = []
+    for word, val in GRAINS:
+        if re.search(r"\b" + word + r"\s+(?:bazinda|bazli|basina)\b|\bher\s+" + word + r"\s+icin\b", text) and val not in grains:
+            grains.append(val)
+    if len(grains) > 1:
+        issues.append("ambiguous_grain")
+    elif grains:
+        put("grain", grains[0])
+        if grains[0] == "application":
+            put("entity", "application")
     for word, val in (("havale", "havale"), ("eft", "eft")):
         if re.search(r"\b" + word + r"\b", text):
             put("transaction", val)
@@ -137,16 +214,23 @@ def parse_definition(name, description, naming=None):
     incoming, outgoing = "gelen" in text, "giden" in text
     if incoming or outgoing:
         put("direction", "both" if incoming and outgoing else "incoming" if incoming else "outgoing")
+    # "gün sayısı" / "günü sayısı"; "son 3 ay adet ..." is a window followed by a count, not a duration.
+    duration = next((m for m in re.finditer(r"\b(gun|hafta|ay|yil|saat|dakika)(?:u|i|si)?\s+(?:adet(?:i|leri)?|adedi|sayisi|sayi)\b", text)
+                     if not re.search(r"(?:\d|son|bir|iki|uc)\s*$", text[:m.start()])), None)
     if re.search(r"(?:farkli|tekil|benzersiz)\s+kisi", text):
         put("measure", "distinct_people")
         put("aggregation", "count_distinct")
     elif re.search(r"(?:farkli|tekil|benzersiz)\s+hesap", text):
         put("measure", "distinct_accounts")
         put("aggregation", "count_distinct")
-    elif re.search(r"\bislem\s+(?:sayisi|adedi)|\badet(?:i)?\b", text):
-        put("measure", "transaction_count")
+    elif duration:
+        # A duration, not a count of events; the period word is its unit.
+        put("measure", "duration")
+        put("unit", DURATION_UNITS[duration.group(1)])
+    elif re.search(r"\b(?:adet(?:i|leri)?|adedi|sayisi|sayi|count)\b", text):
+        put("measure", "count")
         put("aggregation", "count")
-    if "tutar" in text:
+    if re.search(r"\b(?:tutar\w*|amount|bakiye\w*)\b", text):
         put("measure", "amount")
     operations = [val for pat, val in ((r"\b(?:max|maksimum|en yuksek)\b", "max"), (r"\b(?:toplam|sum)\b", "sum"), (r"\b(?:ortalama|average|avg)\b", "mean")) if re.search(pat, text)]
     if len(operations) > 1:
@@ -155,10 +239,14 @@ def parse_definition(name, description, naming=None):
         # count followed by max/sum is genuinely multi-stage; grouping stays unknown.
         inner = facts.get("aggregation", {}).get("value")
         facts.pop("aggregation", None)
-        put("aggregation", [inner, operations[0]] if inner else operations[0])
-    description_windows = []
+        # "toplam adet" is still a count, not a sum of counts.
+        if inner == "count" and operations[0] == "sum":
+            put("aggregation", "count")
+        else:
+            put("aggregation", [inner, operations[0]] if inner else operations[0])
+    description_windows = _lexicon_windows(clean)
     for pattern, value in ((r"son (?:3|uc) ay", "last_3_months"), (r"son (?:2|iki) hafta", "last_2_weeks"), (r"son (?:bir )?ay(?:da|in|lik)?\b", "last_month"), (r"son (?:bir )?hafta(?:da|nin|lik)?\b", "last_week")):
-        if re.search(pattern, text):
+        if re.search(pattern, text) and value not in description_windows:
             description_windows.append(value)
     for window in description_windows:
         put("window", window)
@@ -197,6 +285,12 @@ def parse_definition(name, description, naming=None):
         put("unit", "TRY")
     elif "%" in text or "yuzde" in text:
         put("unit", "percent")
+    # Currency or percent implies a measure only when nothing more specific did.
+    if "measure" not in facts:
+        if re.search(r"\b(?:tl|try)\b", text):
+            put("measure", "amount")
+        elif "%" in text or re.search(r"\boran\w*", text):
+            put("measure", "ratio")
     # Stated income periodicity changes its unit; never equate monthly and
     # annual amounts. No currency is guessed when none is supplied.
     if facts.get("concept", {}).get("value") == "income":
@@ -208,16 +302,16 @@ def parse_definition(name, description, naming=None):
 
     # A recognized noun does not license dropping the rest of the business
     # definition. Consume only supported semantic phrases and harmless grammar;
-    # any remaining words force review. Structured verified definitions remain
-    # the extension point for richer language, not an expanding stop-word list.
+    # remaining words are kept as definition["residual"]: a note for review,
+    # compared across sides in evaluate_candidate, never a parse issue.
     residual = code_text
     if len(code_matches) >= 2:
         residual = re.sub(r"(?:^|[,;.\n])\s*\d+\s+[^,;\n.]+", " ", residual)
     covered = [
-        r"basvuru bazinda|her basvuru icin|musteri bazinda|her musteri icin|hesap bazinda",
-        r"son (?:3|uc) ay(?:da)?|son (?:2|iki) hafta(?:da)?|son (?:bir )?ay(?:da|in|lik)?|son (?:bir )?hafta(?:da|nin|lik)?",
+        r"(?:kredi karti|kart|kredi|islem|hesap|musteri|basvuru) (?:bazinda|bazli|basina)|her (?:kredi karti|kart|kredi|islem|hesap|musteri|basvuru) icin",
+        r"son (?:\d+|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|oniki)? ?(?:gun|hafta|ay|yil)\w*|\d+ ?(?:gun|hafta|ay|yil)\w*",
         r"(?:farkli|tekil|benzersiz)\s+(?:kisi|hesap)",
-        r"islem (?:sayisi|adedi)|adet(?:i)?",
+        r"islem (?:sayisi|adedi)|adet\w*|adedi|sayisi|sayi|count|tutar\w*|amount|bakiye\w*|oran\w*",
         r"faiz turu|faiz orani|sabit faiz|degisken faiz",
         r"beyan edilen|dogrulanmis|basvurulan|onaylanan",
         r"toplam|sum|max|maksimum|en yuksek|ortalama|average|avg",
@@ -228,8 +322,9 @@ def parse_definition(name, description, naming=None):
         covered.append(r"aylik|yillik")
     for pattern in covered:
         residual = re.sub(r"\b(?:" + pattern + r")\b", " ", residual)
-    if re.search(r"[\w]", residual):
-        issues.append("unparsed_description_qualifier")
+    residual = " ".join(re.findall(r"\w+", residual))
+    if residual:
+        definition["residual"] = residual
     return definition
 
 
@@ -257,34 +352,19 @@ def _trusted(fact, dim):
 
 
 def _critical(left, right):
-    facts = {**right, **left}
-    dims = {"entity", "grain", "concept", "measure"}
-    dims.update(dim for dim in DIMENSIONS if dim in facts)
-    if "transaction" in facts:
-        dims.update({"transaction", "direction", "aggregation", "business_scope", "null_policy"})
-    if "window" in facts:
-        dims.update({"window", "window_bounds", "reference_date"})
-    measures = [x.get("measure", {}).get("value") for x in (left, right)]
-    if "distinct_people" in measures:
-        dims.add("person_key")
-    if any(v in ("amount", "rate", "duration") for v in measures):
+    """A dimension is checked only when at least one side states a trusted fact.
+    Unknown on both sides is outside the check, never equality evidence."""
+    dims = {d for d in DIMENSIONS if d not in DERIVED_DIMENSIONS and (_trusted(left.get(d), d) or _trusted(right.get(d), d))}
+    # An amount, rate or duration is meaningless without its unit (currency, period).
+    if any(_trusted(x.get("measure"), "measure") and x["measure"]["value"] in ("amount", "rate", "duration") for x in (left, right)):
         dims.add("unit")
-    if "category" in measures:
-        dims.add("codes")
-    if any(x.get("concept", {}).get("value") in ("income", "credit_limit") for x in (left, right)):
-        dims.add("business_scope")
-    aggregations = [str(x.get("aggregation", {}).get("value", "")) for x in (left, right)]
-    if any("max" in a or "mean" in a or a.startswith("[") for a in aggregations):
-        dims.add("grouping")
-    if "numerator" in facts or "denominator" in facts:
-        dims.update({"numerator", "denominator", "zero_policy", "null_policy", "reference_date"})
     return [d for d in DIMENSIONS if d in dims]
 
 
 def evaluate_candidate(request, record):
     wanted, actual = _definition(request), _definition(record, True)
     left, right = wanted["facts"], actual["facts"]
-    checks, reasons = [], []
+    checks, reasons, notes = [], [], []
     for dimension in _critical(left, right):
         a, b = left.get(dimension, {}), right.get(dimension, {})
         if not _trusted(a, dimension) or not _trusted(b, dimension):
@@ -292,13 +372,81 @@ def evaluate_candidate(request, record):
         else:
             status = "compatible" if _key(a["value"]) == _key(b["value"]) else "conflict"
         checks.append({"dimension": dimension, "status": status, "requested": a.get("value"), "actual": b.get("value"), "evidence": {"request": a.get("evidence", ""), "candidate": b.get("evidence", ""), "request_source": a.get("source"), "candidate_source": b.get("source")}})
-        if status != "compatible":
-            reasons.append(status + ":" + dimension)
+    # Physical type: only two known, different classes are a conflict.
+    wanted_type, actual_type = request.get("data_type") or "", record.get("data_type") or ""
+    wanted_class, actual_class = type_class(wanted_type), type_class(actual_type)
+    if "unknown" not in (wanted_class, actual_class):
+        checks.append({"dimension": "data_type", "status": "compatible" if wanted_class == actual_class else "conflict", "requested": wanted_type, "actual": actual_type, "evidence": {"request": wanted_type, "candidate": actual_type, "request_source": "data_type", "candidate_source": "data_type"}})
+    # Unparsed words are a note; two different unparsed statements need review.
+    residuals = (wanted.get("residual") or "", actual.get("residual") or "")
+    for label, residual in zip(("talep", "kolon"), residuals):
+        if residual:
+            notes.append("ayrıştırılamayan ifade: " + label + " '" + residual + "'")
+    if all(residuals) and set(residuals[0].split()) != set(residuals[1].split()):
+        checks.append({"dimension": "qualifier", "status": "missing", "requested": residuals[0], "actual": residuals[1], "evidence": {"request": residuals[0], "candidate": residuals[1], "request_source": "residual", "candidate_source": "residual"}})
+    for check in checks:
+        if check["status"] != "compatible":
+            reasons.append(check["status"] + ":" + check["dimension"])
     for origin, definition in (("request", wanted), ("candidate", actual)):
         reasons.extend(origin + ":" + str(issue) for issue in definition.get("issues", []))
     conflicting = any(c["status"] == "conflict" for c in checks) or any("conflict:" in reason for reason in reasons)
+    # An empty match is not support: at least two meaning dimensions must agree.
+    agreed = sum(1 for c in checks if c["status"] == "compatible" and c["dimension"] not in DERIVED_DIMENSIONS)
+    if not conflicting and not reasons and agreed < 2:
+        reasons.append("insufficient_evidence")
     status = "conflict" if conflicting else "insufficient" if reasons else "supported"
+    reasons.extend(notes)
     return {"catalog_id": record.get("catalog_id", ""), "path": ".".join(str(record.get(k) or "?") for k in ("source_database", "environment", "container", "schema", "object", "column")), "score": record.get("_score", 0.0), "retrieval": record.get("_retrieval", []), "checks": checks, "status": status, "reasons": reasons}
+
+
+DIFFERENCE_LABELS = {
+    "entity": "Varlık", "grain": "Kırılım", "concept": "Kavram", "transaction": "İşlem türü", "direction": "Yön",
+    "measure": "Ölçü", "aggregation": "Toplama", "grouping": "Gruplama", "window": "Dönem",
+    "window_bounds": "Dönem sınırı", "reference_date": "Referans tarihi", "person_key": "Kişi anahtarı",
+    "unit": "Birim", "codes": "Kodlar", "zero_policy": "Sıfır kuralı", "null_policy": "Boş değer kuralı",
+    "numerator": "Pay", "denominator": "Payda", "business_scope": "İş kapsamı", "data_type": "Alan tipi",
+    "qualifier": "Ek niteleme",
+}
+VALUE_TEXT = {
+    "measure": {"count": "adet", "amount": "tutar", "ratio": "oran", "rate": "oran", "distinct_people": "farklı kişi sayısı", "distinct_accounts": "farklı hesap sayısı", "category": "kategori", "duration": "süre"},
+    "grain": {"customer": "müşteri", "account": "hesap", "application": "başvuru", "loan": "kredi", "card": "kart", "credit_card": "kredi kartı", "transaction": "işlem"},
+    "entity": {"customer": "müşteri", "application": "başvuru"},
+    "direction": {"incoming": "gelen", "outgoing": "giden", "both": "gelen ve giden"},
+    "aggregation": {"sum": "toplam", "max": "en yüksek", "mean": "ortalama", "count": "adet", "count_distinct": "tekil adet"},
+    "unit": {"percent": "yüzde", "day": "gün", "week": "hafta", "month": "ay", "year": "yıl", "hour": "saat", "minute": "dakika"},
+}
+
+
+def _value_text(dimension, value):
+    if dimension == "window":
+        return _window_text(value)
+    if isinstance(value, (list, tuple)):
+        return " > ".join(_value_text(dimension, v) for v in value)
+    if isinstance(value, dict):
+        # Structured facts (window bounds, reference dates, grouping keys) have no lookup label.
+        return ", ".join(str(k) + "=" + _value_text(dimension, v) for k, v in sorted(value.items()))
+    return VALUE_TEXT.get(dimension, {}).get(value, str(value))
+
+
+def differences(evaluation):
+    """Short Turkish texts for conflict and missing checks; conflicts first, in check order."""
+    out = []
+    for wanted in ("conflict", "missing"):
+        for check in evaluation.get("checks", []):
+            if check.get("status") != wanted:
+                continue
+            dimension, requested, actual = check["dimension"], check.get("requested"), check.get("actual")
+            label = DIFFERENCE_LABELS.get(dimension, dimension)
+            lower = label.replace("İ", "i").lower()
+            if requested is not None and actual is not None:
+                state = " farklı" if wanted == "conflict" else " doğrulanamadı"
+                text = label + state + ": talep " + _value_text(dimension, requested) + ", kolon " + _value_text(dimension, actual)
+            elif actual is None:
+                text = "Kolon açıklamasında " + lower + " bilgisi yok"
+            else:
+                text = "Talep açıklamasında " + lower + " bilgisi yok"
+            out.append({"dimension": dimension, "requested": requested, "actual": actual, "text": text})
+    return out
 
 
 def build_dependencies(requests):

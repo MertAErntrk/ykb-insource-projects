@@ -142,6 +142,35 @@ class OracleAdapter:
         except Exception as error:
             raise oracle_error(error, "oturum açma") from None
 
+    def signature(self):
+        """Cheap change marker: one catalog query per schema (count and last DDL time)."""
+        call_ms = max(1, int(float(self.config.get("call_timeout_seconds", 30)) * 1000))
+        connection = None
+        parts = []
+        try:
+            connection = self._connect()
+            connection.call_timeout = call_ms
+            cursor = connection.cursor()
+            for schema in self.schemas:
+                try:
+                    cursor.execute("""
+                        SELECT COUNT(*), MAX(LAST_DDL_TIME) FROM ALL_OBJECTS
+                         WHERE OWNER = :schema_name
+                           AND OBJECT_TYPE IN ('TABLE','VIEW','MATERIALIZED VIEW')
+                    """, {"schema_name": schema})
+                    row = cursor.fetchone()
+                except Exception as error:
+                    raise oracle_error(error, schema + " · katalog imzası") from None
+                count, last_ddl = (row[0], row[1]) if row else (0, None)
+                parts.append(schema + ":" + str(count or 0) + ":" + (last_ddl.isoformat() if hasattr(last_ddl, "isoformat") else str(last_ddl or "-")))
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+        return "|".join(parts)
+
     def scan(self, progress=None):
         """Stream scoped metadata in small object batches, preserving partial evidence.
 
@@ -159,6 +188,7 @@ class OracleAdapter:
         records, errors, checks = {}, [], []
         incomplete_schemas = set()
         completed = 0
+        truncated, failed_groups, listed, objects_total, overflow = [], 0, set(), 0, False
         connection = cursor = None
         observed_db_name = None
         schema = phase = ""
@@ -267,6 +297,26 @@ class OracleAdapter:
             observed_db_name = db_name
             return 0
 
+        reconnect_codes = {"DPY-4024", "DPI-1067", "DPY-4011", "ORA-12170", "ORA-12541",
+                           "ORA-03113", "ORA-03114", "ORA-03135"}
+
+        def helper(name, operation, state):
+            """Run a per-group helper query; a failure marks only this group incomplete."""
+            nonlocal failed_groups
+            try:
+                measure(name, operation)
+                return True
+            except (_ScopeMismatch, AnalysisCancelled, _CatalogBudget):
+                raise
+            except Exception as error:
+                if not state["failed"]:
+                    state["failed"] = True
+                    failed_groups += 1
+                if oracle_error_code(error) in reconnect_codes:
+                    close_connection()
+                    measure("oturum ve veritabanı bağlamı", connect_scope)
+                return False
+
         def skip_schema(value, message):
             checks.append({"name": value + " · katalog taraması", "schema": value,
                            "phase": "katalog taraması", "status": "skipped", "elapsed_ms": 0,
@@ -296,16 +346,22 @@ class OracleAdapter:
                                 objects[obj] = kind
 
                     object_count = measure("tablo ve görünüm listesi", lambda: read_rows("""
-                        SELECT OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS
-                         WHERE OWNER = :schema_name
-                           AND OBJECT_TYPE IN ('TABLE','VIEW','MATERIALIZED VIEW')
-                           AND ROWNUM <= :row_limit
+                        SELECT OBJECT_NAME, OBJECT_TYPE FROM (
+                            SELECT OBJECT_NAME, OBJECT_TYPE FROM ALL_OBJECTS
+                             WHERE OWNER = :schema_name
+                               AND OBJECT_TYPE IN ('TABLE','VIEW','MATERIALIZED VIEW')
+                             ORDER BY OWNER, OBJECT_NAME)
+                         WHERE ROWNUM <= :row_limit
                     """, {"schema_name": schema}, limit+1, object_row))
                     if object_count > limit:
+                        overflow = True
                         add_error(schema + ": nesne listesi kayıt sınırına ulaştı; tam kapsam doğrulanamadı.")
+                    listed.add(schema)
+                    objects_total += len(objects)
                     object_names = sorted(objects)
                     for offset in range(0, len(object_names), 25):
                         if len(records) >= limit:
+                            truncated.extend(schema + "." + value for value in object_names[offset:])
                             add_error("Katalog kayıt sınırına ulaşıldı; kapsamı daraltın. Yokluk sonucu verilemez.")
                             break
                         names = object_names[offset:offset+25]
@@ -321,8 +377,6 @@ class OracleAdapter:
                             owner, obj, column, data_type, length, precision, scale, nullable = row
                             if owner != schema or obj not in allowed_names:
                                 raise _ScopeMismatch("Oracle kolon yanıtı istenen şema/nesne kapsamı dışında.")
-                            if len(records) >= limit:
-                                return
                             identity = {**{key: scope[key] for key in ("source_database", "environment", "container")},
                                         "schema": owner, "object": obj, "column": column}
                             record = {**identity, "catalog_id": _digest(identity), "object_type": objects[obj],
@@ -336,10 +390,19 @@ class OracleAdapter:
                         column_count = measure("kolon kataloğu", lambda: read_rows("""
                             SELECT OWNER, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
                                    DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
-                              FROM ALL_TAB_COLUMNS WHERE """+where+" AND ROWNUM <= :row_limit",
+                              FROM (SELECT OWNER, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+                                           DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+                                      FROM ALL_TAB_COLUMNS WHERE """+where+"""
+                                     ORDER BY TABLE_NAME, COLUMN_ID)
+                             WHERE ROWNUM <= :row_limit""",
                             binds, available+1, column_row))
                         if column_count > available:
+                            # A group is kept whole or dropped whole; never cut in half.
+                            for record in batch_records.values():
+                                records.pop(record["catalog_id"], None)
+                            truncated.extend(schema + "." + value for value in object_names[offset:])
                             add_error("Katalog kayıt sınırına ulaşıldı; kapsamı daraltın. Yokluk sonucu verilemez.")
+                            break
                         else:
                             invisible_objects = sorted(allowed_names-{obj for obj, _ in batch_records})
                             if invisible_objects:
@@ -364,10 +427,12 @@ class OracleAdapter:
                                 if "column_comment" in record["missing"]:
                                     record["missing"].remove("column_comment")
 
-                        comments = measure("kolon açıklamaları", lambda: read_rows(
+                        group_state = {"failed": False}
+                        comment_total = []
+                        helper("kolon açıklamaları", lambda: comment_total.append(read_rows(
                             "SELECT TABLE_NAME, COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS WHERE "+where+" AND ROWNUM <= :row_limit",
-                            binds, limit+1, comment_row))
-                        if comments > limit:
+                            binds, limit+1, comment_row)), group_state)
+                        if comment_total and comment_total[0] > limit:
                             add_error(schema + ": kolon açıklamaları kayıt sınırında kesildi.")
 
                         def table_comment_row(row):
@@ -376,10 +441,13 @@ class OracleAdapter:
                                 if obj == record_obj:
                                     record["table_comment"] = comment or ""
 
-                        table_comments = measure("tablo açıklamaları", lambda: read_rows(
-                            "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS WHERE "+where+" AND ROWNUM <= :row_limit",
-                            binds, len(names)+1, table_comment_row))
-                        if table_comments > len(names):
+                        table_total = []
+                        if not helper("tablo açıklamaları", lambda: table_total.append(read_rows(
+                                "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS WHERE "+where+" AND ROWNUM <= :row_limit",
+                                binds, len(names)+1, table_comment_row)), group_state):
+                            for record in batch_records.values():
+                                record["missing"].append("table_comment")
+                        elif table_total[0] > len(names):
                             add_error(schema + ": tablo açıklamaları kayıt sınırında kesildi.")
                         key_map = {}
 
@@ -390,7 +458,8 @@ class OracleAdapter:
                                                                    "column": column, "position": position})
 
                         key_limit = min(10000, max(200, len(batch_records)*4))
-                        key_count = measure("anahtar kısıtları", lambda: read_rows("""
+                        key_total = []
+                        key_ok = helper("anahtar kısıtları", lambda: key_total.append(read_rows("""
                             SELECT c.TABLE_NAME, c.CONSTRAINT_TYPE, c.CONSTRAINT_NAME,
                                    cc.COLUMN_NAME, cc.POSITION
                               FROM ALL_CONSTRAINTS c JOIN ALL_CONS_COLUMNS cc
@@ -400,14 +469,15 @@ class OracleAdapter:
                                AND c.CONSTRAINT_TYPE IN ('P','U')
                                AND c.STATUS = 'ENABLED' AND c.VALIDATED = 'VALIDATED'
                                AND ROWNUM <= :row_limit
-                        """, binds, key_limit+1, key_row))
+                        """, binds, key_limit+1, key_row)), group_state)
+                        key_count = key_total[0] if key_ok else key_limit + 1
                         for (obj, _), record in batch_records.items():
-                            if key_count <= key_limit:
+                            if key_ok and key_count <= key_limit:
                                 record["key_columns"] = sorted(key_map.get(obj, []), key=lambda key: (key["constraint"], key["position"]))
                                 record["missing"].remove("key_constraints")
-                        if key_count > key_limit:
+                        if key_ok and key_count > key_limit:
                             add_error(schema + ": anahtar kısıtları kayıt sınırında kesildi.")
-                    if len(records) == schema_start_count:
+                    if len(records) == schema_start_count and not overflow and not any(name.startswith(schema + ".") for name in truncated):
                         add_error("Şema için erişilebilir kolon görülmedi: " + schema)
                     if schema not in incomplete_schemas:
                         completed += 1
@@ -418,6 +488,8 @@ class OracleAdapter:
                     # measure() already captured the safe phase/code. Discard a
                     # possibly invalid session, retain all successfully read rows,
                     # and give the next schema its own authenticated connection.
+                    if phase == "kolon kataloğu":
+                        failed_groups += 1
                     if not checks or checks[-1]["status"] != "failed" or checks[-1].get("schema") != schema:
                         add_error(str(oracle_error(error, schema + " · " + phase)))
                     close_connection()
@@ -434,8 +506,13 @@ class OracleAdapter:
             record["definition"] = definition
             versioned = {key: value for key, value in record.items() if key not in ("metadata_version", "captured_at")}
             record["metadata_version"] = _digest(versioned)
+        scanned = {(row["schema"], row["object"]) for row in ordered}
+        coverage = {"objects_total": objects_total if len(listed) == len(self.schemas) and not overflow else None,
+                    "objects_scanned": len(scanned), "columns": len(ordered),
+                    "truncated_objects": sorted(set(truncated))[:50], "failed_groups": failed_groups}
         version = _digest({"scope": scope, "records": [(row["catalog_id"], row["metadata_version"]) for row in ordered]})
         return {"records": ordered, "scope": scope, "complete": not errors and completed == len(self.schemas),
                 "errors": errors, "version": version, "captured_at": captured_at, "checks": checks,
+                "coverage": coverage,
                 "scan_stats": {"record_count": len(ordered), "schemas_completed": completed,
                                "schemas_total": len(self.schemas), "elapsed_ms": round((monotonic()-started)*1000)}}

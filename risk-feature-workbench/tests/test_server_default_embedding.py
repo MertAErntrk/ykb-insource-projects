@@ -107,28 +107,26 @@ class DefaultEmbeddingRuntimeTests(unittest.TestCase):
         self.assertEqual(versioned.identity_status, "configured")
         self.assertTrue(versioned.persistent_cache_safe)
 
-    def test_default_embedding_neither_reads_nor_writes_persisted_vectors(self):
-        calls = []
+    def test_default_embedding_reuses_vectors_only_under_its_fingerprint(self):
+        # v0.5: persisted vectors of an unknown model are reused only when the canary fingerprint matches.
+        from riskmatch.resources import Resources
+        current = []
 
         def response(config, payload, **kwargs):
-            calls.append(payload)
-            return [[1.0] * 4096]
+            return copy.deepcopy(current)
 
+        namespaces = []
         with tempfile.TemporaryDirectory() as directory, \
              patch("riskmatch.adapters.qwen.post_json", side_effect=response):
-            # Seed exactly the otherwise matching path to prove it will not be read.
-            seeded = EmbeddingAdapter(EMBEDDING)
-            seeded.persistent_cache_safe = True
-            HybridIndex(snapshot(), seeded, directory).search({"name": "FIELD"}, strategy="embedding")
-            saved = {path.name: path.read_bytes() for path in Path(directory).glob("vectors-*.json")}
-            self.assertEqual(len(saved), 1)
-            calls.clear()
-            for _ in range(2):
-                index = HybridIndex(snapshot(), EmbeddingAdapter(EMBEDDING), directory)
-                self.assertIsNone(index._cache_path([0]))
-                index.search({"name": "FIELD"}, strategy="embedding")
-            self.assertEqual(len(calls), 4)  # Both catalog and query are regenerated each run.
-            self.assertEqual(saved, {path.name: path.read_bytes() for path in Path(directory).glob("vectors-*.json")})
+            for value in ([1.0] * 4096, [1.0] * 4096, [0.0, 1.0] + [0.0] * 4094):
+                current[:] = [value]
+                resources = Resources(Path(directory))
+                try:
+                    namespaces.append(resources.embedding(EmbeddingAdapter(EMBEDDING)).namespace.id)
+                finally:
+                    resources.close()
+        self.assertEqual(namespaces[0], namespaces[1])
+        self.assertNotEqual(namespaces[0], namespaces[2])
 
     def _assert_repeated_analysis_is_fresh(self, embedding, identity_status):
         config = {"mode": "real", "allow_real_connections": True, "use_models": True,
@@ -173,13 +171,14 @@ class DefaultEmbeddingRuntimeTests(unittest.TestCase):
             self.assertEqual(metadata["identity_status"], identity_status)
             self.assertEqual((metadata["model"], metadata["model_version"]),
                              (embedding["model"], embedding["model_version"]))
-            self.assertFalse(second["run_info"]["Önbellek ve devam politikası"]["checkpoint_resume"])
+            # v0.5: resume is allowed; the checkpoint key contains the fingerprint namespace.
+            self.assertTrue(second["run_info"]["Önbellek ve devam politikası"]["checkpoint_resume"])
             self.assertEqual(second["run_info"]["Hatalar"], [])
 
-    def test_repeated_real_analysis_does_not_resume_unknown_model_checkpoint(self):
+    def test_repeated_real_analysis_unknown_model_checkpoint_is_namespace_scoped(self):
         self._assert_repeated_analysis_is_fresh(EMBEDDING, "unknown")
 
-    def test_repeated_real_analysis_does_not_resume_named_deployment_checkpoint(self):
+    def test_repeated_real_analysis_named_deployment_checkpoint_is_namespace_scoped(self):
         config = {**EMBEDDING, "model_selection": "explicit", "model": "named-model",
                   "model_version": "deployment:named-model", "max_batch": 1,
                   "request_template": {"model": "{model}", "input": "{texts}"}}

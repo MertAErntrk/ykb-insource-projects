@@ -1,6 +1,6 @@
 {
   "mode": "demo",
-  "retrieval": {"limit": 8, "expanded_limit": 24},
+  "retrieval": {"limit": 8, "expanded_limit": 24, "pool_size": 30, "lexical_k": 40, "semantic_k": 30, "shortlist_embed": 10, "background_size": 128, "gate": {}},
   "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}},
-  "notes": "Yalnız sentetik katalog. Qwen veya banka veritabanı çağrılmaz."
+  "notes": "Yalnız sentetik katalog; yapı tutarlılığı içindir (arayüzde demo seçeneği yoktur). Qwen veya banka veritabanı çağrılmaz. Eski limit/expanded_limit yok sayılır."
 }

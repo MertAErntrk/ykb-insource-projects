@@ -23,3 +23,19 @@ class StaleIndexError(IntegrationError):
 
 class InputError(ValueError):
     """Geçersiz kullanıcı dosyası."""
+
+class ReportWriteError(IntegrationError):
+    """Rapor yazılamadı; kind: locked | permission | disk_full | invalid | other. Mesaj yol/sır içermez."""
+
+    MESSAGES = {
+        "locked": "Rapor dosyası başka bir programda açık. Excel'de kapatıp yeniden deneyin.",
+        "permission": "Rapor klasörüne yazma izni yok. Başka bir klasör seçin.",
+        "disk_full": "Diskte yeterli boş alan yok. Yer açıp yeniden deneyin.",
+        "invalid": "Oluşturulan rapor doğrulanamadı; mevcut dosya değiştirilmedi.",
+        "other": "Rapor yazılamadı; mevcut dosya değiştirilmedi.",
+    }
+
+    def __init__(self, kind="other"):
+        kind = kind if kind in self.MESSAGES else "other"
+        super().__init__(self.MESSAGES[kind])
+        self.kind = kind
