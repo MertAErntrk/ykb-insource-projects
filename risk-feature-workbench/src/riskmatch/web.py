@@ -13,6 +13,9 @@ from .errors import ConfigError, InputError, IntegrationError
 from .excelio import LABELS, reason_text
 from .pipeline import analyze
 from . import web_services as services
+from . import __version__
+from .model_diagnostics import discover_model
+from .oracle_diagnostics import diagnose_selected_schemas
 from .deployment import login_settings, LLM_BASE_URL, EMBEDDING_BASE_URL
 
 
@@ -78,7 +81,7 @@ def create_app(runtime_dir=None, *, analyzer=None):
     def home():
         session.setdefault("owner",secrets.token_hex(24))
         session.setdefault("csrf",secrets.token_hex(32))
-        return render_template("index.html",csrf=session["csrf"],llm_base=LLM_BASE_URL,embedding_base=EMBEDDING_BASE_URL)
+        return render_template("index.html",csrf=session["csrf"],llm_base=LLM_BASE_URL,embedding_base=EMBEDDING_BASE_URL,app_version=__version__)
 
     @app.post("/api/connect")
     def connect():
@@ -88,6 +91,9 @@ def create_app(runtime_dir=None, *, analyzer=None):
             if previous:previous["settings"]["oracle"].clear()
         settings=login_settings(data.get("user"),data.get("password"))
         result=services.probe_oracle(settings)
+        if not result.get("ok"):
+            settings["oracle"].clear()
+            return jsonify(result)
         settings["oracle"].update(container=result["container"])
         with guard:
             if len(connections)>=30:raise InputError("Açık oturum sınırına ulaşıldı.")
@@ -131,8 +137,17 @@ def create_app(runtime_dir=None, *, analyzer=None):
     def probe(name):
         data=body()
         if name=="oracle":return jsonify(services.probe_oracle(data))
-        if name in ("llm","embedding"):return jsonify(services.probe_model(data,name))
+        if name in ("llm","embedding"):return jsonify(discover_model(data,name))
         raise InputError("Bilinmeyen bağlantı türü.")
+
+    @app.post("/api/diagnostics/oracle-schemas")
+    def schema_diagnostics():
+        data=body()
+        config,credentials=run_settings({"schemas":data.get("schemas")})
+        try:
+            return jsonify(diagnose_selected_schemas(config["oracle"],credentials["oracle"],config["oracle"]["schemas"]))
+        finally:
+            credentials["oracle"].clear()
 
     @app.post("/api/models/<name>")
     def models(name):

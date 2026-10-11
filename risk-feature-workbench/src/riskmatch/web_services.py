@@ -8,7 +8,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .adapters._http import _NoRedirect, post_json, render_template, response_path, validate_endpoint
-from .adapters.oracle import OracleAdapter, read_context, oracle_error
+from .oracle_diagnostics import diagnose_oracle
 from .adapters.qwen import LLMAdapter
 from .config import load_config
 from .errors import ConfigError, InputError, IntegrationError
@@ -123,21 +123,7 @@ def build_run(raw):
 
 def probe_oracle(raw):
     config,credentials=oracle_inputs(raw,probe=True)
-    connection=OracleAdapter(config,credentials=credentials)._connect()
-    phase = "sorgu zaman aşımı ayarı"
-    try:
-        connection.call_timeout=30000
-        phase = "veritabanı bağlamı okuma"
-        cursor=connection.cursor()
-        db_name,container=read_context(cursor)
-        phase = "erişilebilir şemaları listeleme"
-        cursor.execute("SELECT DISTINCT OWNER FROM ALL_TAB_COLUMNS WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','XDB') ORDER BY OWNER")
-        rows=cursor.fetchmany(1001)
-        return {"ok":True,"db_name":db_name,"container":container,
-                "schemas":[str(row[0]) for row in rows[:1000]],"truncated":len(rows)>1000}
-    except IntegrationError:raise
-    except Exception as error:raise oracle_error(error, phase) from None
-    finally:connection.close()
+    return diagnose_oracle(config,credentials)
 
 
 def probe_model(raw,name):

@@ -137,20 +137,23 @@ class OracleDiagnosticTests(unittest.TestCase):
         connection=FakeConnection()
         connection.cur.execute=lambda *_:(_ for _ in ()).throw(RuntimeError("ORA-01031 RAW_SECRET"))
         with patch.object(OracleAdapter,"_connect",return_value=connection):
-            with self.assertRaises(OracleOperationError) as caught:probe_oracle(SETTINGS)
-        self.assertIn("ORA-01031",str(caught.exception))
-        self.assertIn("bağlamı",str(caught.exception))
-        self.assertNotIn("RAW_SECRET",str(caught.exception))
+            report=probe_oracle(SETTINGS)
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["connected"])
+        self.assertIn("ORA-01031",report["error"])
+        self.assertIn("bağlamı",report["error"].casefold())
+        self.assertNotIn("RAW_SECRET",json.dumps(report))
         self.assertTrue(connection.closed)
 
     def test_schema_phase_has_its_own_code(self):
         connection=FakeConnection()
         connection.cur.fetchmany=lambda *_:(_ for _ in ()).throw(RuntimeError("ORA-00942 RAW_SECRET"))
         with patch.object(OracleAdapter,"_connect",return_value=connection):
-            with self.assertRaises(OracleOperationError) as caught:probe_oracle(SETTINGS)
-        self.assertIn("ORA-00942",str(caught.exception))
-        self.assertIn("şemaları listeleme",str(caught.exception))
-        self.assertNotIn("RAW_SECRET",str(caught.exception))
+            report=probe_oracle(SETTINGS)
+        self.assertFalse(report["ok"])
+        self.assertIn("ORA-00942",report["error"])
+        self.assertIn("listeleme",report["error"])
+        self.assertNotIn("RAW_SECRET",json.dumps(report))
         self.assertTrue(connection.closed)
 
 

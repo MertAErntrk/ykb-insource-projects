@@ -13,12 +13,17 @@ from riskmatch.semantics import parse_definition
 CONTEXT_SQL = "SELECT SYS_CONTEXT('USERENV','DB_NAME'), SYS_CONTEXT('USERENV','CON_NAME') FROM DUAL"
 
 
-def oracle_error(error, phase):
-    """Extract only the public error identifier, never SQL or credentials."""
+def oracle_error_code(error):
+    """Return a public Oracle/driver identifier without exposing driver text."""
     detail = error.args[0] if error.args else error
     match = re.search(r"\b(?:ORA-\d{5}|DPY-\d{4}|DPI-\d{4})\b",
                       str(getattr(detail, "full_code", "")) + " " + str(error))
-    code = match.group(0) if match else "kod alınamadı"
+    return match.group(0) if match else None
+
+
+def oracle_error(error, phase):
+    """Extract only the public error identifier, never SQL or credentials."""
+    code = oracle_error_code(error) or "kod alınamadı"
     hints = {
         "ORA-01017": "Kullanıcı adı veya parolayı kontrol edin.",
         "ORA-28000": "Hesap kilitli; veritabanı ekibiyle görüşün.",
@@ -29,6 +34,11 @@ def oracle_error(error, phase):
         "ORA-12514": "Tanımlı Oracle servisi dinleyicide bulunamadı.",
         "DPY-3010": "Sunucu sürümü Thin bağlantıyı desteklemiyor; Oracle Client gereksinimini kontrol edin.",
         "DPY-3015": "Hesabın parola doğrulayıcısı Thin bağlantıyla uyumlu değil; veritabanı ekibiyle görüşün.",
+        "DPY-4024": "Veritabanı çağrısı süre sınırını aştı. Bu kod parola veya yetki hatası anlamına gelmez. Daha dar şema kapsamıyla yeniden deneyin; sürerse bu aşamanın süresini veritabanı ekibine iletin.",
+        "DPI-1067": "Veritabanı çağrısı süre sınırını aştı. Daha dar şema kapsamıyla yeniden deneyin.",
+        "DPY-4011": "Veritabanı veya ağ bağlantıyı kapattı. Kurum ağı/VPN bağlantısını kontrol edip yeniden bağlanın.",
+        "ORA-12170": "Bağlantı zaman aşımına uğradı. Kurum ağı/VPN ve Oracle servis erişimini kontrol edin.",
+        "ORA-12541": "Oracle dinleyicisine erişilemedi. Kurum ağı ve servis erişimini kontrol edin.",
     }
     return OracleOperationError("Oracle · " + phase + " (" + code + "). " +
                                 hints.get(code, "Bu aşama ve hata koduyla bağlantı/sürüm/yetki kontrolü yapılmalı."))

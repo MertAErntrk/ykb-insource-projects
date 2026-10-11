@@ -1,4 +1,4 @@
-# İş bilgisayarında kullanım · 0.3.0
+# İş bilgisayarında kullanım · 0.3.1
 
 Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Uygulama tarayıcıda çalışır. Demo seçeneği yoktur.
 
@@ -26,8 +26,11 @@ Tarayıcı otomatik açılmazsa **http://127.0.0.1:8765** adresine gidin. PowerS
 2. **Bağlan ve şemaları getir** düğmesine basın.
 3. Açılan **Taranacak şemaları seçin** listesinden bir veya birden fazla şema işaretleyin. Arama kutusuyla listeyi süzebilirsiniz.
 4. **Seçimi tamamla** düğmesine basın. Seçili şemalar ekranda görünür.
+5. İlk denemede bir veya iki şema seçip **Seçili şemaları test et** düğmesine basın. **Bağlantı test sonuçları** bölümünde seçtiğiniz şemaların katalog erişimini kontrol edin.
 
-DSN, sunucu, port, servis adı ve ortam uygulamada hazırdır. Ayar dosyası yüklemek, container veya şema adını elle yazmak gerekmez. Liste, bağlandığınız hesabın ALL_TAB_COLUMNS üzerinden görebildiği şemalardır; veritabanındaki bütün şemaların listesi olduğu varsayılmaz. Aynı analizde en fazla 30 şema seçilir.
+DSN, sunucu, port, servis adı ve ortam uygulamada hazırdır. Ayar dosyası yüklemek, container veya şema adını elle yazmak gerekmez. Aynı analizde en fazla 30 şema seçilir.
+
+Açılır liste, `ALL_USERS` üzerinden alınan **şema adaylarıdır**. Listede görünmesi o şemanın kolonlarına erişebildiğinizi göstermez. **Seçili şemaları test et**, yalnız seçilen her şema için `ALL_TAB_COLUMNS` üzerinden en fazla bir metadata satırı okur; müşteri kaydı okumaz. Satır bulunması o şemada en az bir kolonun görülebildiğini doğrular. Satır bulunmaması şemanın boş olmasına veya hesabın kolonları görememesine bağlı olabilir; bütün veritabanında veri bulunmadığı anlamına gelmez. Girişte tüm kolon kataloğunda `DISTINCT OWNER` taraması yapılmaz.
 
 Parola sunucunun işlem belleğinde oturuma özel tutulur; tarayıcı çerezine, dosyaya veya rapora yazılmaz. **Bağlantıyı değiştir** oturumdaki parolayı siler. Bir saat kullanılmayan oturum sonraki istekte kapanır. Uygulamayı kapatmak bellekteki bağlantı bilgilerini temizler. Sayfa yenilenirse bağlantı durumunuz okunur; şemaları yeniden seçin.
 
@@ -63,40 +66,36 @@ Fiziksel adın bulunması, iş tanımının aynı olduğunu tek başına kanıtl
 
 ## 6. İsteğe bağlı LLM ve embedding
 
-**Bağlantılar → LLM ve embedding ayarlarını göster** bölümünü açın. Verdiğiniz iki kurum temel adresi hazır gelir. Tam çağrı yolu ve gerçek model kimliği yalnız temel adresten doğrulanamaz; servis sözleşmesini aşağıdaki alanlardan tamamlayın. Oracle araması için bu bölüm zorunlu değildir.
+**Bağlantılar** sayfasını açın. Kurumun LLM ve embedding temel adresleri hazır gelir. Oracle araması için model desteği zorunlu değildir.
 
-Her servis için model ekibinden alınacak bilgiler:
+1. Servis anahtar istiyorsa ilgili **API anahtarı** alanını doldurun. İstemiyorsa boş bırakın.
+2. **Model kimliği** alanını biliyorsanız girin; bilmiyorsanız ilk testte boş bırakabilirsiniz.
+3. **LLM bağlantısını test et** düğmesine basın. Ardından **Embedding bağlantısını test et** düğmesine basın.
+4. Birden fazla model bulunursa ilgili **Model kimliği** listesinden doğru modeli seçip aynı testi yeniden çalıştırın.
+5. Her iki test başarılıysa **Değişken inceleme** sayfasında **LLM + embedding desteği** kutusunu açın.
 
-- **Tam çağrı adresi:** gerçek POST inference URL'si.
-- **Model kimliği:** servisin beklediği model ID.
-- **Model sürümü / dağıtım etiketi:** kullanılan dağıtımın sürümü; model değişince güncelleyin.
-- **İstek ve yanıt biçimi:** OpenAI uyumlu mu, özel JSON mu? Embedding vektörü yanıtın neresinde?
-- Gerekiyorsa **Bearer API anahtarı** ve **kurum CA PEM dosyası**.
+Test, standart servislerin model listesi veya servis bilgisi uçlarını kontrol eder ve sabit, kısa bir metinle gerçek çağrı yapar. Excel ve katalog bilgisi bu bağlantı testine gönderilmez. Servisin OpenAI/TEI uyumu yalnız adres adına bakılarak kabul edilmez. Başarılı test **tam çağrı adresini**, **istek/yanıt biçimini** ve embedding için gerçek **vektör boyutunu** doldurur. Model listesi birden fazla kimlik döndürürse otomatik rastgele model seçilmez. Gerçek dağıtım sürümü servisten okunamıyorsa bu durum etiketlenir; doğrulanmış sürüm bilgisi sayılmaz.
 
-LLM için **OpenAI Chat Completions uyumlu** yalnız servis bunu destekliyorsa seçilir. Özel sözleşmede `{context}` içeren JSON şablonu ve yanıt yolu gerekir. LLM yalnız verilen adaylar üzerinde kaynak alıntılı yorum üretebilir; yeni kolon veya kesin karar kabul edilmez. [Adapter ayrıntıları](ADAPTERS.md).
+**Gelişmiş / özel servis ayarları** bölümünü yalnız standart test servis biçimini tanımazsa veya kurumunuz özel bir sözleşme kullanıyorsa açın. Buradan model ekibinin verdiği tam çağrı adresi, sürüm, JSON şablonu ve yanıt yolunu girebilirsiniz. Kurum CA sertifikası gerekiyorsa PEM dosyasını da bu bölümden seçilen servisin alanına yazın. TLS doğrulaması kapatılmaz. [Adapter ayrıntıları](ADAPTERS.md).
 
-Embedding sözleşme seçimi yalnız şablonu doldurur; URL'yi değiştirmez:
-
-| Servis biçimi | JSON gövde | Yanıt yolu |
-|---|---|---|
-| OpenAI Embeddings | `{"model":"{model}","input":"{texts}"}` | `data[*].embedding` |
-| TEI /embed | `{"inputs":"{texts}"}` | `$` (kök vektör listesi) |
-| Özel JSON | Kurumun belgelediği `{texts}` içeren şablon | Kurumun yanıtındaki noktalı yol |
-
-**Embedding bağlantısını dene** başarılıysa boyut gerçek yanıttan okunur. **LLM bağlantısını dene** çağrıyı ve yanıt yapısını doğrular. Tam model listesi adresi verilirse **Model listesini al** kullanılabilir; OpenAI uyumlu `data[].id` bekler. Model ID elle de girilebilir.
-
-Sonra inceleme sayfasında **LLM + embedding desteği** kutusunu açın. Bu seçenek Excel alan adı/açıklaması ile katalog metadata'sını seçilen kurum servislerine gönderir. Hata halinde dış servise geçilmez. TLS doğrulaması kapatılmaz.
+Model desteği açık analiz, değişken adı/açıklaması ile katalog metadata'sını seçilen kurum servislerine gönderir. Hata halinde dış servise geçilmez. LLM yorumu bir adayın iş tanımına kesin uyduğunu tek başına kanıtlamaz.
 
 
 ## 7. Bağlantı hatası olursa
 
-Hata mesajı artık hangi aşamanın başarısız olduğunu ve Oracle/driver kodunu gösterir: **oturum açma**, **veritabanı bağlamı okuma**, **erişilebilir şemaları listeleme**, **kolon ve açıklama kataloğu okuma** veya **anahtar kısıtları okuma**.
+**Bağlantı test sonuçları** bölümünü açın. Hangi adımın geçtiğini, hangisinin başarısız olduğunu, süresini ve Oracle/driver veya HTTP kodunu görebilirsiniz. **Tanılama raporunu indir** ile yerel JSON raporunu alın. Rapor parola, API anahtarı ve ham sunucu yanıtı içermez.
 
+- `DPY-4024`: Oracle çağrısı zaman sınırını aştı. Şema listeleme aşamasında görülmesi tek başına kullanıcı/parola veya yetki hatası demek değildir. Bir veya iki şema seçerek erişim testini çalıştırın; zaman aşımı sürerse rapordaki aşama ve süreyle inceleyin.
 - `ORA-01017`: kullanıcı/parola kontrolü.
 - `ORA-28000` / `ORA-28001`: hesap kilidi / parola süresi.
 - `ORA-00942` / `ORA-01031`: ilgili katalog görünümü ve erişim yetkisi kontrolü.
 - `DPY-3010` / `DPY-3015`: Oracle sunucusu veya parola doğrulayıcısının Thin sürücüyle uyumluluğu kontrolü.
+- Model testinde `401` / `403`: servis anahtarı veya erişim izni kontrolü.
+- Model testinde `404`: denenen standart yol serviste yok; diğer tanılama adımlarını da kontrol edin. Tüm keşif yolları başarısızsa model ekibinden gerçek çağrı sözleşmesini alın.
+- Sertifika hatası: kurumun sağladığı CA PEM dosyasını ilgili servisin gelişmiş ayarına girin.
 
-Ham hata metni parola veya bağlantı bilgisi içerebileceğinden gösterilmez. Destek için ekrandaki **aşama ve hata kodu** yeterlidir; parolanızı paylaşmayın. CON_NAME desteklemeyen eski bağlamlarda DB_NAME kullanılır. Yetki ve ağ hataları bu uyumluluk yoluyla gizlenmez.
+Önceki sürümde görülen **“LLM/Embedding tam çağrı adresi gerekli”**, servis çağrısından önceki eksik form doğrulamasıydı. Yeni standart test temel adresle başlayabilir; bu mesaj tek başına servislerin kapalı olduğunu göstermiyordu.
+
+Sıralı gerçek ortam denemesi için **[Kurumda bağlantı test senaryosu](BAGLANTI_TEST_SENARYOSU.md)** belgesini izleyin. Ham hata metni parola veya bağlantı bilgisi içerebileceğinden gösterilmez. Destek için aşama, hata kodu ve tanılama raporunu kullanın; parolanızı paylaşmayın. CON_NAME desteklemeyen eski bağlamlarda DB_NAME kullanılır. Yetki ve ağ hataları bu uyumluluk yoluyla gizlenmez.
 
 Kurum ağına ve gerçek kullanıcı hesabına geliştirme bilgisayarından erişilmedi. Bağlantının kurumda başarılı olduğu, yalnız iş bilgisayarındaki gerçek denemeyle doğrulanabilir.
