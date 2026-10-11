@@ -207,6 +207,9 @@ Silme ajanı kuralı: `graphify affected` + `grep -rn "Sozluk\|sozluk" --include
 - `blok_metni` (motor.py:170): `spk_guven < 0.7` → `Ad?:`; `?` → `Bilinmeyen:`; `A → B` ve `A / B` olduğu gibi; `cakisma=true` satırın tümü `⟨⟩`. `supheli` nota girmez. MAP_SISTEM: "⟨⟩ içinden karar/aksiyon/sayı/tarih üretme, yalnız 'tartışıldı' bağlamı". `dayanak_kontrolu` bu satırları dayanak saymaz.
 - `sorumlu_dogrula` (motor.py:991): sahip alanı `{"ad", "durum": kesin|belirsiz|yok}`. Kesin yollar: (a) kaynak satır `spk_guven ≥ 0.7`, `cakisma=false`, `ben` + gelecek/geniş zaman; (b) **adlandırılmış sahip**: kaynak satır konuşmacısı kesin ve metindeki ad çizelgedeki bir `kisi` katılımcıyla normalize birebir eşleşiyor ve `⟨⟩` içinde değil ("Ayşe, sen cumaya hazırla"). Diğer her şey `belirsiz`. `bana/benim/bende` kaldırılır (motor.py:982). Fixture: "X sen yap" / "ben yaparım" / "bana gönder" / `A → B` / `Ayşen` yanlış duyma.
 - `(?)` kodla basılır; `acik_sorulari_temizle` (llm.py:1280) silmez. Dayanak satır bazlı (1–3 satır, kök örtüşmesi ≥0.5); dayanak `spk_guven < 0.7` → sahip belirsiz; `⟨⟩` payı > %30 → madde belirsiz.
+  - Sıkılaştırma (Faz4 doğrulaması): model `belirsiz` dediyse kod kesin sahip üretmez (en fazla `Ad (?)`); model `(?)` yazdıysa kesin yapılmaz. (a) yolu iş fiili kökü / `ben` + 1. tekil ister, `bekle-/rica et-/öner-/sor-/söyle-/bul-` ve iyelik sayılmaz, satırda başka katılımcı adı ya da muhatap varsa kapanır; (b) yolu adın geçmesine ek olarak hitap + emir/rica ya da özne + 3. kişi gelecek/emir ister; soru, olumsuz, geçmiş zaman her iki yolda belirsiz. Aynı ilk adlı iki katılımcıda ilk ad yetmez; kesin ad katılımcı listesindeki tam adla basılır.
+  - Dayanak: maddedeki sayı/tutar, ay/gün adı ve kod adı pencerenin `⟨⟩` dışındaki metninde geçmeli; yalnız `⟨⟩` içinde geçiyorsa madde atılır, hiç geçmiyorsa `(?)`. Maddeyi tek başına en iyi karşılayan satır `⟨⟩`/çakışma satırıysa `(?)`.
+  - Kademeli birleştirme: her grupta girdi maddesi çıktıda karşılanmalı (sayılar + `cift_yonlu_benzerlik ≥ 0.6`), karşılanmayan yerel haliyle geri eklenir (`liste_geri_ekle` logu); açık sorular boş dönerse yerel liste; toplam kayıp ilk girdiye göre de denetlenir. Yerel tekilleştirme sayısı ya da sorumlusu farklı maddeyi birleştirmez. `tarih_coz` belirsiz/çelişkili ifadeyi (`(?)`, `mi`, `ya da`, `değil`, iki gün adı, `2 hafta sonra`) çözmez; Jira `(?)` tarihli satırda Due Date boş.
 - `kisiye_ozel_epostalar`, `jira_csv` yalnız `durum=kesin`; belirsizler "Sahibi belirsiz" bloğu. `tarih_coz` `birlestir` sonrası; kademeli liste birleştirme; parça örtüşmesi son 6 satır + açık kararlar (~400 token).
 - Altyazı kapalı toplantıda not başına "Konuşmacı bilgisi yok" uyarısı ve `?` oranı.
 
@@ -298,3 +301,15 @@ Eksikler: geriye uyum (`surum`, `yukle` göçü) **eklendi**; klip bazlı etiket
 14. İnceleme silme sonnet'e, stt.py ayrımı Faz1'de — **kabul**.
 15. L çapası monologda bozuluyor — **kabul**: büyüme sürdürme çapası, >5 sn atılır, MAD.
 Eksikler: heartbeat/kapsama **eklendi**; erteleme sırasında `beklemede…` **eklendi**; kısa/uzun farkı `⟨⟩` **eklendi**; davet kara listesi **eklendi**; frekans listesi kaynağı açık soru olarak **eklendi**; kişi başı L ve `YAVAS_ARALIK` Faz0 listesinde; altyazı kapalı uyarısı ve dürüst hedef beyanı §1/§6'da; eşik kalibrasyon süreci §8'de.
+
+---
+
+## Durum (uygulama)
+
+- **Faz 0, tamam:** ölçüm araçları (`olcum`, `etiketle`, `replay`), klip ve okuma kaydı, çökme ve kilit düzeltmeleri.
+- **Faz 1, tamam:** zaman tabanı, `konusmaci.py` zaman kesişimi, devir ve çakışma, `stt.py` ayrımı, göç.
+- **Faz 2, tamam:** sözlük kaldırıldı; otomatik terim havuzu, kurallı düzeltme kapısı, halüsinasyon puanı, Whisper ipucu.
+- **Faz 4, devam ediyor:** §6 not hattı (sorumlu ve dayanak, birleştirme, prompt).
+- **Faz 5, devam ediyor:** §7 kabuk ve paketleme (durum makinesi, COM/UIA iş parçacığı, temizlik).
+- **Faz 3, bekliyor:** kapı: replay WER göreli −25% (hedef) / −10% (alt sınır), parça kapanış gecikmesi ≤ 20 sn, GPU yükü ölçülmüş olmalı.
+- **Faz 6, bekliyor:** kapı: RTF < 0,3, `?` centroid doğruluğu ≥ %50, yanlış 0.

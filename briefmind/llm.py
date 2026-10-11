@@ -41,6 +41,9 @@ BAGLAM_PENCERESI = VARSAYILAN_PENCERE                  # gecerli pencere: min(co
 CONFIG_PENCERE = 0                                     # config.json 'context' (0/bos: sunucudan otomatik)
 CONFIG_MODEL = ""                                      # config.json 'model' (bos: sunucudaki tek model)
 ZAMAN_ASIMI = 300                                      # sohbet istegi okuma zaman asimi (sn)
+VARSAYILAN_DUSUNME_BUTCESI = 1500                      # vLLM thinking_token_budget (config 'llm_dusunme_butcesi'; 0: gonderilmez)
+DUSUNME_BUTCESI = VARSAYILAN_DUSUNME_BUTCESI
+DUSUNME_ICERIK_PAYI = 0.4                              # max_tokens'in en az bu orani cevaba kalir (dusunme butcesi ust siniri 1 - pay)
 AKIS = True                                            # stream=True: route'un bosta kalma zaman asimina takilmaz
 BUTCE_AYAR = {}                                        # config.json 'parca_token' / 'paralel' gecersiz kilmalari
 SUNUCU = None                                          # sunucu_bilgisi() sonucu (modeller, pencere, hata)
@@ -55,6 +58,9 @@ _tani_kilit = threading.Lock()
 _TANI_YAPILDI = False
 _AYAR_NESIL = 0                                        # her ayarla() cagrisinda artar
 _SEMA_DESTEGI = True                                   # json_schema reddedildiyse oturum boyunca gonderilmez
+_BUTCE_DESTEGI = True                                  # thinking_token_budget 400 ile reddedildiyse oturum boyunca gonderilmez
+_TANI_TEKRAR_SN = 60                                   # sunucuya ulasilamayan tani bu kadar sn sonra yeniden denenir
+_TANI_TEKRAR_SONA = 0.0
 _MESAJ_TOKENIZE = True                                 # /tokenize 'messages' bicimini destekliyor mu
 _TOKENIZE_KAPALI_SONA = 0.0                            # /tokenize basarisizsa bu ana kadar tahmin kullanilir
 _tokenize_bildirildi = False
@@ -117,9 +123,10 @@ def ayarla(cfg):
     global ROUTE, MODEL, BAGLAM_PENCERESI, TLS_DOGRULAMA, TLS_HATASI, client, _http, TOKENIZE_URL
     global CONFIG_PENCERE, CONFIG_MODEL, ZAMAN_ASIMI, AKIS, BUTCE_AYAR, SUNUCU, AYAR_UYARILARI, SON_HATA
     global _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE, _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi, _AYAR_NESIL
+    global DUSUNME_BUTCESI, _BUTCE_DESTEGI, _TANI_TEKRAR_SONA
     cfg = cfg or {}
     _AYAR_NESIL += 1
-    ham = (cfg.get("route") or "http://localhost:8000/v1").strip()   # config.json: LLM adresi (OpenAI uyumlu)
+    ham = str(cfg.get("route") or "http://localhost:8000/v1").strip()   # config.json: LLM adresi (OpenAI uyumlu)
     # OpenShift icinden: "http://<servis>.<namespace>.svc.cluster.local:8000/v1"
     ROUTE, kirpilan = route_normalize(ham, ayrinti=True)
     TOKENIZE_URL = _kok(ROUTE) + "/tokenize"
@@ -136,10 +143,11 @@ def ayarla(cfg):
     BAGLAM_PENCERESI = CONFIG_PENCERE or VARSAYILAN_PENCERE
     ZAMAN_ASIMI = max(30, _int(cfg.get("llm_zaman_asimi"), 300))
     AKIS = bool(cfg.get("llm_akis", True))
+    DUSUNME_BUTCESI = max(0, _int(cfg.get("llm_dusunme_butcesi"), VARSAYILAN_DUSUNME_BUTCESI))
     BUTCE_AYAR = {ad: _int(cfg.get(k)) for ad, k in (("parca", "parca_token"), ("paralel", "paralel"))
                   if _int(cfg.get(k)) > 0}
     SUNUCU, SON_HATA = None, None
-    _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE = False, True, True
+    _TANI_YAPILDI, _SEMA_DESTEGI, _MESAJ_TOKENIZE, _BUTCE_DESTEGI, _TANI_TEKRAR_SONA = False, True, True, True, 0.0
     _TOKENIZE_KAPALI_SONA, _tokenize_bildirildi = 0.0, False
     _token_onbellek.clear()
     # A8: config.json -> ca_bundle (kurum kok sertifikasi) varsa TLS dogrulanir, yoksa kapali
@@ -193,10 +201,13 @@ def sunucuyu_tani(zorla=False):
     - config modeli listede yoksa ve sunucu tek model sunuyorsa o model kullanilir;
     - pencere = sunucunun max_model_len'i; config 'context' daha kucukse o (yalniz ust sinir).
     Sunucuya ulasilamazsa config degerleri kalir. Dondurur: uyari satirlari (ayarla uyarilari dahil)."""
-    global _TANI_YAPILDI
+    global _TANI_YAPILDI, _TANI_TEKRAR_SONA
     with _tani_kilit:
         if _TANI_YAPILDI and not zorla:
-            return list(AYAR_UYARILARI)
+            # sunucuya ulasilamayan tani kalici sayilmaz: ag gecici koptuysa model/pencere _TANI_TEKRAR_SN sonra
+            # yeniden sorulur (eskiden oturum boyunca bos/eski model adi ve varsayilan pencere kaliyordu)
+            if not (SUNUCU and SUNUCU.get("hata") and time.time() >= _TANI_TEKRAR_SONA):
+                return list(AYAR_UYARILARI)
         nesil = _AYAR_NESIL
         try:
             return _tani(zorla)
@@ -206,6 +217,7 @@ def sunucuyu_tani(zorla=False):
             # tani yeni ayarla yeniden yapilsin.
             if nesil == _AYAR_NESIL:
                 _TANI_YAPILDI = True
+                _TANI_TEKRAR_SONA = time.time() + _TANI_TEKRAR_SN
 
 
 def _tani(zorla):
@@ -288,6 +300,7 @@ def butce(ad, pencere=None):
 _BAGLAM_IFADE = re.compile(r"maximum context length|context length|max_model_len|maximum model length|"
                            r"model length|too many tokens|prompt is too long|longer than the maximum", re.I)
 _SEMA_IFADE = re.compile(r"json_schema|response_format|guided|structured output|grammar|xgrammar|outlines", re.I)
+_BUTCE_IFADE = re.compile(r"thinking[_ ]token[_ ]budget|thinking[_ ]budget", re.I)
 
 
 def _kisalt(s, n):
@@ -423,6 +436,11 @@ MAP_SISTEM = (
     "Sen deneyimli bir toplantı not alıcısısın. Sana bir toplantının BİR bölümünün transkripti verilecek "
     "(konuşmadan yazıya çevrilmiş; kısmen düzeltilmiş, hâlâ bozuk kelimeler olabilir).\n"
     "Görev: bu bölümden yalnızca gerçekten söylenenleri, aşağıdaki alanlarla JSON olarak çıkar.\n"
+    "Satır etiketleri: 'Ad:' konuşmacı kesin; 'Ad?:' adı emin değil; 'Bilinmeyen:' kim olduğu bilinmiyor; "
+    "'A → B:' ve 'A / B:' sözün el değiştirdiği ya da aynı anda konuşulan yer. ⟨...⟩ içindeki kelimeler eşzamanlı ya "
+    "da belirsiz duyulan konuşmadır: ⟨⟩ içinden karar, aksiyon, sayı ya da tarih ÜRETME; oradan yalnızca 'şu konu "
+    "tartışıldı' diyebilirsin (ozet ve konular). 'Ad?', 'Bilinmeyen', 'A → B' ve 'A / B' konuşmacıları ASLA aksiyon "
+    "sahibi yapma: sorumlu, satırda adı açıkça geçen kişi değilse 'belirsiz'.\n"
     "- ozet: bölümde ne konuşulduğunu 2-4 cümleyle, kronolojik ve olgusal anlat (kim ne önerdi, ne "
     "tartışıldı, neye varıldı). Yorum yok, genelleme yok, transkriptte olmayan bilgi yok.\n"
     "- konular: ele alınan başlıklar (kısa, 2-6 kelime).\n"
@@ -437,7 +455,8 @@ MAP_SISTEM = (
     "Şunları YAZMA: kendi anlama soruların (kim/ne olduğu belirsiz ad ve terimler 'belirsiz_terimler'e "
     "gider), transkriptten alıntı ya da parantez içi açıklama, aynı bölümde cevaplanan soru.\n"
     "- belirsiz_terimler: bozuk duyulduğunu düşündüğün kelime/terimler (transkriptteki yazımıyla).\n"
-    "Kurallar: emin olamadığın yeri olduğu gibi aktar ve sonuna (?) koy. Terim listesi ve gündem yalnızca yazım "
+    "Kurallar: emin olamadığın yeri olduğu gibi aktar ya da 'belirsiz_terimler'e yaz; (?) işaretini SEN YAZMA, "
+    "uygulama belirsiz maddelere kendisi koyar. Terim listesi ve gündem yalnızca yazım "
     "ipucudur; oradan içerik üretme. Bölümde bir şey yoksa ilgili liste boş kalır, ozet 1 cümle olur.\n"
     + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
@@ -469,8 +488,11 @@ LISTE_SISTEM = (
     "Aksiyonun 'madde' alanını asla boş bırakma.\n"
     "- Açık sorularda aynı konudaki soruları tek soruda birleştir; birleştirilmiş kararlar ya da aksiyonlarla "
     "cevaplanan soruyu çıkar; toplam en fazla 8 açık soru.\n"
+    "- Sorumluyu yalnızca girdide yazılı adlardan al; 'belirsiz' ya da (?) işaretli bir aksiyona kendin kişi atama, "
+    "'Ad?' / 'Bilinmeyen' diye anılan kimseyi sorumlu yapma.\n"
     "- Yeni madde EKLEME; terim listesi, gündem ya da genel bilgiden içerik üretme. İfadeleri kısaltabilirsin, anlamı "
-    "değiştirme. [B..] etiketlerini çıktıya yazma. (?) işaretli belirsizlikleri koru.\n"
+    "değiştirme. [B..] etiketlerini çıktıya yazma. Girdideki (?) işaretlerini aynen koru; kendin yeni (?) ekleme "
+    "(uygulama koyar).\n"
     + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
 
@@ -481,7 +503,7 @@ GENEL_SISTEM = (
     "başladı, ne tartışıldı, nereye varıldı). Bölüm özetlerinde olmayan bilgi ekleme; genel bilginle boşluk "
     "doldurma. Uzunluk içerikle orantılı: kısa toplantı 2-3 cümle, uzun toplantı en fazla 8 cümle.\n"
     "- sonraki_adim: 1-2 cümle, yalnızca verilen kararlardan ve aksiyonlardan türetilmiş; hiç karar ve "
-    "aksiyon yoksa '-'.\n"
+    "aksiyon yoksa '-'. Sorumlusu 'belirsiz' olan işi birine atfetme; (?) işaretini kendin yazma.\n"
     + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
 
@@ -559,7 +581,51 @@ def json_ayikla(metin):
     a, b = metin.find("{"), metin.rfind("}")
     if a < 0 or b < 0:
         raise ValueError("JSON yok")
-    return json.loads(re.sub(r",\s*([}\]])", r"\1", metin[a:b + 1]))
+    for aday in (metin[a:b + 1], metin[a:]):
+        try:
+            return json.loads(aday)
+        except ValueError:
+            pass
+    # JSON'dan sonra gelen aciklama ('{...} Not: {x}') ilk nesneyi bozmasin; sondaki virgullar dizge disinda onarilir
+    onarilmis = _son_virgul_sil(metin[a:])
+    try:
+        nesne, _ = json.JSONDecoder().raw_decode(onarilmis)
+    except ValueError:
+        return json.loads(_son_virgul_sil(metin[a:b + 1]))
+    if not isinstance(nesne, dict):
+        raise ValueError("JSON nesnesi yok")
+    return nesne
+
+
+def _son_virgul_sil(metin):
+    """'[1, 2,]' / '{"a": 1,}' sondaki virgulu atar; metin degerlerinin ICINDEKI ', }' ya da ', ]' dokunulmaz
+    (eskiden tum metinde regex: dizge icindeki ', }' bozuluyordu)."""
+    cikti, i, n, dizge, kacis = [], 0, len(metin), False, False
+    while i < n:
+        c = metin[i]
+        if dizge:
+            cikti.append(c)
+            if kacis:
+                kacis = False
+            elif c == "\\":
+                kacis = True
+            elif c == '"':
+                dizge = False
+        elif c == '"':
+            dizge = True
+            cikti.append(c)
+        elif c == ",":
+            k = i + 1
+            while k < n and metin[k].isspace():
+                k += 1
+            if k < n and metin[k] in "}]":
+                i += 1
+                continue
+            cikti.append(c)
+        else:
+            cikti.append(c)
+        i += 1
+    return "".join(cikti)
 
 
 _DUSUNCE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.S)
@@ -602,7 +668,7 @@ GUNLUK_FN = None          # motor ayarlar: her LLM cagrisinin istatistigi (iceri
 
 
 def _gorev_adi(mesajlar):
-    sistem = mesajlar[0]["content"] if mesajlar else ""
+    sistem = (mesajlar[0]["content"] if mesajlar else "").lstrip()
     for ad, sablon in (("duzeltme", DUZELT_ONEK), ("bolum", MAP_SISTEM), ("liste", LISTE_SISTEM),
                        ("genel", GENEL_SISTEM), ("soru", SORU_SISTEM)):
         if sistem.startswith(sablon):
@@ -693,8 +759,8 @@ def _sema_istegi(ortak, sema, ek):
                                                    "json_schema": {"name": "cikti", "schema": sema}}))
     except (BadRequestError, UnprocessableEntityError) as e:
         g = _govde(e)
-        if _BAGLAM_IFADE.search(g) or "does not exist" in g:
-            raise
+        if _BAGLAM_IFADE.search(g) or _BUTCE_IFADE.search(g) or "does not exist" in g:
+            raise                              # baglam / dusunme butcesi alani: _sor ele alir (semasiz tekrar cozmez)
         sonuc = _cagir(ortak)
         ek["sema_dustu"] = True
         if _SEMA_IFADE.search(g) and _SEMA_DESTEGI:
@@ -703,9 +769,48 @@ def _sema_istegi(ortak, sema, ek):
         return sonuc
 
 
+def dusunme_butcesi(max_tokens):
+    """Dusunmeli cagrida gonderilecek thinking_token_budget (vLLM): max_tokens'in en az DUSUNME_ICERIK_PAYI'si
+    cevaba kalir; dusunme bunu asinca eskiden cevap bos ('content': null) donuyordu. 0/None: gonderilmez."""
+    if not DUSUNME_BUTCESI or not _BUTCE_DESTEGI:
+        return None
+    tavan = int(max_tokens * (1 - DUSUNME_ICERIK_PAYI))
+    return min(DUSUNME_BUTCESI, tavan) if tavan >= 64 else None
+
+
+def _butce_kapat(govde):
+    """thinking_token_budget oturum boyunca gonderilmez ve BIR KEZ bildirilir (desteklemeyen / eski sunucu her
+    istekte ayni 400'u uretmesin)."""
+    global _BUTCE_DESTEGI
+    if not _BUTCE_DESTEGI:
+        return
+    _BUTCE_DESTEGI = False
+    m = f"LLM sunucusu thinking_token_budget alanını reddetti; düşünme bütçesi gönderilmiyor ({_kisalt(govde, 160)})"
+    AYAR_UYARILARI.append(m)
+    _gunluge_yaz(olay="dusunme_butcesi_yok", zaman=dt.datetime.now().strftime("%H:%M:%S"), hata=_kisalt(govde, 300))
+    _uyar(m)
+
+
+def _butce_siniflandir(e):
+    """400/422 hatasi dusunme butcesi alanindan mi? 'kesin': govde alani adiyla anıyor; 'supheli': baglam/model/sema
+    nedeni de yok (alansiz tekrar gerekir); None: baska neden."""
+    if not isinstance(e, (BadRequestError, UnprocessableEntityError)):
+        return None
+    g = _govde(e) or ""
+    if _BUTCE_IFADE.search(g):
+        return "kesin"
+    if _BAGLAM_IFADE.search(g) or _SEMA_IFADE.search(g) or "does not exist" in g:
+        return None
+    return "supheli"
+
+
 def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
     global BAGLAM_PENCERESI
-    for deneme in range(2):
+    deneme = 0
+    butce_denemesi = 0
+    supheli_govde = None
+    butce_yok = False                             # bu cagri icin alan atilir (reddedildi / nedeni belirsiz 400)
+    while True:
         giris = _giris_token(mesajlar)
         izin = BAGLAM_PENCERESI - giris - MARJ
         if izin < 256:
@@ -713,8 +818,12 @@ def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
                              f"pencere {BAGLAM_PENCERESI} (config.json 'context' / sunucu max_model_len)")
         mt = min(max_tokens, izin)
         kw = {"reasoning_effort": effort} if dusunme else {"enable_thinking": False}
+        eb = {"chat_template_kwargs": kw}
+        tb = dusunme_butcesi(mt) if dusunme and not butce_yok else None
+        if tb:
+            eb["thinking_token_budget"] = tb
         ortak = dict(model=MODEL, messages=mesajlar, max_tokens=mt, temperature=temperature, top_p=0.95,
-                     extra_body={"chat_template_kwargs": kw})
+                     extra_body=eb)
         ek = {}
         try:
             if sema and _SEMA_DESTEGI:
@@ -726,13 +835,26 @@ def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
             # 400/422 ya da akis ici hata olayi (vLLM uzun istegi akis basladiktan sonra da reddedebilir)
             if not (isinstance(e, (BadRequestError, UnprocessableEntityError)) or _akis_hatasi(e)):
                 raise
+            sinif = _butce_siniflandir(e) if tb and butce_denemesi == 0 else None
+            if sinif:
+                butce_denemesi += 1               # ayni istek alansiz, pencere denemesini harcamadan
+                butce_yok = True
+                if sinif == "kesin":
+                    _butce_kapat(_govde(e))
+                else:
+                    supheli_govde = _govde(e)     # alansiz istek basarili olursa neden bu alandi
+                continue
             yeni = _baglam_siniri(_govde(e))
             if deneme == 0 and yeni and yeni < BAGLAM_PENCERESI:
                 # sunucunun penceresi bildigimizden kucuk: ogren ve ayni istegi bir kez kirpilmis butceyle dene
                 _uyar(f"LLM bağlam penceresi {BAGLAM_PENCERESI} değil {yeni}; bütçeler buna göre küçültüldü")
                 BAGLAM_PENCERESI = yeni
+                deneme += 1
                 continue
             raise
+    if supheli_govde is not None and not tb:
+        _butce_kapat(supheli_govde)               # alansiz tekrar basardi: 400'un nedeni thinking_token_budget'ti
+    ek["dusunme_butcesi"] = tb
     ayrinti = getattr(u, "completion_tokens_details", None)
     ek.update(giris_token=giris, max_tokens=mt, cikti_token=getattr(u, "completion_tokens", None),
               sunucu_giris_token=getattr(u, "prompt_tokens", None),
@@ -842,9 +964,43 @@ def _ozet_dili(o):
     return " ".join([o["ozet"]] + o["kararlar"] + o["acik_sorular"] + [a["madde"] for a in o["aksiyonlar"]])
 
 
+ONCEKI_BAGLAM_TOKEN = 400         # parca ortusmesi: onceki parcanin son satirlari + acik maddeler (MIMARI_v3 §6)
+ONCEKI_SATIR = 6
+
+
+def onceki_baglam_hazirla(konular=None, satirlar=None, acik=None, tavan=ONCEKI_BAGLAM_TOKEN):
+    """Sonraki parcaya gececek baglam -> {"konular", "satirlar" (metin), "acik"}: son ONCEKI_SATIR satir (blok metni
+    satirlari) + onceki parcanin cevapsiz kalan maddeleri; ikisi birlikte ~`tavan` token'i (len//3) gecmez. Once acik
+    maddeler (en fazla 3, her biri <=160 karakter), kalan pay son satirlara; kirpma satir basindan (eski) yapilir."""
+    konular = [_metin(k).strip() for k in (konular or []) if _metin(k).strip()]
+    acik = [_kisalt(_metin(a), 160) for a in (acik or []) if _metin(a).strip()][:3]
+    pay = tavan * 3 - sum(len(a) + 4 for a in acik)
+    secilen = []
+    for satir in reversed([x for x in (satirlar or []) if str(x).strip()][-ONCEKI_SATIR:]):
+        satir = _kisalt(satir, 400)
+        if pay - len(satir) - 1 < 0 and secilen:
+            break
+        pay -= len(satir) + 1
+        secilen.append(satir)
+    return {"konular": konular, "satirlar": "\n".join(reversed(secilen)), "acik": acik}
+
+
 def bolum_ozetle(blok, sira, baglam, onceki_konular=None):
-    onceki = [_metin(k) for k in (onceki_konular or []) if _metin(k).strip()]
+    """onceki_konular: onceki bolumun konu listesi (eski bicim) ya da onceki_baglam_hazirla() sozlugu
+    (konular + son satirlar + acik maddeler). Satirlar YALNIZ baglamdir: bolumun ilk satirlari onlara cevap
+    olabilir; madde bunlardan uretilmez."""
+    if isinstance(onceki_konular, dict):
+        bag = onceki_konular
+        onceki, son_satirlar, acik = bag.get("konular") or [], str(bag.get("satirlar") or "").strip(), bag.get("acik") or []
+    else:
+        onceki, son_satirlar, acik = onceki_konular or [], "", []
+    onceki = [_metin(k) for k in onceki if _metin(k).strip()]
     devam = f"\nÖnceki bölümde konuşulanlar: {', '.join(onceki)}" if onceki else ""
+    if acik:
+        devam += "\nÖnceki bölümde cevapsız kalanlar: " + "; ".join(_metin(a) for a in acik)
+    if son_satirlar:
+        devam += ("\nÖnceki bölümün son satırları (YALNIZ bağlam; bunlardan madde ya da özet üretme, yalnızca bu bölümün "
+                  "ilk satırlarını anlamak için kullan):\n" + son_satirlar)
     kullanici = {"role": "user", "content": f"{baglam}{devam}\n\nToplantının {sira}. bölümü:\n\n{blok}"}
     mesajlar = [{"role": "system", "content": MAP_SISTEM}, kullanici]
     # JSON cikarimi derin dusunme istemez: "low" ile dusunme tokenleri kisa kalir, cevap kesilmez
@@ -879,9 +1035,22 @@ def normalize_bosluk(s):
     return re.sub(r"\s+", " ", str(s or "")).strip()
 
 
+def _sayilar(s):
+    """Metindeki sayilar (kume): '300 bin TL' ile '500 bin TL', 'Sunucu 3' ile 'Sunucu 4' ayni madde degildir."""
+    return set(re.findall(r"\d+", str(s or "")))
+
+
 def _benzer(a, b, esik=0.85):
     a, b = _sade(a), _sade(b)
-    return bool(a) and (a == b or difflib.SequenceMatcher(None, a, b).ratio() >= esik)
+    if not a:
+        return False
+    if a == b:
+        return True
+    if _sayilar(a) != _sayilar(b):                  # tutar / numara / tarih farkli: ayri madde (biri kaybolmasin)
+        return False
+    sm = difflib.SequenceMatcher(None, a, b)
+    # ratio() pahali: ust sinir olan ucuz olculer esigin altindaysa sonuc zaten False (uzun toplantida O(n^2) karsilastirma)
+    return sm.real_quick_ratio() >= esik and sm.quick_ratio() >= esik and sm.ratio() >= esik
 
 
 def _aksiyon_birlestir(eski, yeni):
@@ -894,14 +1063,29 @@ def _aksiyon_birlestir(eski, yeni):
     return v
 
 
+def _sorumlu_adi(a):
+    """Aksiyonun adlandirilmis sorumlusu (sade, '(?)' atilmis); belirsiz / bos ise ''."""
+    ad = _sade(re.sub(r"\(\?\)", " ", str((a or {}).get("sorumlu") or ""))).strip()
+    return "" if ad in ("", "belirsiz", "-") else ad
+
+
+def _ayni_aksiyon(v, oge):
+    """Iki aksiyon tek madde mi? Metin benzer (sayilari ayni) VE iki taraf da adlandirilmissa sorumlu ayni."""
+    if not _benzer(v.get("madde", ""), oge.get("madde", "")):
+        return False
+    a, b = _sorumlu_adi(v), _sorumlu_adi(oge)
+    return not (a and b and a != b)
+
+
 def listeleri_tekille(bolumler):
     """LLM'siz birlestirme: bolum listelerini sirayla toplar, benzer maddelerde sonraki bolumu tutar.
-    Hem LLM birlestirmesi basarisiz olursa yedek, hem de onun sonucunu denetlemek icin olcut."""
+    Hem LLM birlestirmesi basarisiz olursa yedek, hem de onun sonucunu denetlemek icin olcut. Sayilari farkli maddeler
+    ('300 bin' / '500 bin') ve sorumlusu farkli aksiyonlar ('Sunucu 3' Ali / 'Sunucu 4' Ayse) birlestirilmez."""
     sonuc = {"kararlar": [], "aksiyonlar": [], "acik_sorular": []}
 
-    def ekle(liste, oge, anahtar, birlestir=None):
+    def ekle(liste, oge, anahtar, birlestir=None, ayni=None):
         for i, v in enumerate(liste):
-            if _benzer(anahtar(v), anahtar(oge)):
+            if ayni(v, oge) if ayni else _benzer(anahtar(v), anahtar(oge)):
                 liste[i] = birlestir(v, oge) if birlestir else oge
                 return
         liste.append(oge)
@@ -911,17 +1095,17 @@ def listeleri_tekille(bolumler):
             ekle(sonuc["kararlar"], k, str)
         for a in b.get("aksiyonlar") or []:
             if isinstance(a, dict) and madde_dolu(a.get("madde")):
-                ekle(sonuc["aksiyonlar"], a, lambda x: x.get("madde", ""), _aksiyon_birlestir)
+                ekle(sonuc["aksiyonlar"], a, lambda x: x.get("madde", ""), _aksiyon_birlestir, _ayni_aksiyon)
         for q in b.get("acik_sorular") or []:
             ekle(sonuc["acik_sorular"], q, str)
     return sonuc
 
 
-def _liste_girdisi(bolumler):
+def _liste_girdisi(bolumler, ilk_no=1):
     bloklar, adet = [], 0
     for alan, baslik in (("kararlar", "Kararlar"), ("aksiyonlar", "Aksiyonlar"), ("acik_sorular", "Açık sorular")):
         ogeler = []
-        for i, b in enumerate(bolumler, 1):
+        for i, b in enumerate(bolumler, ilk_no):
             for x in b.get(alan) or []:
                 if alan == "aksiyonlar":
                     ogeler.append(f"- [B{i}] {x.get('madde', '')} — {x.get('sorumlu', 'belirsiz')} — {x.get('tarih', '-')}")
@@ -936,31 +1120,100 @@ def _liste_dili(v):
     return " ".join(v["kararlar"] + v["acik_sorular"] + [a["madde"] for a in v["aksiyonlar"]])
 
 
-def listeleri_birlestir(bolumler, baglam, ilerleme=print):
-    """Karar/aksiyon/acik soru listelerini tekillestirir. LLM cevabi kesik, Ingilizce ya da supheli
-    derecede kisaysa (madde kaybi) LLM'siz tekillestirme kullanilir."""
+LISTE_GRUP_MADDE = 70          # ilk kademede bir LLM isteginin birlestirdigi en fazla madde (daha fazlasi gruplanir)
+LISTE_KADEME = 4               # grup sonuclarini yeniden birlestirme tur siniri
+
+
+def _liste_yedege_dus(ilerleme, mesaj, **ek):
+    """LLM'siz birlestirmeye dusuldu: hem Olaylar'a hem llm_log.jsonl'e yazilir (sessiz dusus yok)."""
+    ilerleme(mesaj)
+    _gunluge_yaz(olay="liste_yedek", zaman=dt.datetime.now().strftime("%H:%M:%S"), neden=_kisalt(mesaj, 200), **ek)
+
+
+def _liste_girdi_ust(baglam):
+    """Bir birlestirme isteginin girdi token ust siniri: cevap (girdi x ~1.3) butce('liste')'e ve girdi + cevap +
+    sablon pencereye sigmali."""
+    sistem = token_say(LISTE_SISTEM + baglam) + 150
+    return max(300, min(int(butce("liste") / 1.3), int((BAGLAM_PENCERESI - MARJ - sistem) / 2.3)))
+
+
+def _liste_gruplari(bolumler, baglam, madde_tavani=0):
+    """Ardisik bolumleri bir istege sigacak gruplara boler -> [[(indeks, bolum), ...], ...] (kronoloji korunur)."""
+    ust = _liste_girdi_ust(baglam)
+    gruplar, mevcut, tok, adet = [], [], 0, 0
+    for i, b in enumerate(bolumler):
+        girdi, n = _liste_girdisi([b])
+        t = token_say(girdi)
+        if mevcut and (tok + t > ust or (madde_tavani and adet + n > madde_tavani)):
+            gruplar.append(mevcut)
+            mevcut, tok, adet = [], 0, 0
+        mevcut.append((i, b))
+        tok += t
+        adet += n
+    if mevcut:
+        gruplar.append(mevcut)
+    return gruplar
+
+
+LISTE_KAPSAMA_ESIK = 0.6       # girdi maddesi ciktidaki bir maddeyle bu kadar (cift yonlu) benzesmeli: yoksa dusmus sayilir
+
+
+def _kok_kumesi(s):
+    return set(re.findall(r"[a-z0-9]+", _sade(s)))
+
+
+def _karsilanmayanlar(girdi, cikti):
+    """girdi (listeleri_tekille sonucu) karar / aksiyon maddelerinden ciktida KARSILIGI olmayanlar ->
+    {'kararlar': [...], 'aksiyonlar': [...]}. Karsilik: kararlar + aksiyon maddelerinden biri (karar <-> aksiyon tasimasi
+    serbest) girdinin sayilarini tasiyor VE cift_yonlu_benzerlik >= LISTE_KAPSAMA_ESIK (kisaltma / birlestirme sayilir)."""
+    hedef = [(m, _sayilar(m), _kok_kumesi(m)) for m in
+             list(cikti.get("kararlar") or []) + [a.get("madde", "") for a in cikti.get("aksiyonlar") or []]]
+
+    def karsilandi(x):
+        sx, kx = _sayilar(x), _kok_kumesi(x)
+        for m, sm, km in hedef:
+            if not sx <= sm:
+                continue
+            if kx and km and len(kx & km) < 0.4 * min(len(kx), len(km)):
+                continue                                       # ucuz on eleme (difflib pahali)
+            if cift_yonlu_benzerlik(x, m) >= LISTE_KAPSAMA_ESIK:
+                return True
+        return False
+    return {"kararlar": [k for k in girdi.get("kararlar") or [] if not karsilandi(k)],
+            "aksiyonlar": [a for a in girdi.get("aksiyonlar") or [] if not karsilandi(a.get("madde", ""))]}
+
+
+def _liste_sayisi(v):
+    return len(v.get("kararlar") or []) + len(v.get("aksiyonlar") or [])
+
+
+def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
+    """Tek istekte sigan bolum listelerini LLM ile tekillestirir. LLM cevabi kesik, bozuk, Ingilizce ya da
+    supheli derecede kisaysa (madde kaybi) bu grup icin LLM'siz tekillestirme kullanilir (nedeni loglanir)."""
     yedek = listeleri_tekille(bolumler)
-    girdi, adet = _liste_girdisi(bolumler)
+    girdi, adet = _liste_girdisi(bolumler, ilk_no)
     if adet <= 3:                                      # birlestirecek bir sey yok
         return yedek
     mesajlar = [{"role": "system", "content": LISTE_SISTEM},
                 {"role": "user", "content": f"{baglam}\n\nBölümlerden gelen maddeler:\n\n{girdi}"}]
     cikti = min(butce("liste"), max(1000, int(token_say(girdi) * 1.3)))
     if _giris_token(mesajlar) + cikti + MARJ > BAGLAM_PENCERESI:
-        ilerleme("  madde listesi bağlama sığmıyor, yerel birleştirme kullanıldı")
+        _liste_yedege_dus(ilerleme, "  madde listesi bağlama sığmıyor, yerel birleştirme kullanıldı", madde=adet)
         return yedek
     try:
         v = _json_tam(mesajlar, cikti, LISTE_SEMASI)
     except Exception as e:
-        ilerleme(f"  ! liste birleştirme hatası, yerel birleştirme kullanıldı: {hata_metni(e)}")
+        _liste_yedege_dus(ilerleme, f"  ! liste birleştirme hatası, yerel birleştirme kullanıldı: {hata_metni(e)}",
+                          madde=adet)
         return yedek
     if not v:
-        ilerleme("  ! liste birleştirme kesildi/bozuk, yerel birleştirme kullanıldı")
+        _liste_yedege_dus(ilerleme, "  ! liste birleştirme kesildi/bozuk, yerel birleştirme kullanıldı", madde=adet)
         return yedek
     ham_aks = [a for a in (v.get("aksiyonlar") or []) if a]
     bos_madde = sum(1 for a in ham_aks if not madde_dolu(a.get("madde") if isinstance(a, dict) else a))
     if ham_aks and bos_madde / len(ham_aks) > 0.2:
-        ilerleme(f"  ! liste birleştirmesinde {bos_madde} aksiyonun maddesi boş, yerel birleştirme kullanıldı")
+        _liste_yedege_dus(ilerleme, f"  ! liste birleştirmesinde {bos_madde} aksiyonun maddesi boş, "
+                                    f"yerel birleştirme kullanıldı", madde=adet)
         return yedek
     n = normalize_ozet({"ozet": "", **v})
     sonuc = {k: n[k] for k in ("kararlar", "aksiyonlar", "acik_sorular")}
@@ -973,8 +1226,70 @@ def listeleri_birlestir(bolumler, baglam, ilerleme=print):
     kayip = (len(sonuc["kararlar"]) + len(sonuc["aksiyonlar"])
              < (len(yedek["kararlar"]) + len(yedek["aksiyonlar"]) + 1) // 2)
     if kayip or ingilizce_mi(_liste_dili(sonuc)):
-        ilerleme("  ! liste birleştirmesi madde kaybetti ya da dili bozuk, yerel birleştirme kullanıldı")
+        _liste_yedege_dus(ilerleme, "  ! liste birleştirmesi madde kaybetti ya da dili bozuk, yerel birleştirme "
+                                    "kullanıldı", madde=adet)
         return yedek
+    # kapsama: esigin altindaki kayip da kademeler boyunca birikir (her grupta %40 -> iki turda %64): girdideki her madde
+    # ciktida karsilanmali; karsilanmayan yerel haliyle geri eklenir (loglu)
+    eksik = _karsilanmayanlar(yedek, sonuc)
+    n_eksik = _liste_sayisi(eksik)
+    if n_eksik:
+        sonuc["kararlar"] += eksik["kararlar"]
+        sonuc["aksiyonlar"] += [dict(a) for a in eksik["aksiyonlar"]]
+        ilerleme(f"  ! liste birleştirmesi {n_eksik} maddeyi düşürdü; maddeler geri eklendi")
+        _gunluge_yaz(olay="liste_geri_ekle", zaman=dt.datetime.now().strftime("%H:%M:%S"), madde=adet, eksik=n_eksik,
+                     ornek=[_kisalt(x, 80) for x in (eksik["kararlar"] + [a.get("madde", "") for a in eksik["aksiyonlar"]])[:3]])
+    if yedek["acik_sorular"] and not sonuc["acik_sorular"]:
+        # model acik sorulari bosaltti: yerel liste kullanilir (cevaplanmislari acik_sorulari_temizle sonra ayiklar)
+        sonuc["acik_sorular"] = list(yedek["acik_sorular"])
+        ilerleme(f"  ! liste birleştirmesi {len(yedek['acik_sorular'])} açık sorunun tümünü düşürdü; yerel liste "
+                 f"kullanıldı")
+        _gunluge_yaz(olay="liste_soru_geri", zaman=dt.datetime.now().strftime("%H:%M:%S"), madde=adet,
+                     soru=len(yedek["acik_sorular"]))
+    return sonuc
+
+
+def _listeleri_birlestir(bolumler, baglam, ilerleme=print):
+    """Karar/aksiyon/acik soru listelerini tekillestirir. Liste tek istege sigiyorsa tek LLM cagrisi; uzun toplantida
+    (170+ madde) bolumler sigan gruplara bolunur, her grup ayri birlestirilir, ardindan grup sonuclari yeniden
+    birlestirilir (en cok LISTE_KADEME tur). LLM'siz yedege dusus YALNIZ sorunlu grup / son basamak icin olur ve
+    her zaman loglanir (eskiden 170+ maddede tum liste sessizce yerel yedege dusuyordu)."""
+    _, adet = _liste_girdisi(bolumler)
+    if adet <= 3:                                      # birlestirecek bir sey yok
+        return listeleri_tekille(bolumler)
+    seviye = list(bolumler)
+    for tur in range(LISTE_KADEME):
+        gruplar = _liste_gruplari(seviye, baglam, LISTE_GRUP_MADDE if tur == 0 else 0)
+        if len(gruplar) == 1:
+            return _liste_grup_birlestir(seviye, baglam, ilerleme)
+        if len(gruplar) >= len(seviye):                # her bolum tek basina bir grup: gruplamak ilerleme saglamaz
+            break
+        ilerleme(f"  {_liste_girdisi(seviye)[1]} madde tek istekte sığmıyor: {len(gruplar)} grupta birleştiriliyor"
+                 f"{f' (tur {tur + 1})' if tur else ''}...")
+        seviye = [_liste_grup_birlestir([b for _, b in g], baglam, ilerleme, g[0][0] + 1) for g in gruplar]
+    _liste_yedege_dus(ilerleme, "  ! madde listesi kademeli birleştirmeye de sığmadı, yerel birleştirme kullanıldı",
+                      madde=_liste_girdisi(seviye)[1])
+    return listeleri_tekille(seviye)
+
+
+def listeleri_birlestir(bolumler, baglam, ilerleme=print):
+    """Karar/aksiyon/acik soru listelerini tekillestirir (_listeleri_birlestir). Kayip TOPLAM uzerinden de denetlenir:
+    son sonuc ilk girdinin yerel tekillestirmesinin yarisindan azsa (kademeler boyunca biriken kayip) ya da girdide
+    acik soru varken hic kalmadiysa yerel sonuc kullanilir (loglu)."""
+    sonuc = _listeleri_birlestir(bolumler, baglam, ilerleme)
+    if _liste_girdisi(bolumler)[1] <= 3:
+        return sonuc
+    taban = listeleri_tekille(bolumler)
+    if _liste_sayisi(sonuc) < (_liste_sayisi(taban) + 1) // 2:
+        _liste_yedege_dus(ilerleme, f"  ! birleştirme toplamda madde kaybetti ({_liste_sayisi(sonuc)} / "
+                                    f"{_liste_sayisi(taban)}), yerel birleştirme kullanıldı",
+                          madde=_liste_girdisi(bolumler)[1])
+        return taban
+    if taban["acik_sorular"] and not sonuc["acik_sorular"]:
+        sonuc = dict(sonuc, acik_sorular=list(taban["acik_sorular"]))
+        ilerleme(f"  ! birleştirmede {len(taban['acik_sorular'])} açık sorunun tümü düştü; yerel liste kullanıldı")
+        _gunluge_yaz(olay="liste_soru_geri", zaman=dt.datetime.now().strftime("%H:%M:%S"),
+                     soru=len(taban["acik_sorular"]))
     return sonuc
 
 
@@ -1066,7 +1381,8 @@ def yedek_ozet(bolumler, listeler):
 
 def yedek_sonraki_adim(listeler, adet=3):
     """Model 'sonraki adim' yazmadiysa aksiyonlardan (sorumlusu belli olanlar once) kurulur."""
-    aks = sorted(listeler.get("aksiyonlar") or [], key=lambda a: a.get("sorumlu") in ("", "belirsiz", None))
+    aks = sorted(listeler.get("aksiyonlar") or [],
+                 key=lambda a: a.get("sorumlu") in ("", "belirsiz", None) or "(?)" in str(a.get("sorumlu")))
     if not aks:
         return "-"
     return "Öncelikli aksiyonlar: " + "; ".join(
@@ -1100,16 +1416,22 @@ SABLONLAR = {
 
 def kisi_bazli(aksiyonlar):
     """Aksiyonlari sorumluya gore gruplar: [(ad, [madde, ...])], en cok isi olan once, 'belirsiz' sonda.
-    'Selin Kara, Kemal Tuncer' gibi ortak sorumlu her iki kisiye de yazilir."""
+    'Selin Kara, Kemal Tuncer' gibi ortak sorumlu her iki kisiye de yazilir. Sorumlusu '(?)' isaretli (sahibi
+    belirsiz) aksiyon kisinin isi sayilmaz: 'belirsiz' grubuna '(aday: Ad)' notuyla girer."""
     gruplar = {}
     for a in aksiyonlar:
         if not madde_dolu(a.get("madde")):
             continue
-        adlar = [x.strip() for x in re.split(r",|/| ve ", a.get("sorumlu") or "") if x.strip()] or ["belirsiz"]
+        ham = a.get("sorumlu") or ""
+        adlar = [x.strip() for x in re.split(r",|/| ve ", re.sub(r"\(\?\)", " ", ham)) if x.strip()] or ["belirsiz"]
+        madde = a["madde"]
+        if "(?)" in ham and adlar != ["belirsiz"]:
+            madde = f"{madde.rstrip()} (aday: {', '.join(adlar)})"
+            adlar = ["belirsiz"]
         for ad in adlar:
             gruplar.setdefault(ad, [])
-            if a["madde"] not in gruplar[ad]:
-                gruplar[ad].append(a["madde"])
+            if madde not in gruplar[ad]:
+                gruplar[ad].append(madde)
     return sorted(gruplar.items(), key=lambda kv: (kv[0] == "belirsiz", -len(kv[1]), kv[0]))
 
 
@@ -1154,8 +1476,12 @@ def not_markdown(genel, listeler, kaynak_fn=None):
 
 _GELECEK_FIIL = re.compile(r"[ae]c[ae]k(?:t[ıi]r|l[ae]r(?:d[ıi]r)?)?$")     # -ecek/-acak(tır), paylaşılacak...
 _SON_PARANTEZ = re.compile(r"\s*\([^()]*\)\s*\.?\s*$")
+_SON_BELIRSIZ = re.compile(r"\(\?\)\s*\.?\s*$")                                    # sondaki '(?)' belirsizlik isareti
 _TEK_AD_PARANTEZ = re.compile(r"\s*\((\w+)\)\s*(\.?)\s*$")                  # "... (Selin)" / "... (Selin)."
 _ALINTI_PARANTEZ = re.compile(r"\s*\([^()]*['\"“”‘’][^()]*\)\s*\.?\s*$")   # "... (Kemal: '...')"
+# Modelin kendi anlama sorusu: kelimeye BITISIK '(?)' + kim/nedir. Kodun bastigi ' (?)' (bosluklu, madde sonunda)
+# belirsizlik isaretidir ve soruyu silmez (MIMARI_v3 §6).
+_ANLAMA_ISARETI = re.compile(r"\w\(\?\)\s*(?:kimdir|kim|kimin|nedir|hangi|ne olduğu)(?!\w)")
 _ANLAMA_SORUSU = ("kimdir", "hangi sistemdir", "katılımcı listesinde", "katılımcılar arasında",
                   "ne olduğu belirsiz", "ne olduğu anlaşılmadı")
 _BELIRSIZ = ("", "-", "belirsiz", "?")
@@ -1187,7 +1513,8 @@ def karar_aksiyon_ayikla(listeler, katilimcilar=None):
         adlar = _gecen_adlar(govde, katilimcilar)
         kelimeler = re.findall(r"\w+", tr_kucuk(govde))
         if adlar and kelimeler and _GELECEK_FIIL.search(kelimeler[-1]):
-            aksiyonlar.append({"madde": govde.rstrip(" ."), "sorumlu": ", ".join(adlar), "tarih": "-"})
+            isaret = " (?)" if _SON_BELIRSIZ.search(k) else ""        # kodun/girdinin (?) isareti tasinirken kaybolmaz
+            aksiyonlar.append({"madde": govde.rstrip(" .") + isaret, "sorumlu": ", ".join(adlar), "tarih": "-"})
             continue
         kararlar.append(k)
     return dict(listeler, kararlar=kararlar, aksiyonlar=aksiyonlar)
@@ -1205,8 +1532,9 @@ def belirsiz_aksiyonlari_ele(aksiyonlar, kaynak_fn=None):
         return list(aksiyonlar)
     kalan = []
     for a in aksiyonlar:
-        if (normalize_bosluk(a.get("sorumlu")).lower() in _BELIRSIZ and len(a.get("madde", "").split()) <= 4
-                and not kaynak_fn(a.get("madde", ""), None)):
+        madde = a.get("madde") or ""
+        if (normalize_bosluk(a.get("sorumlu")).lower() in _BELIRSIZ and len(madde.split()) <= 4
+                and not kaynak_fn(madde, None)):
             continue
         kalan.append(a)
     return kalan
@@ -1230,8 +1558,8 @@ def acik_sorulari_temizle(sorular, kararlar=(), aksiyonlar=(), sonraki_adim="", 
         k = tr_kucuk(q)
         if any(i in k for i in _ANLAMA_SORUSU):
             continue
-        if "(?)" in q and re.search(r"(?<!\w)(kim|kimin|nedir|hangi|ne olduğu)(?!\w)", k):
-            continue
+        if _ANLAMA_ISARETI.search(k):
+            continue                                  # 'Varun(?) kimdir' gibi modelin kendi anlama sorusu
         q = _ALINTI_PARANTEZ.sub("", q).strip()
         if len(q.strip(" -.?")) < 3:
             continue
@@ -1287,6 +1615,9 @@ SORU_SISTEM = (
     "Sen bir toplantı asistanısın. Sana bir toplantının transkriptinden seçilmiş bölümler verilecek; her satır "
     "[SS:DD:ss] Konuşmacı: metin biçiminde. Kullanıcının sorusunu YALNIZCA bu satırlara dayanarak cevapla.\n"
     "- Kim ne dediyse adıyla yaz; dayandığın satırın zamanını ⏱SS:DD:ss biçiminde ekle (örn. ⏱10:12:03).\n"
+    "- Etiketi 'Ad?' olan satırda konuşmacı kesin değildir ('Ad olabilir' de); 'Bilinmeyen' ise kim olduğu "
+    "bilinmez: bunlara kesin kişi atama. ⟨...⟩ içindeki kelimeler belirsizdir: oradan sayı, tarih ya da karar "
+    "aktarma, en fazla 'şu konu konuşuldu' de.\n"
     "- Transkriptte cevap yoksa 'Bu toplantının transkriptinde bu konu geçmiyor.' de; tahmin yürütme, genel "
     "bilgiyle doldurma.\n- Kısa ve net yaz.\n" + TURKCE_KURAL
 )

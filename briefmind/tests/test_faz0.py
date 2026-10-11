@@ -109,6 +109,7 @@ def _bekle(qapp, kosul, sn=10.0):
 def ortam(tmp_path, monkeypatch, qapp):
     """Calisma klasoru tmp (hata.log, config.json oraya), kancalar test sonunda eski haline doner."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)                # hata.log: uygulama klasoru (= tmp), gercek profil degil
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)
     return tmp_path

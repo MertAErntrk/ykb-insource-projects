@@ -409,6 +409,7 @@ class SahteYakalamaIsi(QtCore.QThread):
 @pytest.fixture
 def pencere(tmp_path, monkeypatch, qapp):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)                # hata.log gercek kullanici profiline yazilmaz
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)
     import app
@@ -609,7 +610,7 @@ def test_gecmis_yeniden_ozetle_eski_kayitta_calisir_belirsizler_gosterilir(pence
     p.gecmis_yenile()
     p.g_liste.setCurrentRow(0)
     p.gecmis_yeniden_ozetle()
-    assert _bekle(qapp, lambda: "Eski toplantı konuşuldu" in p.not_goster.toPlainText() and not p._not_kilit)
+    assert _bekle(qapp, lambda: "Eski toplantı konuşuldu" in p.not_goster.toPlainText() and not p._yeniden_kilit)
     assert "duzeltme" not in sorulan and (k / "not.md").exists()
     assert p.b_ana.isEnabled() and "Eskit" in p.belirsiz_goster.toPlainText() and p.nav.currentRow() == p.SAYFA_NOT
     assert json.loads((k / "parcalar" / "parca_001.json").read_text(encoding="utf-8"))["satirlar"][0]["text"] \

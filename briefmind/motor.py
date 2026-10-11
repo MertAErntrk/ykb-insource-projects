@@ -91,15 +91,163 @@ def _kokler(metin):
     return {k[:5] for k in re.findall(r"[a-z0-9]+", m) if len(k) >= 3}
 
 
+DAYANAK_SATIR_ESIK = 0.5        # karar/aksiyon/soru maddesi: 1-3 ardisik transkript satirinda kok ortusmesi en az bu kadar
+DAYANAK_PENCERE = 3
+SARMAL_PAY_SINIRI = 0.30        # dayanak satirlarinin ⟨⟩ payi bunu asarsa madde belirsiz
+_MADDE_DURAK = {"ve", "ile", "icin", "olan", "olarak", "yapil", "edil", "kararl", "karar", "aksiy"}
+_ETIKET = re.compile(r"^([^:\n]{1,80}):\s+(.*)$", re.S)
+_ISARET = "⏱"
+
+
+def _etiket_belirsiz(etiket):
+    """Transkript satirinin konusmaci etiketi kesin bir kisi degil mi ('Ad?', 'Bilinmeyen', 'A → B', 'A / B',
+    oda, altyazi yedegi)? Etiketsiz satir (duz metin) bilgi tasimaz: kesin sayilir."""
+    e = (etiket or "").strip()
+    if not e:
+        return False
+    return (e.endswith("?") or e.startswith(("Bilinmeyen", "beklemede")) or " → " in e or " / " in e
+            or "düşük güven" in e or e.endswith("(oda)") or "(aynı anda)" in e)
+
+
+_AY_GUN = ("ocak", "subat", "mart", "nisan", "mayis", "haziran", "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik",
+           "pazartesi", "sali", "carsamba", "persembe", "cuma", "cumartesi", "pazar")
+
+
+_BIRIM = {"tl", "usd", "eur", "try", "kdv", "ok"}            # para birimi / kisa yazim: 'lira' diye de soylenir, zorunlu degil
+
+
+def _sade_kelimeler(metin):
+    """Kucuk, sadesiz (ASCII) kelimeler: zorunlu degerlerin (sayi / ay / gun / kod) aranmasi icin."""
+    m = tr_kucuk(metin)
+    for a, b in zip("çğıöşüâî", "cgiosuai"):
+        m = m.replace(a, b)
+    return re.findall(r"[a-z0-9]+", m)
+
+
+def _zorunlu_degerler(madde):
+    """Maddenin dayanakta AYNEN gecmesi gereken degerleri: sayilar / tutarlar ('480'), ay ve gun adlari ('mart', 'cuma'),
+    kod / kisaltma adlari ('PD', 'S3'). Kok ortusmesi bunlari denetlemez: '480 bin' yalniz ⟨⟩ icindeyse komsu satirlarin
+    ortak kokleri maddeyi yine 'dayanakli' gosterirdi."""
+    deger = set(re.findall(r"\d+", madde or ""))
+    for k in _sade_kelimeler(madde):
+        deger.update(ad for ad in _AY_GUN if k.startswith(ad) and (k == ad or len(ad) >= 4))
+    for k in re.findall(r"\w+", madde or ""):
+        if (len(k) >= 2 and k.isupper() and not k.isdigit()) or (re.search(r"\d", k) and re.search(r"[^\W\d_]", k)):
+            deger.update(x for x in _sade_kelimeler(k)[:1] if x not in _BIRIM)
+    return deger
+
+
+def _deger_geciyor(deger, kelimeler, sayilar):
+    if deger.isdigit():
+        return deger in sayilar
+    return any(k == deger or (k.startswith(deger) and not deger.isdigit()) for k in kelimeler)
+
+
+def _dayanak_dizini(transkript):
+    """Transkript -> satir kayitlari: {'etiket', 'kok' (⟨⟩ disindaki kelime kokleri), 'tum' (⟨⟩ dahil kokler), 'n' (kelime),
+    'c' (⟨⟩ kelime), 'duz' / 'sayi' (⟨⟩ disindaki sade kelimeler / sayilar), 'ic' / 'ic_sayi' (⟨⟩ icindekiler),
+    'cakisma' (satir tumuyle ⟨⟩: 'A / B (ayni anda)')}."""
+    dizin = []
+    for ham in (transkript or "").split("\n"):
+        ham = ham.strip()
+        if not ham:
+            continue
+        m = _ETIKET.match(ham)
+        etiket, govde = (m.group(1), m.group(2)) if m else (None, ham)
+        sarmal = " ".join(_SARMAL.findall(govde))
+        disi = sarmal_sil(govde)
+        n, c = len(re.findall(r"\w+", govde)), len(re.findall(r"\w+", sarmal))
+        dizin.append({"etiket": etiket, "kok": _kokler(disi), "tum": _kokler(govde), "n": n, "c": c,
+                      "duz": _sade_kelimeler(disi), "sayi": set(re.findall(r"\d+", disi)),
+                      "ic": _sade_kelimeler(sarmal), "ic_sayi": set(re.findall(r"\d+", sarmal)),
+                      "cakisma": "(aynı anda)" in (etiket or "") or (n > 0 and c == n)})
+    return dizin
+
+
+def _dayanak_bul(ak, dizin, esik=DAYANAK_SATIR_ESIK, zorunlu=()):
+    """Maddenin kokleri (ak) 1-3 ardisik satirda yeterince karsilaniyor mu? ⟨⟩ icindeki kelimeler dayanak SAYILMAZ.
+    zorunlu: maddenin sayi / ay / gun / kod degerleri (_zorunlu_degerler); pencerenin ⟨⟩ DISINDAKI metninde gecmeli.
+    Dondurur: None | {'oran', 'pay' (pencerenin ⟨⟩ payi), 'ana' (en cok karsilayan satirin kaydi), 'eksik' (pencerede ⟨⟩
+    disinda gecmeyen zorunlu degerler), 'sarmal_kaynak' (maddeyi tek basina en iyi karsilayan satir ⟨⟩ / cakisma satiri)}.
+    Secim: once zorunlu degerleri tasiyan, sonra ⟨⟩ payi sinir altindaki, sonra en yuksek oran, sonra en kisa pencere."""
+    zorunlu = set(zorunlu)
+    en = None
+    for i in range(len(dizin)):
+        birlesik, toplam, sarmal, kelimeler, sayilar = set(), 0, 0, [], set()
+        for j in range(i, min(i + DAYANAK_PENCERE, len(dizin))):
+            d = dizin[j]
+            birlesik |= d["kok"]
+            toplam += d["n"]
+            sarmal += d["c"]
+            kelimeler += d["duz"]
+            sayilar |= d["sayi"]
+            oran = len(ak & birlesik) / len(ak)
+            if oran < esik:
+                continue
+            eksik = {z for z in zorunlu if not _deger_geciyor(z, kelimeler, sayilar)}
+            pay = sarmal / toplam if toplam else 0.0
+            anahtar = (not eksik, pay <= SARMAL_PAY_SINIRI, round(oran, 6), -(j - i))
+            if en is None or anahtar > en[0]:
+                en = (anahtar, i, j, oran, pay, eksik)
+    if en is None:
+        return None
+    _, i, j, oran, pay, eksik = en
+    ana = max(dizin[i:j + 1], key=lambda d: len(ak & d["kok"]))
+    # tekil en iyi eslesme (⟨⟩ dahil, kaynak_fn'in gordugu gibi) cakisma / ⟨⟩ satiriysa madde oradan gelmistir
+    tekil = max(dizin, key=lambda d: (len(ak & d["tum"]), -d["c"]))
+    disi_en = max(len(ak & d["kok"]) for d in dizin)
+    sarmal_kaynak = (len(ak & tekil["tum"]) > disi_en
+                     and (tekil["cakisma"] or len(ak & (tekil["tum"] - tekil["kok"])) > len(ak & tekil["kok"])))
+    return {"oran": oran, "pay": pay, "ana": ana, "eksik": eksik, "sarmal_kaynak": sarmal_kaynak}
+
+
+def _yalniz_sarmalda(degerler, dizin):
+    """Degerlerden biri transkriptte YALNIZ ⟨⟩ icinde mi geciyor (⟨⟩ disinda hicbir satirda yok)?"""
+    disi = [k for d in dizin for k in d["duz"]]
+    disi_sayi = set().union(*[d["sayi"] for d in dizin]) if dizin else set()
+    ic = [k for d in dizin for k in d["ic"]]
+    ic_sayi = set().union(*[d["ic_sayi"] for d in dizin]) if dizin else set()
+    return any(_deger_geciyor(z, ic, ic_sayi) and not _deger_geciyor(z, disi, disi_sayi) for z in degerler)
+
+
+def _hucre_isaretle(satir, indeks, ek=" (?)"):
+    """'| 1 | madde | sorumlu | tarih |' satirinda indeks'inci (0'dan, ilk hucre '#') hucrenin sonuna ek yazar."""
+    parcalar = satir.split("|")
+    k = indeks + 1                      # parcalar[0] ilk '|' oncesi bos
+    if k >= len(parcalar) - 1 or ek.strip() in parcalar[k]:
+        return satir
+    parcalar[k] = parcalar[k].rstrip() + ek + (" " if parcalar[k].endswith(" ") else "")
+    return "|".join(parcalar)
+
+
+def _madde_isaretle(satir, ek=" (?)"):
+    """Madde satirinin sonuna (kaynak isareti ⏱.. varsa onun oncesine) belirsizlik isareti ekler."""
+    if ek.strip() in satir:
+        return satir
+    i = satir.find(_ISARET)
+    if i > 0:
+        return satir[:i].rstrip() + ek + " " + satir[i:]
+    return satir.rstrip() + ek
+
+
 def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
-    """Nottaki Karar/Aksiyon maddelerini ve ozet cumlelerini transkriptle karsilastirir; kelime
-    koklerinin yeterli kismi transkriptte gecmeyen maddeleri cikarir. Modelin terim listesi/gundemden
-    ya da genel bilgisinden 'uydurdugu' satirlara karsi son sigorta. Dondurur (yeni_md, atilanlar).
-    ozet_kaynak: ozet paragrafi icin ek dayanak (bolum ozetleri). Ozet cumleleri soyutlayici fiiller
-    ('gorusuldu', 'ele alindi') tasir; yalniz transkriptle olculunce dogru cumleler de atiliyordu."""
-    kokler = _kokler(transkript)
+    """Nottaki Karar/Aksiyon/Soru maddelerini ve ozet cumlelerini transkriptle karsilastirir; dayanagi olmayan
+    maddeleri cikarir. Modelin terim listesi/gundemden ya da genel bilgisinden 'uydurdugu' satirlara karsi son
+    sigorta. Dondurur (yeni_md, atilanlar).
+    Karar/aksiyon/soru maddeleri SATIR bazli denetlenir (MIMARI_v3 §6): kok ortusmesi >= DAYANAK_SATIR_ESIK olan 1-3
+    ardisik transkript satiri aranir; ⟨⟩ icindeki (eszamanli konusma) kelimeler dayanak sayilmaz. Maddedeki sayi / tutar,
+    ay / gun adi ve kod adi (zorunlu deger) pencerenin ⟨⟩ disindaki metninde gecmeli: yalniz ⟨⟩ icinde geciyorsa madde
+    atilir, hic gecmiyorsa (?) alir. Bulunan dayanagin ⟨⟩ payi > %30 ise ya da maddeyi tek basina en iyi karsilayan satir
+    ⟨⟩ / cakisma satiriysa karar/aksiyon maddesinin sonuna (?) eklenir (madde belirsiz); dayanak satirinin konusmaci
+    etiketi kesin degilse ('Ad?:', 'Bilinmeyen:', 'A → B:', 'A / B:') aksiyonun sorumlusu (?) olur.
+    ozet/sonraki adim cumleleri esik (kok orani, tum transkript) ile denetlenir; ozet_kaynak: ozet paragrafi icin ek
+    dayanak (bolum ozetleri). Ozet cumleleri soyutlayici fiiller ('gorusuldu', 'ele alindi') tasir; yalniz
+    transkriptle olculunce dogru cumleler de atiliyordu."""
+    kokler = _kokler(sarmal_sil(transkript))
+    ozet_zemin = _kokler(transkript)                      # ozet ⟨⟩ icindekini 'tartisildi' diye anabilir
     if len(kokler) < 6:
         return not_md, []
+    dizin = _dayanak_dizini(transkript)
     atilan, yeni = [], []
     bolum = ""
     for satir in not_md.split("\n"):
@@ -109,6 +257,7 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
             yeni.append(satir)
             continue
         aday = None
+        tablo = False
         if ("karar" in bolum or "aksiyon" in bolum or "soru" in bolum) and cizgisiz.startswith(("-", "*", "|")):
             if cizgisiz.startswith("|"):
                 hucreler = [h.strip() for h in cizgisiz.strip("|").split("|")]
@@ -116,6 +265,7 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
                     yeni.append(satir)
                     continue
                 aday = hucreler[1]
+                tablo = True
             else:
                 aday = cizgisiz.lstrip("-* ").strip()
         elif "sonraki" in bolum and cizgisiz and cizgisiz.strip(" -.") :
@@ -132,20 +282,31 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
         if aday is None:
             yeni.append(satir)
             continue
-        ak = _kokler(aday) - {"ve", "ile", "icin", "olan", "olarak", "yapil", "edil", "kararl", "karar", "aksiy"}
+        ak = _kokler(aday) - _MADDE_DURAK
         if not ak:
             yeni.append(satir)
             continue
-        oran = len(ak & kokler) / len(ak)
-        if oran >= esik:
-            yeni.append(satir)
-        else:
-            atilan.append(aday)
+        dayanak = _dayanak_bul(ak, dizin, zorunlu=_zorunlu_degerler(aday))
+        if dayanak is None or (dayanak["eksik"] and _yalniz_sarmalda(dayanak["eksik"], dizin)):
+            atilan.append(aday)                 # dayanak yok ya da sayi / tarih / kod yalniz ⟨⟩ icinden geliyor
+            continue
+        belirsiz_madde = ((dayanak["pay"] > SARMAL_PAY_SINIRI or dayanak["eksik"] or dayanak["sarmal_kaynak"])
+                          and "soru" not in bolum)
+        belirsiz_sahip = belirsiz_madde or _etiket_belirsiz(dayanak["ana"]["etiket"])
+        if tablo and "aksiyon" in bolum:
+            h = [x.strip() for x in cizgisiz.strip("|").split("|")]
+            if belirsiz_sahip and len(h) >= 3 and h[2].lower() not in ("", "-", "belirsiz", "?") and "(?)" not in h[2]:
+                satir = _hucre_isaretle(satir, 2)
+            if belirsiz_madde:
+                satir = _hucre_isaretle(satir, 1)
+        elif belirsiz_madde:
+            satir = _madde_isaretle(satir)
+        yeni.append(satir)
     # Ozet paragrafi: cumle cumle
     md = "\n".join(yeni)
     m = re.search(r"(## Özet\s*\n)(.*?)(\n## )", md, flags=re.S)
     if m:
-        ozet_kokler = kokler | (_kokler(ozet_kaynak) if ozet_kaynak else set())
+        ozet_kokler = ozet_zemin | (_kokler(ozet_kaynak) if ozet_kaynak else set())
         cumleler = re.split(r"(?<=[.!?])\s+", m.group(2).strip())
         tutulan, ozet_atilan = [], []
         for c in cumleler:
@@ -197,16 +358,35 @@ def nota_girer(s):
     return not (s.get("supheli") and s.get("kaynak") != "altyazi-yedek")
 
 
+SARMAL_AC, SARMAL_KAPA = "⟨", "⟩"      # belirsiz metin isareti: karar/aksiyon/sayi/tarih bunun icinden uretilmez
+_SARMAL = re.compile(SARMAL_AC + r"[^" + SARMAL_KAPA + r"]*" + SARMAL_KAPA)
+
+
+def sarmal_sil(metin):
+    """Metindeki ⟨...⟩ bolumlerini atar (dayanak / sahip kaniti saymaz)."""
+    return _SARMAL.sub(" ", metin or "")
+
+
+def satir_metni(s):
+    """Satirin nota/LLM'e giden metni: eszamanli konusma (cakisma) satirinin tamami ⟨⟩ icine alinir."""
+    t = str(s.get("text") or "")
+    if s.get("cakisma") and t.strip():
+        return SARMAL_AC + t.replace(SARMAL_AC, "").replace(SARMAL_KAPA, "") + SARMAL_KAPA
+    return t
+
+
 def blok_metni(satirlar):
+    """Transkript blogu (LLM girdisi, dayanak kontrolu): her satir 'gorunen_ad: metin'. Ardisik ayni konusmaci
+    tek satirda birlesir. cakisma satirlari ⟨⟩ icinde; supheli (halusinasyon) satirlar girmez."""
     birlesik = []
     for s in satirlar:
         if not nota_girer(s):
             continue
         kim = _konusan(s)
         if birlesik and birlesik[-1][0] == kim:
-            birlesik[-1] = (kim, birlesik[-1][1] + " " + s["text"])
+            birlesik[-1] = (kim, birlesik[-1][1] + " " + satir_metni(s))
         else:
-            birlesik.append((kim, s["text"]))
+            birlesik.append((kim, satir_metni(s)))
     return "\n".join(f"{k}: {t}" for k, t in birlesik)
 
 
@@ -554,7 +734,9 @@ class Motor:
             del self._ozet_kirli[sira]
             veri = self._parca_veri.get(sira)
             if veri is not None:
-                self.isler.append(self.havuz.submit(self._isle, veri, False))
+                # gec gelen satirin da terim/ad duzeltmesi gerekir (eskiden duzelt=False: gec satir ham kalip ozete
+                # ham metinle giriyordu); 'raw'dan calistigi icin onceki duzeltmeler tekrar uygulanir (idempotent)
+                self.isler.append(self.havuz.submit(self._isle, veri, self.duzelt))
 
     def _satir_bul(self, sid):
         """id -> (liste, indeks, parca sirasi | None: acik parca) ya da None (yerlesmemis / silinmis)."""
@@ -1034,7 +1216,7 @@ class Motor:
         # 2) ozet
         self.log(f"  parça {veri['sira']}: özetleniyor...")
         try:
-            onceki = self._onceki_konular(veri["sira"])
+            onceki = self._onceki_baglam(veri["sira"])
             with self._iz_kilit:
                 metin = blok_metni(list(veri["satirlar"]))
             if metin.strip():
@@ -1072,7 +1254,11 @@ class Motor:
         metin = " ".join(g["raw"] for g in girdi)
         adaylar = self.terimler.adaylar(self.seri, metin, self.katilimcilar)
         adlar = [a for a in self.katilimcilar if isinstance(a, str) and a.strip()]
-        yeni, rapor = duzelt_mod.duzelt(girdi, adaylar, adlar, sor_fn=self.duzelt_sor_fn)
+        # ogrenilmis / elle varyantlar kapida izinli 'eski -> terim' eslemesidir (kapi sayi / ek / kelime sayisi
+        # kurallarini yine uygular); katilimci adlari terim sayilmaz
+        varyantlar = self.terimler.varyant_ciftleri(self.seri, adlar)
+        ek = {"varyantlar": varyantlar} if varyantlar else {}           # bos havuzda eski cagri imzasi (test / replay)
+        yeni, rapor = duzelt_mod.duzelt(girdi, adaylar, adlar, sor_fn=self.duzelt_sor_fn, **ek)
         if rapor.get("uyari") and not getattr(self, "_duzelt_uyarildi", False):
             self._duzelt_uyarildi = True                # bir kez: liste yok, kapi yalniz harf/kesme farki kabul eder
             self.log(f"  ! düzeltme: {rapor['uyari']}")
@@ -1127,6 +1313,23 @@ class Motor:
         if sira <= 1 or not os.path.exists(self.parca_yolu(sira - 1)):
             return None
         return (self.parca_oku(sira - 1).get("ozet") or {}).get("konular") or None
+
+    def _onceki_baglam(self, sira):
+        """Parca ortusmesi (MIMARI_v3 §6): onceki parcanin konulari + SON 6 satiri + cevapsiz kalan maddeleri
+        (~400 token). llm.bolum_ozetle bunu yalniz baglam olarak verir; sinirdaki karar / cumle iki parcaya bolunup
+        kaybolmasin. Onceki parca yoksa ya da okunamazsa None (eski davranis: yalniz konular)."""
+        if sira <= 1 or not os.path.exists(self.parca_yolu(sira - 1)):
+            return None
+        try:
+            veri = self.parca_oku(sira - 1)
+        except Exception:
+            return self._onceki_konular(sira)
+        ozet = veri.get("ozet") or {}
+        satirlar = []
+        for s in [x for x in veri.get("satirlar") or [] if nota_girer(x)][-llm.ONCEKI_SATIR:]:
+            satirlar.append(blok_metni([s]))
+        bag = llm.onceki_baglam_hazirla(ozet.get("konular"), [x for x in satirlar if x.strip()], ozet.get("acik_sorular"))
+        return bag if (bag["konular"] or bag["satirlar"] or bag["acik"]) else None
 
     @staticmethod
     def _baglam_satir(veri, parca):
@@ -1189,11 +1392,13 @@ class Motor:
         yeni = 0
         try:
             govde = self.davet.get("govde") or self.gundem or ""
+            adlar = [a for a in self.katilimcilar if isinstance(a, str)]
             yeni += len(self.terimler.ekle(self.seri, terim_mod.davetten_cikar(self.baslik, govde,
-                                                                              self.davet.get("ekler") or ()), "davet"))
+                                                                              self.davet.get("ekler") or ()), "davet",
+                                           adlar=adlar))
             self._onceki_notlar = self._onceki_notlari_oku()
             for not_md in self._onceki_notlar:
-                yeni += len(self.terimler.ekle(self.seri, terim_mod.notlardan_cikar(not_md), "not"))
+                yeni += len(self.terimler.ekle(self.seri, terim_mod.notlardan_cikar(not_md), "not", adlar=adlar))
             self.terimler.kaydet()
         except Exception as e:                       # terim kaynaklari isteye bagli: toplanti bunun yuzunden aksamaz
             self.log(f"! davet/önceki not terimleri alınamadı: {e!r}")
@@ -1376,7 +1581,7 @@ class Motor:
         not_md = f"# {self.baslik} — {self.tarih.isoformat()}\n\n" + llm.birlestir(
             bolumler, self.baglam(transkript), self.log, kaynak_fn=kaynak_fn, sablon=self.sablon,
             katilimcilar=self.katilimcilar,
-            aksiyon_fn=lambda aks: sorumlu_dogrula(aks, satirlar, self.ben),
+            aksiyon_fn=lambda aks: self._aksiyonlari_kesinlestir(aks, satirlar),
             adim_fn=lambda m: self.adim(m, asamalar.get(m), 4))
         self.adim("Dayanak kontrolü", 3, 4)
         bolum_ozetleri = "\n".join(b.get("ozet", "") for b in bolumler)
@@ -1399,8 +1604,32 @@ class Motor:
             f.write(not_md)
         import not_araclari                  # gec: not_araclari motor'u ice aktarir
         # N7: konusma paylari nota yazilmaz; Gecmis detayinda gosterilir
-        self.meta_yaz("tamam", konusma_paylari=[list(p) for p in not_araclari.konusma_paylari(satirlar)])
+        self.meta_yaz("tamam", konusma_paylari=[list(p) for p in not_araclari.konusma_paylari(satirlar)],
+                      konusma_belirsiz=not_araclari.konusma_belirsiz_payi(satirlar))
         return not_md
+
+    def _kisi_katilimcilari(self):
+        """Adlandirilmis sahip icin 'kisi' katilimcilari (oda/genel/hayalet adlari ve '?' girmez)."""
+        kimlik = getattr(self.konusmaci, "kimlik_turu", None)
+        sonuc = []
+        for ad in self.katilimcilar:
+            if not isinstance(ad, str) or not ad.strip() or "?" in ad:
+                continue
+            try:
+                if kimlik is not None and kimlik(ad) not in ("kisi", "ben"):
+                    continue
+            except Exception:
+                pass
+            sonuc.append(ad)
+        return sonuc
+
+    def _aksiyonlari_kesinlestir(self, aksiyonlar, satirlar):
+        """birlestir sonrasi son islem: sahip dogrulama (kesin/belirsiz/yok), sonra tarih cozumu (MIMARI_v3 §6:
+        tarih_coz birlestir SONRASI; model birlestirirken gun adi ile tarihi tutarsiz yazabilir)."""
+        sonuc = sorumlu_dogrula(aksiyonlar, satirlar, self.ben, katilimcilar=self._kisi_katilimcilari())
+        for a in sonuc:
+            a["tarih"] = tarih_mod.tarih_coz(a.get("tarih"), self.tarih)
+        return sonuc
 
     def tum_satirlar(self):
         """Tum parcalarin (duzeltilmis) satirlari + acik parca, kronolojik."""
@@ -1423,7 +1652,7 @@ class Motor:
             except Exception:
                 continue
         satirlar.extend(self.mevcut)
-        satirlar = [dict(s, speaker=_konusan(s)) for s in satirlar if nota_girer(s)]    # gosterim kurali ('Ad?', 'Bilinmeyen')
+        satirlar = [dict(s, gorunen=_konusan(s)) for s in satirlar if nota_girer(s)]    # gosterim kurali ('Ad?', 'Bilinmeyen'); cakisma ⟨⟩ (rag)
         pen = rag.pencereler(satirlar)
         if not pen:
             return "Bu toplantının transkripti boş."
@@ -1465,13 +1694,16 @@ def kaynak_satiri_bulucu(satirlar, esik=0.3):
             return None
         en_iyi, en_puan = None, 0.0
         for s, kk in dizin:
-            puan = len(mk & kk) / len(mk)
+            ham = len(mk & kk) / len(mk)
+            if ham < esik:
+                continue                     # sorumlu bonusu esigin ALTINDAKI satiri kaynak yapmaz (eskiden 0.25 + 0.1 gecerdi)
+            puan = ham
             kim = s.get("speaker", "")
             if sorumlu and kim and normalize(sorumlu).split()[:1] == normalize(kim).split()[:1]:
                 puan += 0.1
             if puan > en_puan:
                 en_iyi, en_puan = s, puan
-        return en_iyi if en_puan >= esik else None
+        return en_iyi
     return bul
 
 
@@ -1485,50 +1717,328 @@ def kaynak_bulucu(satirlar, esik=0.3):
     return ts
 
 
-_BIRINCI_TEKIL = re.compile(
-    r"(?<!\w)(ben|bana|benim|bende|bizzat)(?!\w)"
-    r"|\w{2,}(?:[ae]c[ae]ğ[ıi]m|[ıiuü]yorum)(?!\w)"            # yapacağım, hazırlayacağım, bakıyorum
-    r"|\w{3,}(?:[ae]r[ıi]m|[ıi]r[ıi]m|[uü]r[uü]m)(?!\w)")   # yaparım, hazırlarım, gönderirim, bulurum
+# ---------- sahip (K8, MIMARI_v3 §6): kanit kaliplari ----------
+# Is fiili kokleri: konusan bunlarla kendine (1. tekil), muhataba (2. kisi) ya da adi gecen kisiye (3. kisi) IS yukler.
+# 'bekle-', 'rica et-', 'oner-', 'sor-', 'soyle-', 'bul-' (gorus) is fiili DEGILDIR: 'Raporu Ayse'den bekliyorum' konusani
+# sahip yapmaz. 'X et' bilesikleri yalniz _ET_ISIMLERI ile ('kontrol ederim'; 'rica ederim', 'tesekkur ederim' degil).
+_IS_KOKLERI = ("hazırla", "gönder", "yolla", "ilet", "bak", "yap", "hallet", "incele", "güncelle", "yaz", "düzelt",
+               "düzenle", "paylaş", "topla", "tamamla", "bitir", "çöz", "araştır", "hesapla", "oluştur", "derle", "aktar",
+               "yükle", "sun", "ara", "üstlen", "getir", "ilgilen", "dene", "anlat", "çıkar", "et")
+_ET_ISIMLERI = {"kontrol", "takip", "test", "teslim", "organize", "analiz", "revize", "koordine", "rapor", "tespit",
+                "talep", "teyit", "kayıt", "takibini", "kontrolünü", "testini"}
+_UNLU = "aeıioöuü"
+
+
+def _fiil_kaliplari(kok):
+    """Bir is fiili kokunun kip/kisi kaliplari -> {etiket: derlenmis regex}. '1': 1. tekil (gelecek / genis / simdiki /
+    yeterlilik), '3': 3. kisi (gelecek / emir / genis), '2': muhatap (yalin emir, -In(Iz), -AcAksIn(Iz)) -- hepsi tam
+    kelime; 'olumsuz' (-mA-, -mIyor) ve 'gecmis' (-DI, -mIs) kelime basi."""
+    govde = [kok] + ([kok[:-1] + "d"] if kok.endswith("et") else [])             # et -> ed (yumusama)
+    g = "(?:" + "|".join(re.escape(x) for x in govde) + ")"
+    if kok[-1] in _UNLU:
+        bir = (g + r"(?:y[ae]c[ae]ğ[ıi]m|r[ıi]m|y[ae]bil(?:ir[ıi]m|[ae]c[ae]ğ[ıi]m))|"
+               + re.escape(kok[:-1]) + r"[ıiuü]yorum")
+        uc = g + r"(?:y[ae]c[ae]k(?:t[ıi]r|l[ae]r)?|s[ıi]n(?:l[ae]r)?|r)"
+        iki = g + r"(?:y[ıiuü]n(?:[ıiuü]z)?|y[ae]c[ae]ks[ıi]n(?:[ıi]z)?)?"
+    else:
+        bir = g + r"(?:[ae]c[ae]ğ[ıi]m|[aeıiuü]r[ıiuü]m|[ıiuü]yorum|[ae]bil(?:ir[ıi]m|[ae]c[ae]ğ[ıi]m))"
+        uc = g + r"(?:[ae]c[ae]k(?:t[ıi]r|l[ae]r)?|s[ıi]n(?:l[ae]r)?|[aeıiuü]r)"
+        iki = g + r"(?:[ıiuü]n(?:[ıiuü]z)?|[ae]c[ae]ks[ıi]n(?:[ıi]z)?)?"
+    return {"1": re.compile(bir), "3": re.compile(uc), "2": re.compile(iki),
+            "olumsuz": re.compile(g + r"m(?:[ae](?:y[ae]c[ae]|y[ıi]n|z$|z[ıi]|s[ıi]n$|s[ıi]nl[ae]r$|d[ıi]|m[ıi]ş|$)"
+                                  r"|[ıiuü]yor)"),
+            "gecmis": re.compile(g + r"(?:[dt][ıiuü]|m[ıiuü]ş)")}
+
+
+_FIILLER = [(k, _fiil_kaliplari(k)) for k in _IS_KOKLERI]
+_CIPLAK_BELIRSIZ = {"ara", "bak", "yaz", "sun", "topla", "yükle", "çıkar"}   # yalin hali isim / unlem de olur ('bu ara', 'bak')
+# Birinci tekil kip eki (genel): 'ben' ile birlikte is fiili listesinde olmayan fiil de taahhut sayilir ('Ben katilirim').
+_TAAHHUT = re.compile(r"\w{2,}[ae]c[ae]ğ[ıi]m|\w{2,}[ıiuü]yorum|\w{3,}(?:[ae]r[ıi]m|[ıi]r[ıi]m|[uü]r[uü]m)")
+_TAAHHUT_DEGIL = re.compile(r"m[ıiuü]yor|m[ae]y[ae]c[ae][ğk]")
+_TAAHHUT_BILGI = {"biliyorum", "bilirim", "düşünüyorum", "düşünürüm", "sanıyorum", "sanırım", "görüyorum", "görürüm",
+                  "anlıyorum", "anlarım", "duyuyorum", "hatırlıyorum", "katılıyorum", "diyorum", "inanıyorum",
+                  "umuyorum", "seviyorum", "istiyorum", "isterim", "zannediyorum", "hissediyorum", "hazırım",
+                  "kararım", "başarım", "yarım", "sevinirim"}
+_IS_DEGIL_KOK = ("bekl", "rica", "öner", "sor", "söyl", "bul", "dile", "tavsiye")      # bekliyorum, oneriyorum, soruyorum...
+_IYELIK = re.compile(r"\w+l[ae]r[ıi]m(?:[ıi]z)?")                                  # dosyalarim, notlarimiz: fiil degil
+_IKINCI_KISI = {"sen", "siz", "sana", "size", "seni", "sizi", "senin", "sizin", "senden", "sizden", "sende", "sizde"}
+_RICA = re.compile(r"\w+m[ae]n(?:[ıi]z)?[ıi]\s+(?:rica|istiyorum|isterim|bekliyorum|bekleriz|istiyoruz)")
+_SORU = re.compile(r"\?|(?<!\w)(?:m[ıiuü](?:s[ıiuü]n(?:[ıiuü]z)?|y[ıiuü]m|y[ıiuü]z|d[ıiuü]r)?|kim|kime|kimin|kimi"
+                   r"|hangi|hangisi|nasıl|acaba)(?!\w)")
+_OLUMSUZ = re.compile(r"(?<!\w)(?:değil|değiliz|değilim|hayır)(?!\w)")
+_BENIM = ("ben", "Ben")
+
+
+def _kelimeler(metin):
+    return re.findall(r"\w+", tr_kucuk(sarmal_sil(metin)))
+
+
+def _fiil_etiketleri(metin):
+    """Metindeki (⟨⟩ disi) is fiili bicimleri -> etiket kumesi {'1', '2', '3', 'olumsuz', 'gecmis'}. 'X et' bilesigi
+    yalniz is ismiyle sayilir."""
+    kel = _kelimeler(metin)
+    etiket = set()
+    for i, k in enumerate(kel):
+        for kok, kalip in _FIILLER:
+            if not k.startswith(kok[:-1] if kok[-1] in _UNLU else kok[:2]):
+                continue
+            if kok == "et" and not (i and kel[i - 1] in _ET_ISIMLERI):
+                continue
+            for ad in ("1", "2", "3"):
+                if kalip[ad].fullmatch(k):
+                    if ad == "2" and k == kok and kok in _CIPLAK_BELIRSIZ and not set(kel) & {"sen", "siz"}:
+                        continue
+                    etiket.add(ad)
+            for ad in ("olumsuz", "gecmis"):
+                if kalip[ad].match(k):
+                    etiket.add(ad)
+    return etiket
+
+
+def _soru_olumsuz_gecmis(metin):
+    """Satir soru ('X mi yapacak?', 'kim?'), olumsuz ('incelemeyecek', 'degil') ya da gecmis ('inceledi', 'gondermistin')
+    mi? Boyle bir satir sahip KANITI olamaz (yalniz aday)."""
+    m = tr_kucuk(sarmal_sil(metin))
+    if _SORU.search(m) or _OLUMSUZ.search(m) or any(_TAAHHUT_DEGIL.search(k) for k in _kelimeler(metin)):
+        return True
+    return bool(_fiil_etiketleri(metin) & {"olumsuz", "gecmis"})
+
+
+def _konusan_taahhudu(metin):
+    """Konusan ISI KENDINE aliyor mu (adlardan bagimsiz): 'ben' + 1. tekil fiil (bilgi / bekle / rica / oneri / iyelik
+    bicimleri haric) ya da is fiili kokunun 1. tekil bicimi ('hazirlarim', 'gonderecegim', 'bakiyorum')."""
+    if "1" in _fiil_etiketleri(metin):
+        return True
+    kel = _kelimeler(metin)
+    if "ben" not in kel:
+        return False
+    for i, k in enumerate(kel):
+        if k in _TAAHHUT_BILGI or _TAAHHUT_DEGIL.search(k) or k.startswith(_IS_DEGIL_KOK) or _IYELIK.fullmatch(k):
+            continue
+        if i and kel[i - 1] in _IS_DEGIL_KOK + ("teşekkür", "tebrik", "rica"):
+            continue                                     # 'rica ediyorum', 'tesekkur ederim'
+        if _TAAHHUT.fullmatch(k):
+            return True
+    return False
+
+
+def _ikinci_kisi_var(metin):
+    """Satir muhataba is veriyor ya da ona hitap ediyor mu ('sen', 'siz', yalin emir 'hazirla', 'gonderin',
+    'gondermeni rica ediyorum')?"""
+    if set(_kelimeler(metin)) & _IKINCI_KISI or _RICA.search(tr_kucuk(sarmal_sil(metin))):
+        return True
+    return "2" in _fiil_etiketleri(metin)
+
+
+def birinci_tekil_taahhut(metin):
+    """Metin (⟨⟩ disinda) konusanin kendi taahhudu mu? ('Raporu ben hazirlarim', 'yarin gonderecegim'.) Soru / olumsuz /
+    gecmis ve muhataba is veren satir ('Zeynep, gondermeni rica ediyorum') taahhut degildir."""
+    return (_konusan_taahhudu(metin) and not _soru_olumsuz_gecmis(metin) and not _ikinci_kisi_var(metin))
 
 
 def _ayni_kisi(a, b):
-    """'Deniz' ~ 'Deniz Can Ozturk': ilk ad ayniysa ayni kisi."""
+    """'Deniz' ~ 'Deniz Can Ozturk': ilk ad ayni mi (yalniz on eleme; kimlik karari _ayni_kisi_mi)."""
     a, b = normalize(a or "").split()[:1], normalize(b or "").split()[:1]
     return bool(a) and a == b
 
 
-def sorumlu_dogrula(aksiyonlar, satirlar, ben=None):
-    """K8: aksiyon sorumlusunu transkriptteki kaynak satiriyla dogrular. Kaynak satiri birinci tekil sahis
-    tasiyorsa ('ben hazirlarim', 'yapacagim', 'bana iletin') o sozu SOYLEYEN kisi (S) isin sahibidir:
-    sorumlu 'belirsiz' ise S yazilir; sorumlu X, S degilse ve X o satirda adiyla gecmiyorsa 'X (?)' olur.
-    Konusmacisi bilinmeyen ('?') satira dokunulmaz. Dondurur: yeni liste (girdi degismez)."""
+def _ilk_ad_ortak(ad, kisiler):
+    """Adin ilk adi birden fazla (farkli tam adli) katilimcida geciyor mu? ('Ali' -> Ali Demir, Ali Kaya)."""
+    ilk = normalize(ad or "").split()[:1]
+    tamlar = {normalize(k) for k in kisiler if normalize(k).split()[:1] == ilk and len(normalize(k).split()) > 1}
+    return len(tamlar) > 1
+
+
+def _ayni_kisi_mi(a, b, kisiler):
+    """a ile b ayni katilimci mi? Normalize tam ad ayni; ya da biri yalniz ilk ad ve o ilk ad katilimcilarda tekil.
+    Iki farkli tam ad ('Ali Demir' / 'Ali Kaya') ayni kisi DEGILDIR."""
+    na, nb = normalize(a or ""), normalize(b or "")
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if not _ayni_kisi(a, b) or (len(na.split()) > 1 and len(nb.split()) > 1):
+        return False
+    return not _ilk_ad_ortak(a, kisiler)
+
+
+def _ad_parcala(sorumlu):
+    """Modelin sorumlu alani -> [(ad, isaretli)]; 'belirsiz', '-' atilir. isaretli: model adi '(?)' ile yazmis (kod bunu
+    kesin YAPMAZ)."""
+    sonuc = []
+    for x in re.split(r",|/| ve ", sorumlu or ""):
+        isaretli = "(?)" in x
+        x = re.sub(r"\(\?\)", " ", x).strip()
+        if x and x.lower() not in ("-", "belirsiz", "?"):
+            sonuc.append((x, isaretli))
+    return sonuc
+
+
+def _kisi_listesi(satirlar, katilimcilar, ben):
+    """Adlandirilmis sahip icin 'kisi' katilimcilari: verilen liste + kesin konusmacilar + ben (oda/genel/hayalet,
+    '?' ve birlesik adlar girmez)."""
+    adlar = []
+
+    def ekle(ad):
+        ad = str(ad or "").strip()
+        if ad and ad.lower() != "ben" and "?" not in ad and normalize(ad) not in [normalize(x) for x in adlar]:
+            adlar.append(ad)
+    for ad in katilimcilar or []:
+        ekle(ad)
+    for s in satirlar:
+        if kesin_ad_mi(s) and not s.get("cakisma"):
+            ekle(s.get("speaker"))
+    if ben:
+        ekle(ben)
+    return adlar
+
+
+def _kisi_esle(ad, kisiler):
+    """Modelin yazdigi ad -> tek bir katilimci adi (tam ad birebir ya da ilk ad eslesmesi; ilk ad birden fazla
+    katilimcida ortaksa belirsiz -> None). Tam adli katilimci, ayni kisinin kisa (ilk ad) kaydina tercih edilir."""
+    n = normalize(ad)
+    tam = [k for k in kisiler if normalize(k) == n]
+    if len(tam) == 1 and len(n.split()) > 1:
+        return tam[0]
+    if len(n.split()) > 1:
+        return None
+    if _ilk_ad_ortak(ad, kisiler):
+        return None
+    aday = [k for k in kisiler if _ayni_kisi(ad, k)]
+    aday.sort(key=lambda k: -len(k.split()))
+    return aday[0] if aday else None
+
+
+def _adi_geciyor(kisi, metin, kisiler=()):
+    """Katilimcinin adi (tam ya da -- tekilse -- ilk ad) metinde BIREBIR kelime olarak geciyor mu? 'Ayse' ~ 'Aysen' degil;
+    ilk ad baska bir katilimciyla ortaksa yalniz tam ad sayilir."""
+    if ad_geciyor(kisi, metin):
+        return True
+    return not _ilk_ad_ortak(kisi, kisiler) and ad_geciyor(kisi.split()[0], metin)
+
+
+def _ad_gecisleri(kisi, metin, kisiler):
+    """Adin metindeki (⟨⟩ disi) gecisleri -> ['hitap' | 'ozne' | 'hal'] (hal: 'Ayse'den', 'Mehmet'in' -- is sahibi degil)."""
+    m = tr_kucuk(sarmal_sil(metin))
+    adlar = [tr_kucuk(kisi)] + ([] if _ilk_ad_ortak(kisi, kisiler) else [tr_kucuk(kisi.split()[0])])
+    sonuc = []
+    for ad in {a for a in adlar if len(a) >= 3}:
+        for g in re.finditer(r"(?<!\w)" + re.escape(ad) + r"(?!\w)(['’]\w+)?(\s*[,:]|\s+(?:sen|siz)(?!\w))?", m):
+            if g.group(1):
+                sonuc.append("hal")
+            elif g.group(2):
+                sonuc.append("hitap")
+            else:
+                sonuc.append("ozne")
+    return sonuc
+
+
+def _is_atanan(kisi, metin, kisiler):
+    """Satir isi BU kisiye yukluyor mu? Hitap + muhatap bicimi ('Ayse, sen cumaya hazirla', 'Zeynep, gondermeni rica
+    ediyorum') ya da ozne + 3. kisi gelecek / emir / genis ('taslagi Mehmet incelesin', 'Selin de bakar'). Soru / olumsuz /
+    gecmis satir hicbir zaman ('Mehmet mi yapacak?', 'incelemeyecek', 'inceledi')."""
+    if _soru_olumsuz_gecmis(metin):
+        return False
+    gecis = _ad_gecisleri(kisi, metin, kisiler)
+    if "hitap" in gecis and _ikinci_kisi_fiili(metin):
+        return True
+    return "ozne" in gecis and "3" in _fiil_etiketleri(metin)
+
+
+def _ikinci_kisi_fiili(metin):
+    return "2" in _fiil_etiketleri(metin) or bool(_RICA.search(tr_kucuk(sarmal_sil(metin))))
+
+
+def _hitap_edilen(kisiler, metin):
+    """'Ayse, sen cumaya hazirla' gibi dogrudan hitapla is verilen katilimci (tek ise); yoksa None. Yalniz ADAY uretir
+    (model sorumluyu yazmadiysa kod kesin sahip uretmez)."""
+    bulunan = [k for k in kisiler if "hitap" in _ad_gecisleri(k, metin, kisiler)]
+    if len(bulunan) != 1 or _soru_olumsuz_gecmis(metin) or not _ikinci_kisi_fiili(metin):
+        return None
+    return bulunan[0]
+
+
+def _baska_ad_geciyor(konusan, kisiler, metin):
+    return any(_adi_geciyor(k, metin, kisiler) for k in kisiler if not _ayni_kisi_mi(k, konusan, kisiler))
+
+
+def _sahip_belirle(s, adlar, kisiler, ben):
+    """Tek aksiyon icin sahip karari. s: kaynak satir | None; adlar: modelin sorumlu adlari [(ad, isaretli)].
+    Dondurur: (durum, [(ad, dogrulandi)]); dogrulanan ad katilimci listesindeki yazimiyla doner."""
+    if s is None:
+        return ("belirsiz", [(x, False) for x, _ in adlar]) if adlar else ("yok", [])
+    konusan = str(s.get("speaker") or "").strip()
+    if konusan in _BENIM:
+        konusan = ben or ""                          # mikrofon sahibinin adi bilinmiyorsa adlandirilamaz
+    kesin = kesin_ad_mi(s) and not s.get("cakisma")
+    metin = sarmal_sil(s.get("text"))
+    ham_taahhut = _konusan_taahhudu(metin)
+    # (a) konusan kendi isini ustleniyor: acik 1. tekil kanit, soru / olumsuz / gecmis degil, muhatap ya da baska
+    # katilimci adi yok ('Raporu Ayse'den bekliyorum', 'Zeynep, gondermeni rica ediyorum', 'taslagi Mehmet incelesin')
+    kendi = (kesin and bool(konusan) and ham_taahhut and not _soru_olumsuz_gecmis(metin)
+             and not _ikinci_kisi_var(metin) and not _baska_ad_geciyor(konusan, kisiler, metin))
+    if not adlar:
+        # model 'belirsiz' dedi: kod kesin sahip URETMEZ, en fazla aday ('Ad (?)')
+        if kesin and kendi:
+            return "belirsiz", [(_kisi_esle(konusan, kisiler) or konusan, False)]
+        if kesin and not ham_taahhut:
+            hitap = _hitap_edilen([k for k in kisiler if not _ayni_kisi_mi(k, konusan, kisiler)], metin)
+            if hitap:
+                return "belirsiz", [(hitap, False)]
+        return ("belirsiz" if ham_taahhut else "yok"), []
+    sonuc = []
+    for x, isaretli in adlar:
+        dogru, ad = False, x
+        kisi = _kisi_esle(x, kisiler)
+        if kesin and kisi and not isaretli:
+            if konusan and _ayni_kisi_mi(kisi, konusan, kisiler):
+                dogru = kendi                        # (a)
+            else:                                    # (b) adlandirilmis sahip; konusan kendisi ustleniyorsa belirsiz
+                dogru = not ham_taahhut and _is_atanan(kisi, metin, kisiler)
+            if dogru:
+                ad = kisi
+        sonuc.append((ad, dogru))
+    durum = "kesin" if all(d for _, d in sonuc) else "belirsiz"
+    return durum, sonuc
+
+
+def sorumlu_dogrula(aksiyonlar, satirlar, ben=None, katilimcilar=None):
+    """K8 (MIMARI_v3 §6): aksiyon sahibini transkriptteki kaynak satiriyla dogrular ve her aksiyona
+    a['sahip'] = {'ad', 'durum': 'kesin' | 'belirsiz' | 'yok'} yazar; a['sorumlu'] (nota basilan metin) ondan turer:
+    kesin -> ad; belirsiz -> 'Ad (?)' (aday yoksa 'belirsiz'); yok -> 'belirsiz'.
+    KESIN yalniz model sahibi ADIYLA ve '(?)' olmadan yazdiysa ve su iki yoldan biri dogrularsa:
+      (a) kaynak satir kesin tek konusmaci (spk_guven >= 0.7, 'Ad?', '?', 'A → B', 'A / B', oda, cakisma degil), modelin
+          adi katilimci listesinde konusanla AYNI kisi (tam ad ya da tekil ilk ad; 'Ali Kaya' != 'Ali Demir', iki Ali
+          varken 'Ali' belirsiz) ve satir konusanin kendi taahhudu: 'ben' + 1. tekil fiil ya da is fiili kokunun 1. tekil
+          bicimi ('hazirlarim', 'gonderecegim'); bekle- / rica et- / oner- / sor- / soyle- / bul- ve iyelik ('dosyalarim')
+          sayilmaz; satirda baska katilimci adi ya da muhatap ('sen', emir, '-mAnI rica') varsa yol kapanir;
+      (b) adlandirilmis sahip: kaynak satirin konusmacisi kesin, ad bir 'kisi' katilimcisiyla eslesiyor, satirda ⟨⟩
+          disinda BIREBIR geciyor ('Aysen' != 'Ayse'; ilk ad ortaksa tam ad) VE is o kisiye yukleniyor: hitap + muhatap
+          bicimi ('Ayse, sen cumaya hazirla', 'Zeynep, gondermeni rica ediyorum') ya da ozne + 3. kisi gelecek / emir /
+          genis ('taslagi Mehmet incelesin'); konusan isi kendisi ustleniyorsa belirsiz.
+    Iki yolda da soru ('Mehmet mi yapacak?'), olumsuz ('incelemeyecek', 'degil') ve gecmis ('inceledi') satir kesin
+    olmaz. Model 'belirsiz' dediyse kod kesin sahip URETMEZ: (a) / hitap kaniti varsa yalniz aday ('Ad (?)').
+    Kesin ad notta katilimci listesindeki yazimiyla basilir. 'bana/benim/bende' sahip kaniti degildir. katilimcilar:
+    toplanti katilimci adlari (yoksa kesin konusmacilar). Dondurur: yeni liste (girdi degismez)."""
     bul = kaynak_satiri_bulucu(satirlar)
+    kisiler = _kisi_listesi(satirlar, katilimcilar, ben)
     sonuc = []
     for a in aksiyonlar:
         a = dict(a)
         sonuc.append(a)
+        adlar = _ad_parcala(a.get("sorumlu"))
         s = bul(a.get("madde", ""))
-        if not s:
-            continue
-        kim = (s.get("speaker") or "").strip()
-        if kim in ("ben", "Ben") and ben:
-            kim = ben
-        if not kim or kim == "?" or not kesin_ad_mi(s):
-            continue                    # 'Ad?', birlesik ad, eski (goc) ve altyazi yedegi satiri sahip uretmez
-        if not _BIRINCI_TEKIL.search(tr_kucuk(s.get("text"))):
-            continue
-        sorumlu = (a.get("sorumlu") or "").strip()
-        if sorumlu.lower() in ("", "-", "belirsiz", "?"):
-            a["sorumlu"] = kim
-            continue
-        if sorumlu.endswith("(?)"):
-            continue
-        adlar = [x.strip() for x in re.split(r",|/| ve ", sorumlu) if x.strip()]
-        if any(_ayni_kisi(x, kim) for x in adlar):
-            continue
-        if any(ad_geciyor(x, s.get("text")) or ad_geciyor(x.split()[0], s.get("text")) for x in adlar):
-            continue                    # 'Emre'e ilet, o baksin' gibi: X satirda adiyla geciyor
-        a["sorumlu"] = f"{sorumlu} (?)"
+        durum, parcalar = _sahip_belirle(s, adlar, kisiler, ben)
+        if durum == "kesin":
+            ad = ", ".join(x for x, _ in parcalar)
+            a["sorumlu"] = ad
+        elif parcalar:
+            ad = ", ".join(x for x, _ in parcalar)
+            a["sorumlu"] = ", ".join(x if d else f"{x} (?)" for x, d in parcalar)
+        else:
+            ad = ""
+            a["sorumlu"] = "belirsiz"
+        a["sahip"] = {"ad": ad, "durum": durum}
     return sonuc
 
 

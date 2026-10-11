@@ -150,8 +150,9 @@ def test_notu_uret_adim_olaylari_ve_sorumlu_dogrulama(tmp_path, monkeypatch):
     assert adimlar == ["Kararlar ve aksiyonlar birleştiriliyor", "Özet paragrafı yazılıyor", "Dayanak kontrolü",
                        "Not kaydediliyor"]
     assert all(set(v) == {"metin", "no", "toplam"} for t, v in olaylar if t == "adim")
-    # K8: 'belirsiz' aksiyonun kaynak satirinda Selin 'ben hazirlarim' diyor -> sorumlu Selin Kara (kesin satir)
-    assert "| MVP prototipini hazırlamak | Selin Kara |" in md
+    # K8: 'belirsiz' aksiyonun kaynak satirinda Selin 'ben hazirlarim' diyor -> Selin Kara yalniz ADAY (model 'belirsiz'
+    # dediyse kod kesin sahip uretmez)
+    assert "| MVP prototipini hazırlamak | Selin Kara (?) |" in md
     assert json.loads((k / "meta.json").read_text(encoding="utf-8"))["durum"] == "tamam"
 
 

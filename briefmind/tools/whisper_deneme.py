@@ -33,7 +33,6 @@ def terim_istemi(seri=None):
 
 
 def mikrofondan(saniye):
-    import numpy as np
     import sounddevice as sd
     print(f"{saniye} sn kayıt — konuşmaya başla...", flush=True)
     ses = sd.rec(int(saniye * ORNEK), samplerate=ORNEK, channels=1, dtype="float32")

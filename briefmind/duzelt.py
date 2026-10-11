@@ -21,6 +21,9 @@ kapi(satir_metni, oneri, adaylar, adlar) -> (kabul, neden)   VE kurali (MIMARI_v
   - terimde: Turkce ses yapisina uyan kok (kelime.turkce_gibi_mi: jest, sap, redif) terime cevrilmez; yalniz harf
     farkiysa red, degilse kelime belirsiz isaretlenir
   - yaygin kelime listesi yoksa (eksik kurulum) fail-closed: yalniz harf/kesme farki kabul edilir (liste_yok)
+  - OGRENILMIS varyant (terim.varyant_ciftleri: bagimsiz kanitla ogrenilen / elle 'eski -> terim'): eski bu varyanttan
+    biri ve yeni onun terimiyse uzaklik, yaygin-kelime, yakin-aday ve Turkce-ses-yapisi kurallari aranmaz (kanit
+    zaten bunlari karsiladi); sayi/tarih, ek uyumu, kesme, kelime sayisi ve satir orani kurallari AYNEN uygulanir
 """
 import re
 
@@ -34,6 +37,7 @@ ORAN_SATIR = 0.30
 EN_FAZLA_ONERI = 25                  # cagri basina (cikti butcesi llm.butce('duzeltme') = 1200)
 PARCA_KARAKTER = 9000                # ~3000 token satir metni (MIMARI_v3 §4 Maliyet)
 EN_FAZLA_ADAY = 60
+EN_FAZLA_VARYANT = 15
 EN_UZUN_YENI = 80
 
 KESME = "'’"
@@ -201,6 +205,35 @@ def _kelime_ekleme(eski_kok, t, d):
     return None
 
 
+def _varyant_koku(vn, t):
+    """Varyantin KENDI koku: ek ayrimlarindan terime en yakin olan (esitlikte en uzun). 'cenkinse' (Jenkins) ->
+    'cenkins'; 'cenk' gibi daha kisa (ve yaygin kelime olabilen) kokler varyantin koku sayilmaz."""
+    adaylar = [k for k, _ in kelime.kok_ayir(vn, en_kisa=3)]
+    if not adaylar:
+        return None
+    return min(adaylar, key=lambda k: (terim_uzakligi(k, t), -len(k)))
+
+
+def _varyant_izinli(eski_n, eski_kok, t, varyantlar):
+    """eski (sade, ekli) / eski_kok (ekten arinmis) ogrenilmis bir varyant mi ve varyantin terimi t mi?
+    Yalniz varyantin kendisi (eski_n == varyant), varyant + ek (eski_kok == varyant) ya da varyantin kendi koku + ek
+    (eski_kok == _varyant_koku) eslesir; varyanttan turetilen daha kisa kokler ('cenkinse' -> 'cenk') izinli DEGILDIR.
+    Yaygin kelime kurali kok yolunda surer: varyantin koku yaygin Turkce kelimeyse ('voltu' -> 'volt', 'tablosuna' ->
+    'tablosu') o kok varyant sayilmaz ('220 volt'taki 'volt' Vault olmaz). Dondurur eslesen (varyant, terim) ya da None."""
+    ts = kelime._sade(t)
+    for v, vt in varyantlar or ():
+        if not isinstance(v, str) or not isinstance(vt, str) or kelime._sade(vt) != ts:
+            continue
+        vn = kelime._sade(v)
+        if not vn:
+            continue
+        if eski_n == vn or eski_kok == vn:
+            return v, vt
+        if eski_kok and eski_kok == _varyant_koku(vn, t) and not kelime.yaygin_mi(eski_kok):
+            return v, vt
+    return None
+
+
 def _yaygin_var_mi(eski, eski_kok):
     if eski_kok and kelime.yaygin_mi(eski_kok):
         return True
@@ -209,8 +242,9 @@ def _yaygin_var_mi(eski, eski_kok):
 
 # ---------- kapi ----------
 
-def kapi(satir_metni, oneri, adaylar, adlar):
-    """Tek oneriyi deterministik kurallarla sinar. Dondurur (kabul, neden); neden 'tamam' ya da red kodu."""
+def kapi(satir_metni, oneri, adaylar, adlar, varyantlar=None):
+    """Tek oneriyi deterministik kurallarla sinar. Dondurur (kabul, neden); neden 'tamam' ya da red kodu.
+    varyantlar: [(eski, terim)] ogrenilmis / elle varyant eslemeleri (terim.varyant_ciftleri)."""
     if not isinstance(oneri, dict) or set(oneri) - set(ALANLAR):
         return False, "sema_disi"
     eski, yeni, neden = oneri.get("eski"), oneri.get("yeni"), oneri.get("neden")
@@ -265,6 +299,18 @@ def kapi(satir_metni, oneri, adaylar, adlar):
     else:
         eski_ek, eski_kok = "", eski_n
     d = terim_uzakligi(eski_kok, t)
+    varyant = _varyant_izinli(eski_n, eski_kok, t, varyantlar) if neden == "terim" else None
+    if varyant:
+        # kanitli varyant: benzerlik (uzaklik / yaygin kelime / yakin aday / Turkce ses yapisi) kurallari aranmaz; EK kurallari
+        # aynen surer (ek kaybi: 'kubernetisin' -> 'Kubernetes' reddedilir; ek uyumu) ve kelime sayisi varyantla ayni olmali
+        if ke != len(varyant[0].split()) or ky != len(t.split()):
+            return False, "varyant_kelime"
+        for x, _s in kelime.kok_ayir(eski_kok, tureme=True, esnek=True):
+            if terim_uzakligi(x, t) < d:
+                return False, "ek_kaybi"
+        if not _ek_uyumlu_mu(kelime._sade(t), ek, eski_kok, eski_ek):
+            return False, "ek_uyumsuz"
+        return True, "varyant"
     if d > ESIK_UZAKLIK or (d > 0 and len(kelime._sade(t)) <= 3):
         return False, "uzaklik"                       # <=3 harfli terimde (SQL, API) yalniz yazim farki
     # eski kokte fazladan ek kaldiysa (kampanyacı -> kampanya, raporu -> rapor) yeni eki silmis demektir
@@ -321,6 +367,8 @@ DUZELT_SISTEM = (
     "- neden: TERİMLER'deki öğe için 'terim', ADLAR'daki kişi için 'ad'. Listede olmayan ama bozuk duran "
     "kelime için 'yazim' (yeni = tahminin; metne uygulanmaz, yalnız işaretlenir).\n"
     "- Anlamlı, gerçek bir Türkçe kelimeyi terime çevirme. Sayı, tarih, saat ve tutarlara dokunma.\n"
+    "- BİLİNEN YAZIMLAR: daha önce bu terimin bozuk duyulduğu biçimler (bozuk -> terim); satırda aynısını "
+    "görürsen aynı terime çevir (neden 'terim').\n"
     "- Emin değilsen öneri yazma; bozuk yer yoksa boş liste döndür. En fazla 25 öneri. Yalnız JSON döndür.\n"
     "Örnek (uydurma): TERİMLER: Jenkins; Kubernetes; Jira; commit  ADLAR: Nil Ekinci\n"
     "[1] cenkinse bakarız -> {\"satir\": 1, \"eski\": \"cenkinse\", \"yeni\": \"Jenkins'e\", \"neden\": \"terim\"}\n"
@@ -344,13 +392,30 @@ def oneri_semasi(id_tamsayi=True):
             "required": ["oneriler"], "additionalProperties": False}
 
 
-def mesajlar(parca, adaylar, adlar):
-    """parca: [(id, metin)]. Kisa kullanici mesaji: listeler + numarali satirlar."""
+def _bilinen_yazimlar(varyantlar, parca):
+    """Bu parcanin metninde gecen varyantlar ('bozuk -> terim', en fazla EN_FAZLA_VARYANT): komut istemi kisa kalir."""
+    kokler = set()
+    for _sid, metin in parca:
+        kokler |= {kelime._sade(w) for w in metin.split()}
+    cikti = []
+    for v, t in varyantlar or ():
+        if not isinstance(v, str) or not isinstance(t, str) or not v.strip():
+            continue
+        vs = kelime._sade(v)
+        if vs and any(k.startswith(vs) for k in kokler) and f"{v} -> {t}" not in cikti:
+            cikti.append(f"{v} -> {t}")
+    return cikti[:EN_FAZLA_VARYANT]
+
+
+def mesajlar(parca, adaylar, adlar, varyantlar=None):
+    """parca: [(id, metin)]. Kisa kullanici mesaji: listeler + (varsa) bilinen yazimlar + numarali satirlar."""
     terimler = "; ".join(a for a in (adaylar or [])[:EN_FAZLA_ADAY] if a) or "-"
     kisiler = "; ".join(a for a in (adlar or []) if a) or "-"
     govde = "\n".join(f"[{sid}] {metin}" for sid, metin in parca)
+    bilinen = _bilinen_yazimlar(varyantlar, parca)
+    bilinen = ("BİLİNEN YAZIMLAR: " + "; ".join(bilinen) + "\n") if bilinen else ""
     return [{"role": "system", "content": DUZELT_SISTEM},
-            {"role": "user", "content": f"TERİMLER: {terimler}\nADLAR: {kisiler}\n\nSATIRLAR:\n{govde}"}]
+            {"role": "user", "content": f"TERİMLER: {terimler}\nADLAR: {kisiler}\n{bilinen}\nSATIRLAR:\n{govde}"}]
 
 
 def _llm_sor(msj, sema):
@@ -393,12 +458,15 @@ def _parcala(kayitlar):
 
 # ---------- ana islev ----------
 
-def duzelt(satirlar, adaylar, adlar, sor_fn=None):
+def duzelt(satirlar, adaylar, adlar, sor_fn=None, varyantlar=None):
     """Dondurur (yeni_satirlar, rapor). yeni_satirlar girdinin kopyasi: 'text' duzeltilmis metin,
     'duzeltmeler' kabul edilenler, 'belirsiz' isaretli kelimeler. Model hatasinda metin degismez.
     rapor = {"satirlar": {id: {"kabul": [...], "red": [...], "belirsiz": [...]}}, "gecersiz": [...],
-             "oneri", "kabul", "red", "belirsiz" (sayilar), "hata", "uyari" (yaygin liste yoksa metin)}"""
+             "oneri", "kabul", "red", "belirsiz" (sayilar), "hata", "uyari" (yaygin liste yoksa metin)}
+    varyantlar: [(eski, terim)] ogrenilmis / elle varyantlar (terim.varyant_ciftleri): kapida izinli esleme."""
     sor_fn = sor_fn or _llm_sor
+    varyantlar = [(v, t) for v, t in (varyantlar or ()) if isinstance(v, str) and isinstance(t, str)]
+    adaylar = list(adaylar or []) + [t for t in dict.fromkeys(t for _v, t in varyantlar) if t not in (adaylar or [])]
     adaylar = [a for a in (adaylar or []) if isinstance(a, str) and a.strip()]
     adlar = [a for a in (adlar or []) if isinstance(a, str) and a.strip()]
     kayitlar, metin = [], {}
@@ -411,12 +479,12 @@ def duzelt(satirlar, adaylar, adlar, sor_fn=None):
              "gecersiz": [], "oneri": 0, "kabul": 0, "red": 0, "belirsiz": 0, "hata": None,
              "uyari": None if kelime.liste_var_mi() else kelime.LISTE_YOK_UYARI}
     kabul_aralik = {sid: [] for sid in metin}          # (bas, bit, yeni) — ozgun satir konumlari
-    if kayitlar and (adaylar or adlar):
+    if kayitlar and (adaylar or adlar or varyantlar):
         id_tamsayi = all(re.fullmatch(r"-?\d+", sid) for sid, _ in kayitlar)
         sema = oneri_semasi(id_tamsayi)
         for parca in _parcala(kayitlar):
             try:
-                oneriler = _oneriler(sor_fn(mesajlar(parca, adaylar, adlar), sema))
+                oneriler = _oneriler(sor_fn(mesajlar(parca, adaylar, adlar, varyantlar), sema))
             except Exception as e:                  # LLM hatasi: metin degismez
                 rapor["hata"] = llm.hata_metni(e)
                 continue
@@ -426,11 +494,11 @@ def duzelt(satirlar, adaylar, adlar, sor_fn=None):
             parca_idleri = {sid for sid, _ in parca}
             for sira, o in enumerate(oneriler):
                 rapor["oneri"] += 1
-                _isle(o, sira, parca_idleri, metin, adaylar, adlar, rapor, kabul_aralik)
+                _isle(o, sira, parca_idleri, metin, adaylar, adlar, rapor, kabul_aralik, varyantlar)
     return _uygula(satirlar or [], metin, kabul_aralik, rapor), rapor
 
 
-def _isle(o, sira, parca_idleri, metin, adaylar, adlar, rapor, kabul_aralik):
+def _isle(o, sira, parca_idleri, metin, adaylar, adlar, rapor, kabul_aralik, varyantlar=None):
     sid = str(o.get("satir")) if isinstance(o, dict) else None
     if sid not in parca_idleri:
         rapor["gecersiz"].append({"oneri": o, "sebep": "satir_yok" if isinstance(o, dict) else "sema_disi"})
@@ -441,7 +509,8 @@ def _isle(o, sira, parca_idleri, metin, adaylar, adlar, rapor, kabul_aralik):
     if sira >= EN_FAZLA_ONERI:
         kabul, neden = False, "fazla_oneri"
     else:
-        kabul, neden = kapi(metin[sid], o, adaylar, adlar)
+        kabul, neden = (kapi(metin[sid], o, adaylar, adlar, varyantlar) if varyantlar
+                        else kapi(metin[sid], o, adaylar, adlar))     # varyantsiz: eski imza (e2e gevsek-kapi taklidi)
     eski = oz["eski"] if isinstance(oz["eski"], str) else ""
     if kabul:
         bas = gecisler(metin[sid], eski)[0]

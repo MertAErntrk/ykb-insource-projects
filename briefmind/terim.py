@@ -106,6 +106,23 @@ def _gecer(hedef, kaynak_tokenleri):
     return False
 
 
+def ad_parcalari(adlar):
+    """Katilimci adlarinin sade parcalari (ad, soyad, ikinci ad; >=2 harf): {'selin', 'kara'}. Soyad tek basina
+    terim degildir: davet / not metninden 'Kara'nin' diye ayiklanan kelime terim havuzuna girmez."""
+    sonuc = set()
+    for a in adlar or ():
+        for t in _tokenler(a if isinstance(a, str) else ""):
+            if len(t) >= 2:
+                sonuc.add(t)
+    return sonuc
+
+
+def _ad_terimi_mi(terim, parcalar):
+    """Terimin butun kelimeleri katilimci ad parcalari mi? ('Selin Kara', 'Kara', 'Selin')"""
+    tt = _tokenler(terim)
+    return bool(tt) and bool(parcalar) and all(t in parcalar for t in tt)
+
+
 def _yaygin_ifade(eski):
     """eski yaygin Turkce kelime(ler) mi: tek kelime listede ya da tum kelimeler listede."""
     kel = [k for k in normalize(eski).split() if k]
@@ -495,14 +512,17 @@ class TerimHavuzu:
     def _gecmis_yaz(self, islem, terim, neden, **ek):
         self.gecmis.append(dict({"t": _simdi(), "islem": islem, "terim": terim, "neden": neden}, **ek))
 
-    def ekle(self, seri, terimler, kaynak="davet"):
-        """Terimleri havuza ekler (yoksa) ve seri sayacini artirir. Yeni eklenenleri dondurur. Kaydetmez."""
+    def ekle(self, seri, terimler, kaynak="davet", adlar=()):
+        """Terimleri havuza ekler (yoksa) ve seri sayacini artirir. Yeni eklenenleri dondurur. Kaydetmez.
+        adlar: katilimci adlari; butun kelimeleri bu adlarin parcasi olan terim ('Kara', 'Selin') duz terim olarak
+        eklenmez (kaynak 'kisi' haric: tam ad kisi olarak girer, adaylar() onu terim saymaz)."""
         eklenen = []
+        parcalar = ad_parcalari(adlar) if kaynak != "kisi" else set()
         with self._kilit:
             bugun = _bugun()
             for t in terimler or []:
                 t = (t or "").strip()
-                if not _gecerli(t):
+                if not _gecerli(t) or _ad_terimi_mi(t, parcalar):
                     continue
                 e = self._bul(t)
                 if e is None:
@@ -533,26 +553,58 @@ class TerimHavuzu:
 
     def adaylar(self, seri, metin=None, adlar=()):
         """LLM/duzelt beyaz listesi (<=40): bu serinin terimleri + genel terimler + (metin verilirse) baska
-        serilerden metinde kok eslesmesiyle gecenler. Metin verilirse eslesenler basa gelir. Katilimci adinin
-        kendisi olan terimler atilir (adlar ayri gider). Yalniz metinde gecenleri isteyen ilgili(adaylar, metin) kullanir."""
+        serilerden metinde kok eslesmesiyle gecenler. Metin verilirse eslesenler basa gelir; metinde terimin
+        OGRENILMIS / elle varyanti (Whisper'in bozdugu bicim) gecmesi de eslesmedir. Bozuk duyulmasi bilinen
+        (varyanti olan) terimler Whisper ipucunda one gecer. Katilimci adinin kendisi, bir parcasi (soyad) ya da yalniz
+        'kisi' kaynakli girisler atilir (adlar ayri gider). Yalniz metinde gecenleri isteyen ilgili(adaylar, metin)
+        kullanir."""
         adn = {" ".join(_tokenler(a)) for a in adlar or ()}
+        parcalar = ad_parcalari(adlar)
         kokler = _kokler(metin) if metin else None
         sirali = []
         with self._kilit:
             for e in self._gorunum():
                 t = e["terim"]
-                if " ".join(_tokenler(t)) in adn or not terim_gibi_mi(t):
+                if " ".join(_tokenler(t)) in adn or not terim_gibi_mi(t) or _ad_terimi_mi(t, parcalar):
                     continue
+                if e["kaynak"] and all(k == "kisi" for k in e["kaynak"]):
+                    continue                          # katilimci adi: adlar kanalindan gider, terim sayilmaz
                 seri_sayi = e["seriler"].get(seri, 0) if seri else 0
                 esle = False
                 if kokler:
                     tk = _kokler(t)
                     esle = bool(tk) and all(k in kokler for k in tk)
+                    if not esle:
+                        esle = any(vk and all(k in kokler for k in vk)
+                                   for vk in (_kokler(v) for v in e["varyantlar"]))
                 if not (seri_sayi or e["genel"] or esle):
                     continue
-                sirali.append((0 if esle else 1, 0 if seri_sayi else 1, -seri_sayi, -e["guven"], t))
+                sirali.append((0 if esle else 1, 0 if e["varyantlar"] else 1, 0 if seri_sayi else 1, -seri_sayi,
+                               -e["guven"], t))
         sirali.sort()
         return [x[-1] for x in sirali[:ADAY_TAVAN]]
+
+    def varyant_ciftleri(self, seri, adlar=()):
+        """Duzelt kapisinin izinli 'eski -> terim' eslemeleri: [(varyant, terim)]. Kaynak: bagimsiz kanitla ogrenilmis
+        varyantlar (ogren) ve elle.txt varyantlari. Yalniz bu serinin / genel terimleri; katilimci adi olan terim
+        girmez. Eslemenin kendisi karar degildir: kapi sayi / ek / kelime sayisi kurallarini yine uygular."""
+        adn = {" ".join(_tokenler(a)) for a in adlar or ()}
+        parcalar = ad_parcalari(adlar)
+        sonuc = []
+        with self._kilit:
+            for e in self._gorunum():
+                t = e["terim"]
+                if not e["varyantlar"] or not terim_gibi_mi(t):
+                    continue
+                if " ".join(_tokenler(t)) in adn or _ad_terimi_mi(t, parcalar):
+                    continue
+                if not ((e["seriler"].get(seri, 0) if seri else 0) or e["genel"]):
+                    continue
+                for v in e["varyantlar"]:
+                    v = (v or "").strip()
+                    if v and normalize(v) != normalize(t) and (v, t) not in sonuc:
+                        sonuc.append((v, t))
+        return sonuc
 
     def prompt(self, seri, adlar=(), onceki=""):
         """Whisper prompt'u (<=~380 karakter): katilimci adlari + <=20 ilgili terim + (varsa) onceki cumlenin sonu.

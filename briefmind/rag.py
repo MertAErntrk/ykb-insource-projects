@@ -23,6 +23,7 @@ from collections import Counter
 import numpy as np
 
 import ayar as ayar_mod
+from metin import gorunen_ad
 
 PENCERE_SATIR = 6
 ORTUSME = 2
@@ -98,9 +99,20 @@ def gom(metinler, sorgu=False):
 
 # ---------- pencereler ----------
 
+def _satir_yaz(s):
+    """'[ts] Konusmaci: metin' -- konusmaci metin.gorunen_ad ile ('Ad?', 'Bilinmeyen', 'A / B (aynı anda)'; satirda
+    hazir 'gorunen' varsa o). Eszamanli (cakisma) satirin metni ⟨⟩ icinde: karar/sayi/tarih bundan cikmaz."""
+    metin = s["text"].strip()
+    if s.get("cakisma"):
+        metin = "⟨" + metin.replace("⟨", "").replace("⟩", "") + "⟩"
+    return f"[{s.get('ts', '')}] {s.get('gorunen') or gorunen_ad(s)}: {metin}"
+
+
 def pencereler(satirlar, boy=PENCERE_SATIR, ortusme=ORTUSME):
-    """satirlar: [{'ts','speaker','text'}] -> [{'bas','son','metin'}]; ust uste binen satir pencereleri."""
-    satirlar = [s for s in satirlar if (s.get("text") or "").strip()]
+    """satirlar: [{'ts','speaker','text', ...}] -> [{'bas','son','metin'}]; ust uste binen satir pencereleri.
+    Konusmaci adi gosterim kuraliyla (metin.gorunen_ad) yazilir; supheli (halusinasyon) satirlar girmez."""
+    satirlar = [s for s in satirlar if (s.get("text") or "").strip()
+                and not (s.get("supheli") and s.get("kaynak") != "altyazi-yedek")]
     adim = max(1, boy - ortusme)
     sonuc = []
     for i in range(0, len(satirlar), adim):
@@ -108,8 +120,7 @@ def pencereler(satirlar, boy=PENCERE_SATIR, ortusme=ORTUSME):
         if not grup:
             break
         sonuc.append({"bas": grup[0].get("ts", ""), "son": grup[-1].get("ts", ""),
-                      "metin": "\n".join(f"[{s.get('ts', '')}] {s.get('speaker', '?')}: {s['text'].strip()}"
-                                         for s in grup)})
+                      "metin": "\n".join(_satir_yaz(s) for s in grup)})
         if i + boy >= len(satirlar):
             break
     return sonuc

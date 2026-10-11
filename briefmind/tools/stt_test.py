@@ -13,7 +13,6 @@ Servis adresi: asagidaki ROUTE ya da ortam degiskeni STT_URL.
   $env:STT_URL = "https://<stt-servisi-adresi>"
 """
 import argparse
-import json
 import os
 import sys
 import time

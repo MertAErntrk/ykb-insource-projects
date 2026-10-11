@@ -1,11 +1,13 @@
-uiautomation
-openai
-httpx
-pywin32
-PyQt5
-requests
-numpy
-sounddevice
-soundcard
-soundfile
-python-docx
+# cp39 win_amd64 icin dogrulanmis surumler (pip download --python-version 3.9 --platform win_amd64 --only-binary=:all:).
+# Ana surumler degismedi; alt bagimliliklar pip tarafindan cozulur. Surum yukseltirken once aynada yeniden dogrulayin.
+uiautomation==2.0.29
+openai==2.48.0
+httpx==0.28.1
+pywin32==312
+PyQt5==5.15.11
+requests==2.32.5
+numpy==2.0.2
+sounddevice==0.5.6
+soundcard==0.4.6
+soundfile==0.13.1
+python-docx==1.2.0

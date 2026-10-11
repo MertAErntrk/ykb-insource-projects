@@ -23,6 +23,7 @@ import ayar as ayar_mod
 import llm
 import motor as motor_mod
 import outlook
+import saat
 import terim as terim_mod
 from motor import Motor
 from yakalayici import Yakalayici, ekran_okuyucu
@@ -50,6 +51,22 @@ def olay(tip, v):
 
 
 olay.sessiz = False
+
+
+def ayar_uygula(ayar):
+    """config.json (BOM'lu olsa da ayar.ayar_oku okur) LLM / embedding modullerine verilir; llm.py ve rag.py ice
+    aktarilirken config.json'u kendileri okur, BOM'da bos kalirdi. Gecerli bir ayar sozlugu degilse atlanir."""
+    for ad in ayar_mod.ayar_uyarilari_al():
+        print("! " + ad)
+    if ayar_mod.AYAR_HATASI:
+        print(f"! config.json okunamadı, varsayılanlarla devam: {ayar_mod.AYAR_HATASI}")
+    if isinstance(ayar, dict) and "route" in ayar:
+        llm.ayarla(ayar)
+        try:
+            import rag
+            rag.ayarla(ayar)
+        except Exception as e:
+            print(f"! embedding ayarı uygulanamadı: {e!r}")
 
 
 # ---------- bitis ----------
@@ -104,7 +121,7 @@ def ses_servisi_kur(m, ayar, klasor):
         neden = repr(e)
     m.yeniden_kes_fn = None
     print(f"✖ ses yakalama başlatılamadı: {neden} — transkript yazılamayacak (Teams altyazı metni transkripte girmez)")
-    m.stt_durumu_ayarla({"durum": "kesinti", "bas": time.time(), "bekleyen": 0, "kayit": False, "eksik": [],
+    m.stt_durumu_ayarla({"durum": "kesinti", "bas": saat.simdi(), "bekleyen": 0, "kayit": False, "eksik": [],
                          "hata": str(neden)[:200]})
     return None
 
@@ -115,6 +132,7 @@ def komut_basla(a):
     Motor.altyazi_satiri'na gider (canli iz; opt-in 'altyazi_yedek' ve STT yokken yedek)."""
     olay.sessiz = a.sessiz
     ayar = ayar_mod.ayar_oku()
+    ayar_uygula(ayar)
     tarih = dt.date.today()
     ctx = outlook.aktif_toplanti() or {}
     baslik = a.baslik or ctx.get("baslik") or input("Toplantı başlığı: ").strip() or "Toplantı"
@@ -134,7 +152,7 @@ def komut_basla(a):
     print(f"Klasör: {klasor}\nTeams'te altyazı bekleniyor (pencere arkada kalabilir, küçültme). Bitirmek için Ctrl+C.")
 
     ekran_okuyucu(True)
-    basladi, son_durum, uyari = False, time.time(), 0
+    basladi, son_durum, uyari = False, saat.simdi(), 0
     try:
         while True:
             if servis is not None:
@@ -156,11 +174,11 @@ def komut_basla(a):
                 if kalan // 30 != uyari:
                     uyari = kalan // 30
                     print(f"altyazı görünmüyor, {kalan} sn sonra otomatik bitirilecek (Ctrl+C = şimdi bitir)")
-            if time.time() - son_durum > DURUM_ARALIK and basladi:
+            if saat.simdi() - son_durum > DURUM_ARALIK and basladi:
                 biten = sum(1 for i in m.isler if i.done())
                 print(f"— {m.parca_no} parça kapandı, {biten} işlendi, açık parça ~{m.mevcut_tok} token, "
                       f"{len(m.tum_satirlar())} satır —")
-                son_durum = time.time()
+                son_durum = saat.simdi()
             time.sleep(y.onerilen_aralik())      # A7: UIA okumasi yavassa aralik 1,2 sn'ye cikar
     except KeyboardInterrupt:
         print("\nToplantı bitiriliyor...")
@@ -178,6 +196,7 @@ def komut_basla(a):
 
 
 def komut_bitir(a):
+    ayar_uygula(ayar_mod.ayar_oku())
     if getattr(a, "inceleme_yok", False):
         print("! --inceleme-yok artık gereksiz: toplantı bitince kullanıcı onayı hiç sorulmuyor.")
     m = Motor.yukle(a.klasor, terim_mod.TerimHavuzu(), olay=olay)

@@ -1,9 +1,47 @@
 """
 outlook.py — Outlook takviminden aktif toplantiyi okur, taslak e-posta acar.
 pip install pywin32   (Outlook masaustunde acik/kurulu olmali)
+
+COM thread kurali: bu modulun COM kullanan her genel islevi (aday_toplantilar, toplanti_esle, aktif_toplanti, taslak,
+kullanici_adi, ben_adi) calistigi thread'de CoInitialize/CoUninitialize yapar (@com_icinde). Boylece arayuzu dondurmemek
+icin QThread'den (isler.ArkaIs) guvenle cagrilir; Windows disinda (pywin32 yok) sessizce atlanir.
 """
 import datetime as dt
+import functools
 import re
+
+
+def _pythoncom():
+    """pywin32'nin pythoncom'u; yoksa (Linux/CI) None. Testler bunu sahtesiyle degistirir."""
+    try:
+        import pythoncom
+        return pythoncom
+    except Exception:
+        return None
+
+
+def com_icinde(fn):
+    """Dekoratör: cagrinin thread'inde COM'u baslatir/kapatir (eslesen CoInitialize/CoUninitialize; ic ice cagri guvenli).
+    COM nesneleri islev donmeden once birakilir (islevler yalniz duz sozluk/liste dondurur)."""
+    @functools.wraps(fn)
+    def sarmal(*a, **k):
+        pc = _pythoncom()
+        basladi = False
+        if pc is not None:
+            try:
+                pc.CoInitialize()
+                basladi = True
+            except Exception:
+                basladi = False
+        try:
+            return fn(*a, **k)
+        finally:
+            if basladi:
+                try:
+                    pc.CoUninitialize()
+                except Exception:
+                    pass
+    return sarmal
 
 
 def _outlook():
@@ -58,6 +96,7 @@ def _benzerlik(a, b):
     return max(ortak, dizi)
 
 
+@com_icinde
 def aday_toplantilar(tolerans_dk=20):
     """Su an (±tolerans) suren TUM takvim kayitlarini dondurur (paralel toplantilar icin)."""
     adaylar = []
@@ -100,6 +139,7 @@ def aday_toplantilar(tolerans_dk=20):
     return adaylar
 
 
+@com_icinde
 def toplanti_esle(teams_adi, tolerans_dk=20):
     """Teams penceresindeki toplanti adini takvimdeki adaylarla eslestirir.
     Dondurur (secilen|None, adaylar, skor). Emin degilse secilen None olur, UI sorar."""
@@ -118,6 +158,7 @@ def toplanti_esle(teams_adi, tolerans_dk=20):
     return None, adaylar, en_iyi[0]
 
 
+@com_icinde
 def aktif_toplanti(tolerans_dk=15):
     """Geriye donuk uyum: su an suren ilk takvim kaydi."""
     try:
@@ -157,6 +198,7 @@ def aktif_toplanti(tolerans_dk=15):
     return None
 
 
+@com_icinde
 def taslak(konu, govde, alicilar=None):
     """Gondermez; Outlook'ta taslagi acar. alicilar: ad listesi (Outlook adres defterinden cozer)."""
     try:
@@ -172,6 +214,7 @@ def taslak(konu, govde, alicilar=None):
         return False
 
 
+@com_icinde
 def kullanici_adi():
     """Uygulamayi acan kisinin adi: once Outlook (takvimdeki katilimci yazimiyla ayni),
     sonra Windows hesabinin gorunen adi, en son oturum adi."""
@@ -202,6 +245,7 @@ def kullanici_adi():
         return ""
 
 
+@com_icinde
 def ben_adi(ayar=None):
     """Mikrofon akisinin sahibi (konusmaci.py 'ben'): ayardaki 'ben'; yoksa kullanici_adi() yalniz tam ad gibiyse
     (en az iki kelime; 'dkaya' gibi oturum adi Teams gorunen adiyla eslesmez). Bulunamazsa None."""

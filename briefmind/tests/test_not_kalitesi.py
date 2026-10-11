@@ -203,19 +203,23 @@ SATIRLAR = [
 
 
 def test_sorumlu_dogrula():
-    aks = [{"madde": "MVP prototipini hazırlamak", "sorumlu": "belirsiz", "tarih": "-"},       # 1: belirsiz -> konusan
+    aks = [{"madde": "MVP prototipini hazırlamak", "sorumlu": "belirsiz", "tarih": "-"},       # 1: belirsiz -> konusan aday
            {"madde": "MVP prototipini hazırlamak", "sorumlu": "Kemal Tuncer", "tarih": "-"},  # 2: baskasi -> (?)
-           {"madde": "Girdi tablolarını iletmek", "sorumlu": "Emre Sancak", "tarih": "-"},      # 3: satirda adi geciyor
+           {"madde": "Girdi tablolarını iletmek", "sorumlu": "Emre Sancak", "tarih": "-"},      # 3: Kemal ustleniyor -> (?)
            {"madde": "Sunum dosyasını güncellemek", "sorumlu": "belirsiz", "tarih": "-"},      # 4: konusan '?'
-           {"madde": "Test ortamını hazırlamak", "sorumlu": "Selin Kara", "tarih": "-"},        # 5: 1. tekil sahis yok
+           {"madde": "Test ortamını hazırlamak", "sorumlu": "Selin Kara", "tarih": "-"},        # 5: satirda adi yok -> (?)
            {"madde": "MVP prototipini hazırlamak", "sorumlu": "Selin", "tarih": "-"}]           # 6: ayni kisi (ilk ad)
     v = motor_mod.sorumlu_dogrula(aks, SATIRLAR, ben="Deniz Can Öztürk")
-    assert [a["sorumlu"] for a in v] == ["Selin Kara", "Kemal Tuncer (?)", "Emre Sancak", "belirsiz", "Selin Kara", "Selin"]
-    assert aks[0]["sorumlu"] == "belirsiz"                              # girdi degismez
+    assert [a["sorumlu"] for a in v] == ["Selin Kara (?)", "Kemal Tuncer (?)", "Emre Sancak (?)", "belirsiz",
+                                         "Selin Kara (?)", "Selin Kara"]                       # kesin: katilimcidaki tam ad
+    assert [a["sahip"]["durum"] for a in v] == ["belirsiz", "belirsiz", "belirsiz", "belirsiz", "belirsiz", "kesin"]
+    assert aks[0]["sorumlu"] == "belirsiz" and "sahip" not in aks[0]    # girdi degismez
 
 
 def test_sorumlu_dogrula_ben_satiri():
     satirlar = [{"ts": "10:00:00", "speaker": "Ben", "text": "Raporu cumaya kadar ben göndereceğim"}]
-    v = motor_mod.sorumlu_dogrula([{"madde": "Raporu cumaya kadar göndermek", "sorumlu": "belirsiz", "tarih": "-"}],
+    v = motor_mod.sorumlu_dogrula([{"madde": "Raporu cumaya kadar göndermek", "sorumlu": "belirsiz", "tarih": "-"},
+                                   {"madde": "Raporu cumaya kadar göndermek", "sorumlu": "Deniz", "tarih": "-"}],
                                   satirlar, ben="Deniz Can Öztürk")
-    assert v[0]["sorumlu"] == "Deniz Can Öztürk"
+    assert v[0]["sorumlu"] == "Deniz Can Öztürk (?)"                   # model 'belirsiz': yalniz aday
+    assert v[1]["sorumlu"] == "Deniz Can Öztürk" and v[1]["sahip"]["durum"] == "kesin"

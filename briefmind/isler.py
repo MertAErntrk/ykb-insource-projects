@@ -1,9 +1,11 @@
 """
-isler.py — arayuzu dondurmamasi gereken isler (QThread): yakalama, not uretimi, yeniden ozetleme, soru.
+isler.py — arayuzu dondurmamasi gereken isler (QThread): yakalama, not uretimi, yeniden ozetleme, soru, takvim/Outlook/
+STT testi (ArkaIs), onceki oturumun STT kesinti kuyrugu (KesintiDevamIsi).
 """
 import contextlib
 import datetime as dt
 import os
+import threading
 import time
 import traceback
 
@@ -13,6 +15,7 @@ import ayar as ayar_mod
 import llm
 import motor as motor_mod
 import outlook
+import saat
 from motor import Motor
 from yakalayici import Yakalayici, ekran_okuyucu
 
@@ -24,23 +27,24 @@ except Exception:                       # Windows disi ortamda import edilemez
 
 
 def hata_logla(tb):
-    """Is parcacigi hatasini hata.log'a ekler (calisma klasoru); asla yeni hata uretmez."""
-    try:
-        with open("hata.log", "a", encoding="utf-8") as f:
-            f.write(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====\n{tb}")
-    except Exception:
-        pass
+    """Is parcacigi hatasini hata.log'a ekler (%LOCALAPPDATA%\\BriefMind\\hata.log; yazilamazsa uygulama klasoru);
+    asla yeni hata uretmez."""
+    ayar_mod.hata_yaz(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====\n{tb}")
 
 
 class YakalamaIsi(QtCore.QThread):
     """Toplanti boyunca calisir: ses olaylari (SesServisi olay_fn) ve altyazi okumalari (Yakalayici okuma_fn) -> motor.
     Bitince salt-okunur belirsizler listesini yayar.
     Her yolda (hata dahil) motor.bitir() bir kez cagrilir ve toplanti_bitti yayilir; hata ayrica hata sinyaliyle.
-    terimler: paylasilan terim.TerimHavuzu (None: toplantiya ozel havuz). Whisper prompt'u terim.prompt(seri, adlar)."""
+    terimler: paylasilan terim.TerimHavuzu (None: toplantiya ozel havuz). Whisper prompt'u terim.prompt(seri, adlar).
+    durdur(hizli=True) (uygulama kapanisi): ses servisinin durmasi ve motor.bitir() KAPANIS_SN icinde sonuclanmazsa
+    beklenmez (arka plan thread'inde surer); acik parca motor.bitir()'in basinda diske yazildigi icin veri kaybolmaz.
+    Arayuz toplanti_bitti'yi thread'in finished sinyalinden SONRA isler (Baslat ancak thread gercekten bittiginde acilir)."""
     olay = QtCore.pyqtSignal(str, object)
     durum = QtCore.pyqtSignal(str)
     toplanti_bitti = QtCore.pyqtSignal(list)
     hata = QtCore.pyqtSignal(str)
+    KAPANIS_SN = 30                         # hizli kapanista ses servisi + acik parcanin diske yazilmasi icin toplam sure
 
     def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None):
         super().__init__()
@@ -50,9 +54,34 @@ class YakalamaIsi(QtCore.QThread):
         self.ses_servisi = None
         self._dur = False
         self._bitirildi = False
+        self._son_tarih = None              # hizli kapanis son tarihi (saat.simdi epoch'u) | None
 
-    def durdur(self):
+    def durdur(self, hizli=False):
+        if hizli and self._son_tarih is None:
+            self._son_tarih = saat.simdi() + self.KAPANIS_SN
         self._dur = True
+
+    def _sinirli(self, fn, pay=1.0):
+        """Normal kapanista fn() dogrudan; hizli kapanista arka plan thread'inde, kalan surenin `pay` kadari beklenerek.
+        -> (bitti, sonuc, istisna). bitti False: sure doldu, fn arka planda surer (daemon)."""
+        if self._son_tarih is None:
+            try:
+                return True, fn(), None
+            except Exception as e:
+                return True, None, e
+        kutu = {}
+
+        def is_():
+            try:
+                kutu["sonuc"] = fn()
+            except Exception as e:
+                kutu["hata"] = e
+            finally:
+                kutu["bitti"] = True
+        t = threading.Thread(target=is_, daemon=True, name="kapanis-" + str(getattr(fn, "__name__", "is")))
+        t.start()
+        t.join(max(0.2, (self._son_tarih - saat.simdi()) * pay))
+        return bool(kutu.get("bitti")), kutu.get("sonuc"), kutu.get("hata")
 
     def run(self):
         belirsizler = []
@@ -75,24 +104,30 @@ class YakalamaIsi(QtCore.QThread):
 
     def _kapat(self):
         """Ses servisini durdurur, motor.bitir()'i EN FAZLA BIR KEZ cagirir -> belirsizler (hata olursa [])."""
-        try:
-            if self.ses_servisi:
-                self.durum.emit("Ses kuyruğu boşaltılıyor…")
-                self.ses_servisi.durdur()
-        except Exception as e:
-            hata_logla(traceback.format_exc())
-            self._bildir(f"Ses servisi durdurulamadı: {type(e).__name__}: {e}")
+        if self.ses_servisi:
+            self.durum.emit("Ses kuyruğu boşaltılıyor…")
+            bitti, _, hata = self._sinirli(self.ses_servisi.durdur, pay=0.6)
+            if hata is not None:
+                hata_logla("".join(traceback.format_exception(type(hata), hata, hata.__traceback__)))
+                self._bildir(f"Ses servisi durdurulamadı: {type(hata).__name__}: {hata}")
+            elif not bitti:
+                self.olay.emit("log", f"! ses servisi {self.KAPANIS_SN} sn sınırında durmadı; açık parça yine de "
+                                      "diske yazılıyor")
         if self.motor is None or self._bitirildi:
             return []
         self._bitirildi = True
         self.motor.yeniden_kes_fn = None              # ses durdu: bitiste devir bolunmez ('A → B')
-        try:
-            self.durum.emit("Parçalar tamamlanıyor…")
-            return self.motor.bitir() or []
-        except Exception as e:
-            hata_logla(traceback.format_exc())
-            self._bildir(f"Parçalar tamamlanamadı: {type(e).__name__}: {e}")
+        self.durum.emit("Parçalar tamamlanıyor…")
+        bitti, belirsizler, hata = self._sinirli(self.motor.bitir)
+        if hata is not None:
+            hata_logla("".join(traceback.format_exception(type(hata), hata, hata.__traceback__)))
+            self._bildir(f"Parçalar tamamlanamadı: {type(hata).__name__}: {hata}")
             return []
+        if not bitti:
+            self.olay.emit("log", "! kapanış sınırı doldu: açık parça diske yazıldı, özetler arka planda sürüyor "
+                                  "(eksikse Geçmiş → Yeniden özetle)")
+            return []
+        return belirsizler or []
 
     def _ipucu(self, akis=None):
         """Whisper prompt'u: katilimci adlari + serinin <=20 ilgili terimi (<=~380 karakter). Bos olabilir."""
@@ -102,7 +137,7 @@ class YakalamaIsi(QtCore.QThread):
         """Ses servisi kurulamadi/baslatilamadi: altyazi moduna DUSULMEZ; arayuz 'STT yok' durumunu gosterir."""
         self.olay.emit("log", f"✖ ses yakalama başlatılamadı: {neden} — transkript yazılamayacak "
                               "(Teams altyazı metni transkripte girmez)")
-        durum = {"durum": "kesinti", "bas": time.time(), "bekleyen": 0, "kayit": False, "eksik": [],
+        durum = {"durum": "kesinti", "bas": saat.simdi(), "bekleyen": 0, "kayit": False, "eksik": [],
                  "hata": str(neden)[:200]}
         self.motor.stt_durumu_ayarla(durum)
         self.olay.emit("stt_durum", durum)
@@ -170,8 +205,8 @@ class YakalamaIsi(QtCore.QThread):
             ekran_okuyucu(True)
             try:
                 self.durum.emit("Teams'te altyazı bekleniyor…")
-                bekleme_bas, deneme, ipucu_verildi = time.time(), 0, False
-                pencere_yok_sn, son_pencere_kontrol = 0.0, time.time()
+                bekleme_bas, deneme, ipucu_verildi = saat.simdi(), 0, False
+                pencere_yok_sn, son_pencere_kontrol = 0.0, saat.simdi()
                 while not self._dur:
                     stt_kesik = False
                     if self.ses_servisi is not None:
@@ -189,14 +224,14 @@ class YakalamaIsi(QtCore.QThread):
                         self.olay.emit("log", "ses akıyor, yakalama başladı (altyazı yok: konuşmacı adları "
                                               "'Bilinmeyen' olur)")
                         self.durum.emit("Yakalanıyor (ses) — altyazı yok")
-                    if (not basladi and not ipucu_verildi and time.time() - bekleme_bas > 20
+                    if (not basladi and not ipucu_verildi and saat.simdi() - bekleme_bas > 20
                             and not self.ayar.get("altyazi_otomatik", True)):
                         ipucu_verildi = True
                         self.olay.emit("log", "altyazı görünmüyor. Konuşmacı adları için Teams'te bir kez: "
                                               "… → Ayarlar → Erişilebilirlik → 'Toplantılarımda her zaman alt yazıları göster'")
                     # --- toplanti penceresi kapandi mi? (altyazi olmadan bitisi anlamak icin, 5 sn'de bir)
-                    if basladi and self.ses_servisi and time.time() - son_pencere_kontrol > 5:
-                        son_pencere_kontrol = time.time()
+                    if basladi and self.ses_servisi and saat.simdi() - son_pencere_kontrol > 5:
+                        son_pencere_kontrol = saat.simdi()
                         try:
                             from yakalayici import toplanti_penceresi_var
                             if toplanti_penceresi_var():
@@ -210,7 +245,7 @@ class YakalamaIsi(QtCore.QThread):
                         except Exception:
                             pass
                     if (not basladi and self.ayar.get("altyazi_otomatik", True) and deneme < 2
-                            and time.time() - bekleme_bas > 8 * (deneme + 1)):
+                            and saat.simdi() - bekleme_bas > 8 * (deneme + 1)):
                         deneme += 1
                         basarili = False
                         try:
@@ -377,3 +412,189 @@ class LlmTaniIsi(QtCore.QThread):
         except Exception as e:                # tani uygulamayi hicbir zaman dusurmez
             satirlar, basarili = [f"LLM sunucusu denetlenemedi: {llm.hata_metni(e)}"], False
         self.bitti.emit(satirlar, basarili)
+
+
+# ---------------------------------------------------------------- arka plan yardimcilari (COM / UIA / ag)
+
+class ArkaIs(QtCore.QThread):
+    """Arayuzu dondurmamasi gereken tek seferlik blokaj: fn(*args) arka planda calisir. Sonuc bitti(object), istisna
+    hata(str) (+ hata.log). Outlook COM islevleri (outlook.com_icinde) kendi thread'lerinde CoInitialize yapar;
+    uia=True ise bu thread'de uiautomation baslaticisi kurulur (Teams pencere basliklari icin)."""
+    bitti = QtCore.pyqtSignal(object)
+    hata = QtCore.pyqtSignal(str)
+
+    def __init__(self, fn, *args, uia=False, ad="arka-is"):
+        super().__init__()
+        self.fn, self.args, self.uia = fn, args, uia
+        self.setObjectName(ad)
+        self.calisan_thread = None          # test: islevin calistigi thread (ana thread olmamali)
+
+    def run(self):
+        self.calisan_thread = threading.current_thread()
+        cm = _UIA_THREAD() if (self.uia and _UIA_THREAD) else contextlib.nullcontext()
+        try:
+            with cm:
+                sonuc = self.fn(*self.args)
+        except Exception as e:
+            hata_logla(traceback.format_exc())
+            self.hata.emit(f"{type(e).__name__}: {e}")
+            return
+        self.bitti.emit(sonuc)
+
+
+def takvim_sorgula():
+    """Teams penceresindeki toplanti adi (UIA) + Outlook takvimi (COM) -> {"teams_adi", "secilen", "adaylar", "skor"}.
+    ArkaIs(takvim_sorgula, uia=True) ile calistirilir; UIA/COM hatasi bos sonuc verir (asla firlatmaz)."""
+    teams_adi = ""
+    try:
+        from yakalayici import teams_pencere_basliklari, toplanti_adi_cikar
+        for b in teams_pencere_basliklari():
+            ad = toplanti_adi_cikar(b)
+            if ad:
+                teams_adi = ad
+                break
+    except Exception:
+        pass
+    try:
+        secilen, adaylar, skor = outlook.toplanti_esle(teams_adi)
+    except Exception:
+        secilen, adaylar, skor = None, [], 0.0
+    return {"teams_adi": teams_adi, "secilen": secilen, "adaylar": adaylar, "skor": skor}
+
+
+def stt_saglik_testi(adres, model, anahtar, verify):
+    """Ayarlar -> 'STT servisini test et' (ag istegi; arayuz thread'inde calistirilmaz). -> (ulasilabilir, neden)."""
+    import ses as ses_mod
+    ist = ses_mod.SttIstemci(adres, model=model, api_key=anahtar, verify=verify)
+    tamam = bool(ist.saglik())
+    return tamam, getattr(ist, "saglik_hatasi", None)
+
+
+# ---------------------------------------------------------------- onceki oturumun STT kesinti kuyrugu
+
+def kesinti_bekleyenleri(kok=None):
+    """Onceki oturumdan diskte kalan STT kesinti kuyrugu (<toplanti>/olcum/kesinti/*.json) -> [(klasor, klip_sayisi)]."""
+    kok = kok or motor_mod.KOK
+    try:
+        adlar = sorted(os.listdir(kok))
+    except OSError:
+        return []
+    sonuc = []
+    for ad in adlar:
+        klasor = os.path.join(kok, ad)
+        try:
+            n = sum(1 for f in os.listdir(os.path.join(klasor, "olcum", "kesinti")) if f.endswith(".json"))
+        except OSError:
+            continue
+        if n and os.path.exists(os.path.join(klasor, "meta.json")):
+            sonuc.append((klasor, n))
+    return sonuc
+
+
+class Duraklatildi(RuntimeError):
+    """KesintiDevamIsi duraklatilirken STT cagrisi yerine firlatilir: klip diskte kalir (stt.kesinti_hatasi_mi True)."""
+
+
+class KesintiDevamIsi(QtCore.QThread):
+    """Acilista: onceki oturumdan kalan STT kesinti kuyruklarini (klasorler: [(klasor, klip_sayisi)]) STT ayaktaysa
+    cozer. Her klasor Motor.yukle ile acilir, SesServisi yalniz diskteki kuyrugu bosaltir (yakalama baslatilmaz),
+    cozulen satirlar motora gider; sonunda motor.bitir (acik parca diske + ozet). Not yeniden uretilmez: Gecmis -> Yeniden
+    ozetle. durdur(): kalan klipler diskte kalir (sonraki acilista devam). Hata uygulamayi dusurmez."""
+    olay = QtCore.pyqtSignal(str, object)
+    bitti = QtCore.pyqtSignal(int, int)               # (cozulen klip, kuyrukta kalan klip)
+
+    KESINTI_BEKLE_SN = 60                             # STT bu kadar suredir yine kesikse vazgec (klipler diskte kalir)
+
+    def __init__(self, klasorler, terimler, ayar=None, duzelt=True, servis_fabrikasi=None):
+        super().__init__()
+        self.klasorler, self.terimler = list(klasorler), terimler
+        self.ayar, self.duzelt = ayar or {}, duzelt
+        self.servis_fabrikasi = servis_fabrikasi          # test: fn(motor, klasor) -> SesServisi benzeri
+        self._dur = False
+        self._servis = None
+
+    def durdur(self):
+        self._dur = True
+        sv = self._servis
+        if sv is not None:
+            try:
+                sv._dur.set()                             # bekci dongusu bir sonraki turda cikar
+            except Exception:
+                pass
+
+    def _log(self, m):
+        self.olay.emit("log", m)
+
+    def run(self):
+        cozulen = kalan = 0
+        try:
+            for klasor, n in self.klasorler:
+                if self._dur:
+                    kalan += n
+                    continue
+                try:
+                    c, k = self._bir(klasor, n)
+                except Exception as e:
+                    hata_logla(traceback.format_exc())
+                    self._log(f"✖ kesinti kuyruğu çözülemedi ({os.path.basename(klasor)}): {type(e).__name__}: {e}")
+                    c, k = 0, n
+                cozulen += c
+                kalan += k
+        finally:
+            self.bitti.emit(cozulen, kalan)
+
+    def _servis_kur(self, m, klasor):
+        if self.servis_fabrikasi:
+            return self.servis_fabrikasi(m, klasor)
+        import ses as ses_mod
+        a = self.ayar
+        return ses_mod.SesServisi(
+            a.get("stt_url", ""), ipucu_fn=lambda akis=None: m.terimler.prompt(m.seri, list(m.katilimcilar)),
+            mod="otomatik", olay=lambda t, v: self.olay.emit(t, v) if t == "log" else None, olay_fn=m.ses_olayi,
+            model=a.get("stt_model", "whisper"), api_key=a.get("stt_key", ""), proxy=a.get("stt_proxy", True),
+            verify=ayar_mod.tls_dogrulama(a), esikler=a.get("esikler"), stt_ipucu=bool(a.get("stt_ipucu", True)),
+            stt_repetition_penalty=a.get("stt_repetition_penalty"), kesinti_klasor=klasor)
+
+    def _bir(self, klasor, n):
+        ad = os.path.basename(klasor)
+        m = Motor.yukle(klasor, self.terimler, olay=lambda t, v: self.olay.emit(t, v), duzelt=self.duzelt,
+                        ben=outlook.ben_adi(self.ayar), sablon=self.ayar.get("not_sablonu", "genel"))
+        try:
+            servis = self._servis_kur(m, klasor)
+            self._servis = servis
+            if not servis.stt.saglik():
+                self._log(f"! önceki oturumdan {n} ses klibi çözülmeyi bekliyor ({ad}); STT şu an ulaşılamıyor, "
+                          "sonraki açılışta yeniden denenecek")
+                return 0, n
+            self._log(f"önceki oturumdan {n} ses klibi çözülüyor ({ad})…")
+            orijinal = servis._coz
+
+            def coz(p):                                   # duraklatma: klip diskte kalir, sira korunur
+                if self._dur:
+                    raise Duraklatildi("kesinti kuyruğu duraklatıldı")
+                return orijinal(p)
+            servis._coz = coz
+            servis._bekci_baslat()
+            bekci = getattr(servis, "_bekci", None)
+            while bekci is not None and bekci.is_alive():
+                bekci.join(1.0)
+                kesinti = getattr(servis, "_kesinti_bas", None)
+                if kesinti is not None and saat.simdi() - kesinti > self.KESINTI_BEKLE_SN and not self._dur:
+                    self._log("! STT kuyruk çözülürken yine kesildi; kalan klipler sonraki açılışa bırakıldı")
+                    self.durdur()
+            kuyruk = getattr(servis, "_kesinti_kuyrugu", None)
+            kalan = kuyruk.sayi() if kuyruk is not None else 0
+            m.bitir()                                     # acik parca diske + ozet; durum 'bitti' (not yeniden uretilebilir)
+            cozulen = max(0, n - kalan)
+            if cozulen:
+                self._log(f"✔ {ad}: {cozulen} klip çözüldü" + (f", {kalan} klip hâlâ bekliyor" if kalan else "")
+                          + "; notu yenilemek için Geçmiş → Yeniden özetle")
+            elif kalan:
+                self._log(f"! {ad}: {kalan} klip çözülemedi, diskte duruyor")
+            return cozulen, kalan
+        finally:
+            self._servis = None
+            try:
+                m.kapat()
+            except Exception:
+                pass

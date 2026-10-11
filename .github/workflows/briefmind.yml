@@ -47,6 +47,11 @@ jobs:
       - name: Testler
         working-directory: briefmind
         run: python -m pytest tests -q
+      - name: Duman testi (kaynaktan, Windows)
+        # pencere offscreen kurulur, paketlenecek moduller ve veri/ yoklanir; cikis kodu 0 degilse adim kirmizi
+        if: runner.os == 'Windows'
+        working-directory: briefmind
+        run: python app.py --duman
 
   build:
     name: exe (PyInstaller)
@@ -59,7 +64,7 @@ jobs:
         with:
           python-version: '3.9'
       - name: Bagimliliklar
-        run: pip install -r briefmind/requirements.txt pyinstaller pillow
+        run: pip install -r briefmind/requirements.txt pyinstaller==6.22.3 pillow==11.3.0
       - name: Derle (derle.bat mantigi)
         working-directory: briefmind
         shell: bash
@@ -74,10 +79,26 @@ jobs:
             --collect-all uiautomation --collect-all soundcard --collect-all sounddevice --collect-all soundfile \
             --hidden-import win32com --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes \
             --hidden-import PyQt5.QtSvg \
+            --hidden-import konusmaci --hidden-import stt --hidden-import ses --hidden-import saat --hidden-import terim \
+            --hidden-import duzelt --hidden-import kelime --hidden-import rag --hidden-import tarih --hidden-import metin \
             --add-data "veri;veri" \
             app.py
           cp config.example.json dist/BriefMind/
           mkdir -p dist/BriefMind/toplantilar
+      - name: Duman testi (exe ekransiz acilir, cikis kodu 0)
+        # app.py --duman: pencereyi offscreen kurar; paketlenen modulleri (konusmaci, stt, saat, terim, duzelt, kelime, rag,
+        # ses ...) ve veri/yaygin_kelimeler.txt'yi yoklar; sonuc %LOCALAPPDATA%\BriefMind\duman.txt
+        shell: pwsh
+        timeout-minutes: 5
+        working-directory: briefmind
+        run: |
+          $p = Start-Process -FilePath "dist/BriefMind/BriefMind.exe" -ArgumentList "--duman" -PassThru
+          $bitti = $p.WaitForExit(120000)
+          if ($bitti) { $p.WaitForExit() }
+          $yol = Join-Path $env:LOCALAPPDATA "BriefMind/duman.txt"
+          if (Test-Path $yol) { Get-Content $yol }
+          if (-not $bitti) { $p.Kill(); throw "duman testi 120 sn icinde bitmedi" }
+          if ($p.ExitCode -ne 0) { throw "duman testi basarisiz (cikis kodu $($p.ExitCode))" }
       - uses: actions/upload-artifact@v4
         with:
           name: BriefMind

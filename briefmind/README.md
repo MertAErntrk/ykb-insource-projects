@@ -2,7 +2,7 @@
 
 Microsoft Teams toplantılarını **yerel makinede** dinleyip (ses + canlı altyazı), kurum içi
 Whisper STT ve LLM servisleriyle yapılandırılmış toplantı notu üreten Windows masaüstü uygulaması.
-Ses hiçbir yere kaydedilmez; yalnızca metin diske yazılır. Tüm işleme kurum içi servislerde yapılır.
+Varsayılan ayarlarda ses hiçbir yere kaydedilmez; yalnızca metin diske yazılır (isteğe bağlı kayıtlar için bkz. Gizlilik). Tüm işleme kurum içi servislerde yapılır.
 
 ## Mimari
 
@@ -42,6 +42,15 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 | `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, terim aktarma ve geri alma, LLM teşhisi, taşmış transkript temizliği) |
 | `deploy/` | GPU'suz Whisper servisi için OpenShift manifestleri (CPU, faster-whisper) |
 
+## Nasıl çalışır (v3)
+
+- **Konuşmacı zamandan bulunur.** Metin Whisper'dan gelir; konuşmacı, klibin zaman aralığının Teams altyazı çizelgesiyle kesişmesinden bulunur (metin eşlemesi yok). Karar gelene kadar satır "beklemede…" görünür.
+- **Gösterim.** `Ad` (güven ≥ 0,7); `Ad?` (ad var ama güven düşük); `Bilinmeyen` (kimse yok); `A → B` (klipte sıralı devir); `A / B (aynı anda)` (çakışma: bu satırdan karar ya da aksiyon çıkmaz, metin ⟨⟩ içinde).
+- **Terimler otomatik.** Terim düzeltmesi ve öğrenme onay istemez; LLM yalnızca öneri verir, kelime sınırı, ek uyumu ve sayı/tarih kapıları karar verir.
+- **Belirsizler paneli.** Kararsız kelimeler, emin olunmayan konuşmacılar ve şüpheli klipler Not sekmesinde salt okunur listelenir; `ts:` bağlantısı transkripti o ana açar. Şüpheli klip nota girmez.
+- **Sahiplik temkinli.** Sorumlu ataması kesin kaynaklarla sınırlanır (Faz 4, devam ediyor); belirsiz sahipler e-posta ve Jira taslağına girmez.
+- **Ölçüm araçları.** `tools/olcum.py` (WER, SER, belirsiz oranı), `tools/etiketle.py` (klip etiketleme), `tools/replay.py` (kaydı çevrimdışı yeniden işletme). Kayıt yalnızca `olcum_kaydi` açıkken yazılır.
+
 ## Kurulum
 
 ```powershell
@@ -60,6 +69,7 @@ python app.py
 | `llm_akis` | (varsayılan `true`) LLM istekleri akışlı (`stream`) gönderilir: OpenShift route'unun boşta kalma zaman aşımına (varsayılan 30 sn) uzun özetlerde takılmaz. `false`: eski akışsız istek |
 | `llm_proxy` | (varsayılan `false`) `true`: LLM'e Windows/sistem proxy'si (`HTTPS_PROXY`) üzerinden bağlanılır. Adres tarayıcıda açılıyor ama uygulama "ulaşılamadı" diyorsa denenir |
 | `llm_key`, `llm_tekrar`, `llm_zaman_asimi` | (isteğe bağlı) LLM Bearer anahtarı (sunucu `--api-key` ile açıldıysa); hata sonrası yeniden deneme sayısı (varsayılan 1); istek zaman aşımı (sn, varsayılan 300) |
+| `llm_dusunme_butcesi` | (isteğe bağlı, varsayılan `1500`) Düşünmeli LLM çağrılarında vLLM `thinking_token_budget` alanı olarak gönderilir; düşünme `max_tokens`'in tamamını yiyip cevabı boş bırakamaz (cevaba en az %40 kalır). `0`: alan gönderilmez. Sunucu alanı 400 ile reddederse oturum boyunca gönderilmez ve Olaylar'a bir kez yazılır |
 | `parca_token`, `paralel` | (isteğe bağlı) Canlı parça boyutu (token) ve aynı anda işlenen parça sayısı; boşsa pencereye göre (16k: 3000/2, 32k+: 4000/2) |
 | `stt_url`, `stt_model`, `stt_key` | OpenAI uyumlu STT adresi (`/v1/audio/transcriptions`), model, Bearer anahtarı |
 | `kaynak` | Yalnız `ses`: metin Whisper'dan, konuşmacı Teams altyazısının **zamanından**. `ikisi` ve `altyazi` kaldırıldı (eski değer `ses` sayılır). STT erişilemezse altyazı moduna düşülmez: Canlı sekmesinde "STT yok — transkript eksik (hh:mm–hh:mm)" şeridi, notta aynı satır |
@@ -176,8 +186,9 @@ sekmesinden elle (**Run workflow**) tetiklenince Windows'ta exe derlenir ve `Bri
 
 ## Gizlilik ve uyum
 
-- Ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir. Tek istisna kapalı gelen
-  `olcum_kaydi` ayarıdır (yukarıdaki Ölçüm bölümü; yerel, repo dışı).
+- Varsayılan ayarlarda ses diske yazılmaz; STT'ye giden parça bellekte tutulur, yanıt gelince silinir. Tek
+  istisnalar, varsayılan kapalı olan `olcum_kaydi` (yukarıdaki Ölçüm bölümü) ve `kesinti_kaydi` (STT kesilince
+  klipleri `olcum/kesinti/` altına yazar) ayarlarıdır; ikisi de yerel ve repo dışıdır.
 - Embedding açıksa transkript pencereleri yalnızca kurum içi embedding servisine gönderilir; vektörler toplantı klasöründe (bilgisayarda) kalır, merkezi bir veritabanına yazılmaz.
 - `config.json`, `toplantilar/`, `terimler/` (terim havuzu) ve eski `sozluk.json` `.gitignore`'dadır; repoya girmez.
 - Kurum içi adresler yer tutucudur; gerçek adresler yalnızca `config.json`'da durur.

@@ -194,15 +194,17 @@ def test_konusma_paylari_meta_json_a_yazilir(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "bolum_ozetle", lambda *a, **k: {"ozet": "MVP konuşuldu.", "konular": [],
                                                               "kararlar": [], "aksiyonlar": []})
     m = _motor(tmp_path, isle=True)
-    m.satir_ekle({"ts": "10:00:00", "speaker": "Selin Kara", "text": "MVP prototipini ben hazırlarım"})
-    m.satir_ekle({"ts": "10:00:10", "speaker": "Emre Sancak", "text": "Test ortamı hazır olacak"})
+    m.satir_ekle({"ts": "10:00:00", "speaker": A_, "text": "MVP prototipini ben hazırlarım",
+                  "spk_guven": 0.9}, kaynak="ses")                 # kesin konusmaci (altyazi yedegi 'Ad?' sayilir, paya girmez)
+    m.satir_ekle({"ts": "10:00:10", "speaker": B_, "text": "Test ortamı hazır olacak",
+                  "spk_guven": 0.9}, kaynak="ses")
     m.parca_kapat("test")
     import concurrent.futures as cf
     cf.wait(m.isler)
     monkeypatch.setattr(llm, "birlestir", lambda *a, **k: "## Özet\nMVP konuşuldu.\n")
     not_md = m.notu_uret()
     meta = json.loads((tmp_path / "t" / "meta.json").read_text(encoding="utf-8"))
-    assert meta["durum"] == "tamam" and meta["konusma_paylari"][0][0] == "Selin Kara"
+    assert meta["durum"] == "tamam" and meta["konusma_paylari"][0][0] == A_ and meta["konusma_belirsiz"] == 0
     assert "Konuşma payı" not in not_md
     m.kapat()
 
