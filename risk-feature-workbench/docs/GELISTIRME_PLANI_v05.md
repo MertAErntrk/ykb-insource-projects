@@ -98,8 +98,8 @@ Ek olarak sözleşmeye uyum, sıra bağımsızlığı ve eşik dışı sızınt�
     - İki ayrı süreç aynı anda ad alanı açarsa biri hata alır; uygulama tek süreç olduğu için kabul edildi.
 - **Teslim.**
   - Türkçe son rapor.
-  - Commit.
-  - Push etmeden önce dal kullanıcıya sorulur.
+  - Commit d40a7a9, yerel `risk-feature-workbench-v05` dalında. Tam paket 375/375.
+  - Push etmeden önce dal kullanıcıya sorulur. origin/main 4 BriefMind commit'i önde; bu projeye dokunmuyorlar.
 
 ## Kurum ortamında doğrulanmamış olanlar
 - Gerçek Oracle katalog boyutu ve tarama süresi.
