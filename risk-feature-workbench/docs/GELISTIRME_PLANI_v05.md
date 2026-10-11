@@ -101,6 +101,19 @@ Ek olarak sözleşmeye uyum, sıra bağımsızlığı ve eşik dışı sızınt�
   - Commit d40a7a9, yerel `risk-feature-workbench-v05` dalında. Tam paket 375/375.
   - Push etmeden önce dal kullanıcıya sorulur. origin/main 4 BriefMind commit'i önde; bu projeye dokunmuyorlar.
 
+## Faz 6 — Kurum ortamında başarı ölçümü
+İş bilgisayarındaki ilk koşu (EDWLIVE / DM_CAD, 7.410 kolon, 273 satır): ekranda "Tamamlandı" yazdığında anlamsal indeks %71'deydi. Analiz, başladığı andaki indeksle çalışıyor. Kullanıcı eşleşmeleri zayıf buldu; önce ölçülecek, sonra geliştirilecek.
+
+| Paket | İçerik | Ajan / model | Durum |
+|---|---|---|---|
+| P18a | evaluate.py gerçek mod: `--resources-dir` (web indeksini yeniden kullanır), boş etiket = etiketsiz, TABLO.KOLON çözümü, satır bazlı ıska teşhisi (`satirlar.json`, `iskalar.md`), katalog özeti (`katalog_ozet.*`), kapsam uyarısı | builder / Opus → reviewer / Sonnet | tamam. İnceleme: 2 küçük bulgu (atlanan satırlar görünmüyordu). Ana oturum düzeltti: girdi hatasıyla atlanan satırlar raporda; etiket sütunu olmayan sayfalar ölçüm dışı (+1 test) |
+| P18b | `scripts/etiket_sablonu.py`: web sonuç Excel'inden etiketleme dosyası (aday yolları hazır, tabakalı örnek) | builder / Sonnet → reviewer / Sonnet | tamam. İncelemenin "kritik" bulgusu eski `parse_label`'a göreydi (P18a ile çözüldü). Ana oturum: şablon → `load_rows` testi eklendi, 2 parçalı aday notu |
+| P18c | Ölçüm aracı web ile aynı bağlantı ve model ayarlarıyla (`login_settings` + `probe_oracle` + `discover_model` + `build_run`); config dosyası gerekmez | builder / Opus → 2 reviewer / Opus (sır sızıntısı; web eşdeğerliği + PS 5.1) | tamam. İlk reviewer sonuç döndürmeden durdu; inceleme iki dar bakışla yeniden koşuldu: 3 küçük bulgu. Ana oturum düzeltti: kullanıcının kendi şeması listelenmez, sır karşılaştırması büyük/küçük harf duyarsız, göreli `-Excel`/`-Config` çağrılan klasöre göre çözülür; ek olarak `-EmbeddingModel`/`-LlmModel` (+2 test). Tam paket 397/397; sentetik 51 satır değişmedi (hash 0.976 / 0.992 / 0/10). Kurum ağında koşulmadı |
+
+Ölçümden sonra (kullanıcı onayıyla):
+- İndeks şema seçilince başlasın; eksik indeksle çalıştırmada sorulsun; iş "Tamamlandı (kısmi anlamsal kapsam)" olsun; kısmi satırlar için "Yeniden ara".
+- Kalite: ıska sınıflarına göre (sözlükte olmayan kısaltmalar, boş kolon yorumları, z eşiği, konu kelimesi kuralı).
+
 ## Kurum ortamında doğrulanmamış olanlar
 - Gerçek Oracle katalog boyutu ve tarama süresi.
 - Gerçek embedding modelinin kimliği ve kalitesi.

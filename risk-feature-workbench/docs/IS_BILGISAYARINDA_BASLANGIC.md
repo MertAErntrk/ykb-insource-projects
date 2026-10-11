@@ -68,18 +68,33 @@ Model desteği açık analiz, değişken adı/açıklaması ile katalog metadata
 
 ## 5. Doğrulama betiği (`scripts\is_pc_dogrulama.ps1`)
 
-Gerçek ortamda ölçüm içindir. Önce `config\real.example.json` dosyasını `config\real.json` olarak kopyalayıp doldurun (`allow_real_connections: true`; sır yazmayın, `*_env` alanları ortam değişkeni **adlarını** taşır). Tanımsız Oracle ortam değişkenleri için betik yalnız o süreçte, diske yazmadan ister. `config\real.json` git dışında tutulur (`.gitignore`). Embedding servisi anahtar istiyorsa betikten önce aynı oturumda `$env:RISK_EMBEDDING_API_KEY` (ya da `embedding.api_key_env` alanındaki ad) ayarlanır; betik bu değişken yoksa yalnız uyarır.
+Betik web uygulamasıyla **aynı** bağlantı ve model ayarlarını kullanır; `config\real.json` gerekmez. Oracle bağlantısı web'deki sabit kurum adresinden (EDWLIVE, LIVE) açılır, container ve erişilebilir şemalar bağlantı testinden okunur; embedding (ve `-Llm` ile LLM) web'deki gibi kurum servis adresinden keşfedilir; arama modu web varsayılanıdır (hızlı). Önce **web uygulamasını kapatın**: betik web'in katalog/vektör önbelleğini (`runtime\web`) yeniden kullanır.
+
+**1) Etiketleme dosyası.** Web'de analizi çalıştırıp sonuç Excel'ini indirin, sonra şablonu üretin:
 
 ```powershell
-# Yalnız probe (embedding gecikmesi, parmak izi, doğrulama)
-powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Config config\real.json
-
-# Etiketli Excel ile havuz/kapı taraması + uçtan uca koşu + tutarlılık
-powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Config config\real.json `
-    -Excel C:\yol\etiketli.xlsx -LabelColumn "Beklenen kolon" -Rows 100 -GroupSize 25
+.venv\Scripts\python.exe scripts\etiket_sablonu.py --rapor C:\yol\sonuclar.xlsx --cikti C:\yol\etiketleme.xlsx --ornek 60
 ```
 
-Parametreler: `-Config` (varsayılan `config\real.json`), `-Excel`, `-LabelColumn` (varsayılan "Beklenen kolon"), `-Rows` (0 = tümü), `-GroupSize` (25), `-StateDir` (önbellek dizini; boşsa geçici). Çıktı `runtime\dogrulama\<zaman>\` altında `rapor.md`, `rapor.json`, `havuz.json`. Excel'li koşu uzun sürebilir.
+`Etiket` sayfasındaki `Beklenen kolon` sütununu doldurun (kurallar `Nasıl` sayfasında):
+
+- `SCHEMA.TABLO.KOLON` ya da `TABLO.KOLON` (yalnız tek şemadaysa); birden çok doğru kolon `;` ile.
+- `YOK` ya da `-` = katalogda karşılığı yok. Boş hücre = **etiketsiz**, ölçüme girmez.
+- Katalogda olmayan, belirsiz ya da biçimi bozuk etiket **geçersiz** sayılır; ilk 10'u `rapor.md`'de nedeniyle listelenir.
+
+**2) Ölçüm (tek komut, proje kökünden):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Schemas DM_CAD -Excel C:\yol\etiketleme.xlsx -BuildIndex
+```
+
+Betik EDWLIVE kullanıcı adını ve parolasını (gizli) sorar; embedding anahtarı tanımlı değilse sorar (anahtar gerekmiyorsa Enter). Değerler yalnız bu PowerShell sürecinde tutulur, diske yazılmaz.
+
+Parametreler: `-Schemas` (zorunlu; ör. `"DM_CAD,DM_RISK"`, web'de seçtiğiniz şemalar), `-Excel`, `-LabelColumn` ("Beklenen kolon"), `-BuildIndex` / `-IndexTimeout` (eksik anlamsal indeksi önce tamamlar; 3600 sn), `-Llm` (web'deki "LLM yorumu"), `-NoEmbedding` (yalnız ad/metin araması), `-EmbeddingModel` / `-LlmModel` (servis birden çok model sunuyorsa web'de seçtiğiniz model kimliği), `-Rows` (0 = tümü), `-GroupSize` (25), `-ResourcesDir` (`runtime\web`). `-Config config\real.json` verilirse eski yol (config + ortam değişkenleri) çalışır.
+
+**3) Paylaşılacak dosyalar.** Betik bitince çıktı klasörünü (`runtime\dogrulama\<zaman>\`) yazar. Paylaşın: `rapor.md`, `iskalar.md`, `katalog_ozet.md`. Ayrıntı gerekirse: `satirlar.json`, `katalog_ozet.json`, `havuz.json`.
+
+> Gizlilik: çıktılar yalnız metadata içerir (talep adı/açıklaması, kolon/tablo adları ve yorumları, sayılar, embedding model kimliği ve boyutu). Kullanıcı adı, parola, API anahtarı, DSN ve servis adresleri hiçbir dosyaya ve hata mesajına yazılmaz. Müşteri verisi okunmaz.
 
 ## 6. Sorun giderme
 
