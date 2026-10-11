@@ -23,19 +23,35 @@ test_unrecognized_sheet_and_formula_exposed (test_excelio.ExcelTests) ... ok
 test_bad_ca_file_is_reported_without_network (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_default_built_in_addresses_are_available_without_endpoint_fields (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_embedding_base_root_probes_openai_and_reads_dimension (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_embedding_missing_metadata_still_checks_verified_server_default_route (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_embedding_tei_fallback_after_missing_openai_list (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_entering_model_after_server_default_cannot_fake_verified_identity (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_explicit_empty_model_endpoint_auto_detects_response_path (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_explicit_endpoint_404_does_not_trigger_alternative_inference (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_explicit_named_custom_and_tei_templates_remain_supported (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_explicit_named_model_placeholder_contract_remains_supported (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_explicit_server_default_base_only_does_not_need_metadata (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_explicit_template_can_be_verified_without_discovery (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_fundamental_network_auth_errors_stop_without_fallback_or_raw_details (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_invalid_embedding_vector_and_dimension_mismatch_fail (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_invalid_urls_foreign_hosts_and_embedded_secret_templates_do_not_connect (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_list_success_is_not_inference_success (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_llm_base_discovers_one_model_and_validates_actual_application_contract (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_metadata_auth_failure_prevents_model_free_fallback (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_metadata_verified_named_model_can_keep_input_only_contract (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_model_free_404_or_bad_vector_does_not_claim_success_or_repeat_metadata (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_model_free_request_400_or_422_requires_contract_confirmation (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_multiple_models_require_selection_and_do_not_infer_arbitrarily (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_named_model_stays_explicit_when_metadata_is_unavailable (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_non_json_or_huge_metadata_rejected_without_inference (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_openai_models_but_no_embeddings_route_can_verify_tei (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_server_default_cannot_sneak_model_identity_or_model_parameter (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_server_default_custom_template_and_response_path_are_preserved (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_server_default_explicit_retest_goes_directly_to_inference (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_tei_route_fallback_does_not_replace_explicit_custom_contract (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_total_deadline_bounds_later_calls (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_unknown_selected_model_is_not_silently_substituted (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_wrong_explicit_response_path_is_not_silently_overridden (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_context_failure_is_not_reported_as_schema_failure (test_oracle_diagnostics.OracleDiagnosticsTests) ... ok
 test_discovery_does_not_scan_column_catalog (test_oracle_diagnostics.OracleDiagnosticsTests) ... ok
 test_login_failure_skips_all_queries (test_oracle_diagnostics.OracleDiagnosticsTests) ... ok
@@ -114,6 +130,16 @@ test_incompatible_keys_grain_reference_block (test_semantics.ProductionTests) ..
 test_production_candidate_with_verified_inputs (test_semantics.ProductionTests) ... ok
 test_unready_operand_blocks (test_semantics.ProductionTests) ... ok
 test_zero_without_null_blocks_production (test_semantics.ProductionTests) ... ok
+test_default_contract_requires_explicit_choice_and_rejects_identity_conflicts (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_default_embedding_neither_reads_nor_writes_persisted_vectors (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_exact_no_model_payload_and_conservative_single_item_batches (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_explicit_embedding_and_llm_still_require_model_and_version (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_named_deployment_label_is_unverified_and_cannot_enable_persistent_cache (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_no_model_contract_still_requires_exact_dimensions_and_finite_numbers (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_repeated_real_analysis_does_not_resume_named_deployment_checkpoint (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_repeated_real_analysis_does_not_resume_unknown_model_checkpoint (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_verified_openai_response_path_is_supported_without_model_identity (test_server_default_embedding.DefaultEmbeddingRuntimeTests) ... ok
+test_verified_model_free_probe_settings_run_two_rows_with_named_llm (test_server_default_web.ServerDefaultWebTests) ... ok
 test_catalog_limit_prevents_absence_claim (test_web.WebTests) ... ok
 test_credentials_are_per_connection_not_global_environment (test_web.WebTests) ... ok
 test_csrf_and_cross_origin_rejected (test_web.WebTests) ... ok
@@ -146,7 +172,7 @@ test_schema_selection_required_and_must_come_from_login (test_web_workflow.Workf
 test_standard_excel_can_run_without_mapping_payload (test_web_workflow.WorkflowTests) ... ok
 
 ----------------------------------------------------------------------
-Ran 146 tests in 16.514s
+Ran 172 tests in 14.705s
 
 OK
 Yapılandırma biçimi doğrulandı. Ağ bağlantısı denenmedi.

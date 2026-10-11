@@ -23,7 +23,7 @@ ALIASES = {"name":["Alan Adı","Değişken Adı","Kolon Adı","Variable Name","C
 PROFILE_KEYS = {
     "oracle": {"dsn","user","source_database","environment","container","schemas","wallet_dir","max_records"},
     "llm": {"base_url","endpoint","model","model_version","contract","request_template","response_path","models_endpoint","ca_file"},
-    "embedding": {"base_url","endpoint","model","model_version","dimensions","request_template","response_path","models_endpoint","ca_file"},
+    "embedding": {"base_url","endpoint","model","model_version","model_selection","max_batch","dimensions","request_template","response_path","models_endpoint","ca_file"},
 }
 
 
@@ -95,12 +95,16 @@ def model_config(raw,name):
     endpoint=text(value.get("endpoint"),label+" tam çağrı adresi",True)
     parts=urlsplit(endpoint)
     if parts.query:raise ConfigError(label+" adresine anahtar veya sorgu parametresi eklemeyin.")
+    selection=value.get("model_selection","explicit") if name=="embedding" else "explicit"
+    if selection not in ("explicit","server_default"):raise ConfigError("Embedding model seçimi geçersiz.")
+    require_identity=selection!="server_default"
     config={"endpoint":endpoint,"allowed_hosts":[parts.hostname],
-            "model":text(value.get("model"),label+" model kimliği",True),
-            "model_version":text(value.get("model_version"),label+" model sürümü",True),
+            "model":text(value.get("model"),label+" model kimliği",require_identity),
+            "model_version":text(value.get("model_version"),label+" model sürümü",require_identity),
             "timeout_seconds":30,"max_retries":1}
     if name=="llm":config.update(contract=value.get("contract",""),max_candidates=8,max_chars=1800,max_output_tokens=1200)
-    else:config.update(dimensions=value.get("dimensions",0),max_batch=16)
+    else:config.update(dimensions=value.get("dimensions",0),model_selection=selection,
+                       max_batch=value.get("max_batch",1 if selection=="server_default" else 16))
     for key in ("request_template","response_path","ca_file"):
         if value.get(key):config[key]=deepcopy(value[key])
     validate_endpoint(config)

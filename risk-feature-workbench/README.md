@@ -39,6 +39,8 @@ Standart başlıklar: `Kategori | Alan Adı | Alan tipi | Açıklama | Halihazı
 
 `DPY-4024`, Oracle çağrısının zaman sınırını aştığını belirtir; tek başına parola veya yetki sorunu demek değildir. Ayrıntılı ayırma adımları [bağlantı test senaryosundadır](docs/BAGLANTI_TEST_SENARYOSU.md). Gerçek kurum bağlantısı ancak iş bilgisayarındaki testle doğrulanabilir.
 
+**0.3.2:** Kurumda doğrulanan embedding servisi için model kimliğini boş bırakın. Model listesi sunulmasa da `/v1/embeddings` gerçek çağrısı test edilir; boyut ve yanıt biçimi otomatik okunur. Kullanıcının 11.10.2026 çıktısında boyut 4096'dır. Aynı model adı içermeyen istek gerçek analizde kullanılır. LLM için doğrulanan model `qwen38-27b`'dir.
+
 ## Rapor
 
 - **Sonuçlar:** orijinal alanlar, en güçlü adayın şema/tablo/kolonu, açıklaması, fiziksel ad kontrolü, iş tanımı uyumu ve uzman kararı.

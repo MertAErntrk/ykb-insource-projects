@@ -1,4 +1,4 @@
-# Kurumda bağlantı test senaryosu · 0.3.1
+# Kurumda bağlantı test senaryosu · 0.3.2
 
 Bu senaryo iş bilgisayarında **gerçek Oracle hesabınız ve kurum servislerinizle** uygulanır. Amaç, hangi bağlantı adımının çalıştığını ve hangisinin hata verdiğini ayırmaktır. Geliştirme bilgisayarındaki otomatik testler gerçek kurum erişiminin yerine geçmez.
 
@@ -51,20 +51,29 @@ Her şema için **en fazla bir katalog satırı** okunur. Çağrı başına en f
 **Bağlantılar** sayfasında iki temel adres hazırdır. Başlangıçta gelişmiş alanları doldurmanız gerekmez.
 
 1. Servis gerektiriyorsa ilgili **API anahtarını** girin.
-2. **LLM bağlantısını test et** düğmesine basın.
+2. LLM model kimliğine `qwen38-27b` yazıp **LLM bağlantısını test et** düğmesine basın.
 3. Birden fazla model dönerse **Model kimliği** listesinden kurumunuzun kullanacağı modeli seçin ve testi yineleyin.
-4. **Embedding bağlantısını test et** düğmesiyle aynı işlemi embedding için uygulayın.
+4. Embedding model kimliğini boş bırakıp **Embedding bağlantısını test et** düğmesine basın.
 
 | Kontrol | Başarı ölçütü |
 |---|---|
 | HTTPS ve sertifika ayarları | Yerel TLS/CA ayarı hazırlanır. Bu adım tek başına sunucuya erişimi kanıtlamaz. |
-| Model listesi / TEI model bilgisi | Servisin bildirdiği gerçek model kimliği okunur. Çoklu modelde kullanıcı seçimi beklenir. |
+| Model listesi / TEI model bilgisi | Varsa gerçek model kimliği okunur. Çoklu modelde kullanıcı seçimi beklenir. Embedding bu yolları sunmuyorsa model adı olmadan gerçek çağrı denenir. |
 | LLM gerçek denemesi | Küçük istek yanıtlanır ve uygulamanın beklediği JSON yanıt sözleşmesi doğrulanır. |
 | Embedding gerçek denemesi | Küçük metinden geçerli sayısal vektör alınır; boyutu gerçek yanıttan okunur. |
 
 Standart model listesi için `/v1/models`, embedding servis türüne göre `/info` gibi yollar denenir. Denenen bir yolun `404` olması, sonrasında başka uyumlu yol doğrulandıysa bütün testin başarısız olduğu anlamına gelmez. Servisin genel sonucu ile son gerçek çağrı sonucuna bakın. Yalnız model listesinin okunması da başarılı inference testi sayılmaz.
 
 Başarıda doğrulanan çağrı adresi ve sözleşme alanları otomatik doldurulur. Gerçek model sürümü bildirilmemişse `deployment:` etiketi doğrulanmış bir sürüm numarası sayılmaz. Standart sözleşme bulunamazsa **Gelişmiş / özel servis ayarları** altında servis ekibinin verdiği tam çağrı adresi ve sözleşme kullanılabilir.
+
+11.10.2026 tarihinde kullanıcının iş bilgisayarındaki script çıktısı şu iki gerçek çağrıyı doğruladı:
+
+| Servis | Doğrulanan çağrı | Beklenen uygulama sonucu |
+|---|---|---|
+| LLM | `POST /v1/chat/completions`, model `qwen38-27b` | Gerçek çağrı ve JSON yanıt sözleşmesi başarılı |
+| Embedding | `POST /v1/embeddings`, yalnız `input` alanı; model gönderilmedi | Gerçek çağrı başarılı; 4096 boyut; model kimliği ve sürümü boş |
+
+Embedding için `/v1/models`, `/models` ve `/info` adreslerindeki `404`, başarılı `/v1/embeddings` sonucunu geçersiz kılmaz. Gelişmiş ayarlardaki şablon `{"input":"{texts}"}` olur; yanıt yolu gerçek yanıta göre doldurulur. Uygulama bu sözleşmeyi asıl analizde de kullanır. Model kimliği bilinmediği için kalıcı vektör önbelleği ve eski sonuçtan devam kullanılmaz. Bu script çıktısı küçük bağlantı çağrılarını doğrular; gerçek Excel ve Oracle ile tam analizi ayrıca aşağıdaki adımlarla sınayın.
 
 | Kod / durum | Yapılacak kontrol |
 |---|---|

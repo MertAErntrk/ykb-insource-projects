@@ -1,6 +1,6 @@
 # Metadata, yerel model ve arama sözleşmeleri
 
-Bu modüller gerçek banka bağlantısı açmadan geliştirildi ve sentetik/nesne taklidi testlerle sınandı. Sağlanan Qwen adresleri yalnız **base URL** bilgisidir. Model adı, endpoint yolu, istek ve yanıt biçimi, embedding boyutu ve sürümü kurum içinde doğrulanmalıdır. Qwen3.8 ifadesi doğrulanmış bir teknik model kimliği olarak kullanılmaz.
+Bu modüller yerel geliştirmede gerçek banka bağlantısı açmadan, nesne taklidi testlerle sınanır. Kullanıcının kurum içinde çalıştırdığı 11 Ekim 2026 tanılama çıktısı, LLM için `qwen38-27b` modelini ve `/v1/chat/completions` çağrısını; embedding için model alanı olmadan `/v1/embeddings` çağrısını ve 4096 boyutlu yanıtı doğruladı. Embedding model kimliği ve sürümü bu çıktıda bulunmuyor. Web testi her bağlantıda gerçek küçük çağrı ve yanıt biçimini doğrular; model kimliği veya sürümü adres adından uydurulmaz.
 
 ## Oracle envanteri
 
@@ -16,9 +16,16 @@ Oracle'ın [ALL_TAB_COLUMNS açıklaması](https://docs.oracle.com/en/database/o
 
 ## Yerel embedding
 
-Web arayüzünde parola alanları ayrı tutulur. Her iki model adapter'ı bellekte `api_key` alabilir; CLI hâlâ `api_key_env` destekler. İsteğe bağlı `ca_file` kurumsal PEM CA zincirini kullanır; TLS doğrulaması açıktır. Kök vektör listesi için `response_path: "$"` desteklenir. Web bağlantı testi tek doğrulama metni gönderir, vektör boyutunu yanıttan okur. Servis yolu ve model kimliği otomatik tahmin edilmez.
+Web arayüzünde parola alanları ayrı tutulur. Her iki model adapter'ı bellekte `api_key` alabilir; CLI hâlâ `api_key_env` destekler. İsteğe bağlı `ca_file` kurumsal PEM CA zincirini kullanır; TLS doğrulaması açıktır. Web bağlantı testi aynı servis adresi üzerinde sınırlı sayıda standart yolu dener ve tek doğrulama metni gönderir. `/models`, `/v1/models` veya `/info` bulunamaması, gerçek embedding çağrısını tek başına engellemez. Başarı yalnız gerçek vektör yanıtı doğrulandığında verilir. Vektör boyutu ve `response_path` bu yanıttan belirlenir: kök vektör listesi için `$`, OpenAI biçimi için `data[*].embedding` kullanılır; yalnız HTTP 200 veya doküman sayfası yeterli değildir.
 
-`EmbeddingAdapter(config).embed(texts)` için `endpoint` **tam HTTPS URL**, `allowed_hosts` açık host listesi, `model`, `model_version`, `dimensions`, JSON `request_template` ve `response_path` zorunludur. Örneğin sözleşme doğrulandıktan sonra şablon `{"model":"{model}","input":"{texts}"}`, yol `data[*].embedding` seçilebilir; bu yalnız örnektir, verilen servisin gerçek sözleşmesi olduğu varsayılmaz. Yer tutucular yalnız bütün JSON string değeri olabilir ve liste tipini korur. `response_path` noktalı alanlar ve `[*]` dizisi destekler. Vektör sayısı, boyutu ve sonlu sayısal değerler doğrulanır. `max_batch` 1–64, `timeout_seconds` en çok 60, `max_retries` 0–2. Yanıt 1 MB, istek 512 KB ile sınırlıdır.
+`EmbeddingAdapter(config).embed(texts)` için `endpoint` **tam HTTPS URL**, `allowed_hosts` açık host listesi, `dimensions`, JSON `request_template` ve `response_path` zorunludur. Model seçimi iki açık sözleşmeden biridir:
+
+- `model_selection: "explicit"` varsayılandır; alan yazılmasa da bu kural uygulanır. `model` ve `model_version` boş olamaz. Sözleşme doğrulandıysa şablon `{"model":"{model}","input":"{texts}"}` olabilir. Bu modun zorunlu kimlik kontrolü değiştirilmemiştir.
+- `model_selection: "server_default"`, model seçimini servise bırakır. `model` ve `model_version` boş kalır; istek şablonu `{"input":"{texts}"}` olur. Gönderilen gerçek gövde örneği `{"input":["kısa test metni"]}` biçimindedir; model adı gönderilmez. Dolu kimlik/sürüm, üst düzey `model`/`model_version` istek alanları veya `{model}`/`{model_version}` yer tutucuları bu seçimle çelişir ve reddedilir. İsim bilinmeden servis varsayılanı kullanılabilir; raporda kimlik ve sürüm bilinmiyor olarak kalır.
+
+Sunucu varsayılanı için testin kaydettiği `max_batch` değeri **1**'dir; adapter'ın bu moddaki varsayılanı da 1'dir. Böylece katalogda veya aranan değişkenlerde birden fazla metin olsa da doğrulanmış tek metinlik çağrılarla sırayla işlenir. Web testi model kimliği bilinmiyor diye başarılı vektör çağrısını başarısız saymaz; doğrulanan sözleşme canlı analizde de kullanılır.
+
+Yer tutucular yalnız bütün JSON string değeri olabilir ve liste tipini korur. `response_path` noktalı alanlar ve `[*]` dizisi destekler. Her çağrıda vektör sayısı, doğrulanan boyut ve sonlu sayısal değerler denetlenir; hatalı yanıtla analiz tamamlanmış sayılmaz. `max_batch` 1–64, `timeout_seconds` en çok 60, `max_retries` 0–2. Yanıt 1 MB, istek 512 KB ile sınırlıdır.
 
 ## Yerel LLM
 
@@ -30,6 +37,12 @@ Web arayüzünde parola alanları ayrı tutulur. Her iki model adapter'ı bellek
 
 `HybridIndex(snapshot, embedding=None, cache_dir=None)` ve `.search(request, limit=8, strategy='hybrid', expanded=False)` exact fiziksel kolon adı, BM25 token araması ve varsa embedding sonuçlarını reciprocal rank fusion ile sıralar. `strategy` ayrı değerlendirme için `exact`, `bm25`, `embedding`, `hybrid` olabilir. Türkçe harfler ve teknik isimler normalize edilir; kaynak metin değiştirilmez. Snapshot kaynak/ortam/container/şemaları indekslenmeden önce uygulanır. Talebin `scope` veya `schema` filtresi embedding çağrısından **önce** uygulanır; başka şemaların içeriği sorguya girmez. Boş sorgu, kapsam dışı talep veya hiç lexical eşleşme için aday zorlanmaz. Skor doğruluk yüzdesi değildir.
 
-Embedding cache'i kapsam, snapshot imzası, model/sürüm/boyut ve aday kimliklerine bağlıdır; metadata silinmesi/değişmesi eski vektörlerin tekrar kullanımını engeller. Her kapsam ve model sürümü için eski cache dosyası kaldırılır. Kayıt sayısı 10.000, cache dosyası 10 MB ile sınırlıdır. `.assert_fresh(snapshot)` katalog sürümü, kapsamı ve kayıt/sürüm çiftleri değişirse `StaleIndexError` verir. Gerçek metadata cache dizini Graphify taramasına veya dış modele verilmemelidir.
+Kimliği ve sürümü belirtilen embedding cache'i kapsam, snapshot imzası, model/sürüm/boyut, istek sözleşmesi ve aday kimliklerine bağlıdır; metadata silinmesi/değişmesi eski vektörlerin tekrar kullanımını engeller. Her kapsam ve model sürümü için eski cache dosyası kaldırılır. `server_default` modunda `persistent_cache_safe=false` olur: `HybridIndex` kalıcı vektör dosyası okumaz veya yazmaz. Tek analiz içinde bellekte üretilen katalog vektörleri kullanılabilir; yeni analizde yeniden üretilir.
+
+Modelin kimliği ve sürümü bilinmiyorsa aynı adres ve 4096 boyut, modelin değişmediğini kanıtlamaz. Bu nedenle pipeline eski checkpoint sonuçlarını `resume=true` olsa bile kullanmaz; satırları yeniden işler. Checkpoint dosyaları çalışma kaydı olarak yazılabilir ancak bu modda devam kaynağı değildir. Bu durum teknik hata sayılmaz. Çalışma raporu `model_selection`, `identity_status: "unknown"`, `persistent_cache_safe: false` ve kapalı devam politikasını gösterir. LLM ve açıkça seçilmiş embedding modelinin kimlik kuralları değişmez.
+
+Adı bilinen embedding modelinde `model_version` değeri `deployment:` ile başlıyorsa bu yalnız dağıtım etiketidir; değişmez bir model sürümünü doğrulamaz. Bu durumda `identity_status: "unverified"` raporlanır ve aynı kalıcı cache/checkpoint tekrar kullanım yasağı uygulanır. Diğer açık kimlik/sürüm yapılandırmalarında durum `configured` olur; adapter bu bilgiyi bağımsız olarak doğruladığını iddia etmez. Kalıcı yeniden kullanım yalnız bu yapılandırılmış kimlik ve sürümle açıktır.
+
+Kayıt sayısı 10.000, kalıcı cache dosyası 10 MB ile sınırlıdır. `.assert_fresh(snapshot)` katalog sürümü, kapsamı ve kayıt/sürüm çiftleri değişirse `StaleIndexError` verir. Gerçek metadata cache dizini Graphify taramasına veya dış modele verilmemelidir.
 
 Testler `python -m unittest discover -s tests -v` ile fake transport ve fake Oracle connector kullanır. Bunlar gerçek Oracle/Qwen bağlantısı veya eşleştirme doğruluğu testi değildir.

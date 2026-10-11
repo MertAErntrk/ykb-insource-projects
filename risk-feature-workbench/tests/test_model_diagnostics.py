@@ -221,6 +221,200 @@ class ModelDiagnosticsTests(unittest.TestCase):
             self.assertEqual(context.exception.code, "TIMEOUT")
             self.assertEqual(len(opener.calls), 1)
 
+    def test_embedding_missing_metadata_still_checks_verified_server_default_route(self):
+        for body, path in [([[.001] * 4096], "$"),
+                           ({"data": [{"embedding": [.001] * 4096}]}, "data[*].embedding")]:
+            with self.subTest(path=path):
+                report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+                    ("GET", "https://embed.invalid/v1/models"): http_error(404),
+                    ("GET", "https://embed.invalid/info"): http_error(404),
+                    ("POST", "https://embed.invalid/v1/embeddings"): body,
+                })
+                self.assertTrue(report["ok"], report)
+                self.assertEqual(calls[-1]["body"], {"input": ["Connection validation"]})
+                self.assertEqual(len(calls), 3)
+                settings = report["settings"]
+                self.assertEqual(settings["model_selection"], "server_default")
+                self.assertEqual(settings["model"], "")
+                self.assertEqual(settings["model_version"], "")
+                self.assertEqual(settings["max_batch"], 1)
+                self.assertEqual(settings["dimensions"], 4096)
+                self.assertEqual(settings["response_path"], path)
+                self.assertEqual(settings["request_template"], {"input": "{texts}"})
+                self.assertNotIn("models_endpoint", settings)
+                self.assertIn("varsayılan embedding", report["message"])
+                self.assertNotIn("deployment:", json.dumps(settings))
+
+    def test_server_default_explicit_retest_goes_directly_to_inference(self):
+        raw = {"embedding": {"base_url": "https://embed.invalid", "endpoint": "https://embed.invalid/v1/embeddings",
+                              "model_selection": "server_default", "model": "", "model_version": "", "max_batch": 1,
+                              "request_template": {"input": "{texts}"}, "response_path": "$", "dimensions": 3}}
+        report, calls = self.run_report(raw, "embedding", {("POST", "https://embed.invalid/v1/embeddings"): [[.1, .2, .3]]})
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["body"], {"input": ["Connection validation"]})
+        self.assertEqual(report["settings"]["model_selection"], "server_default")
+
+    def test_explicit_empty_model_endpoint_auto_detects_response_path(self):
+        report, calls = self.run_report({"embedding": {"endpoint": "https://embed.invalid/v1/embeddings"}}, "embedding", {
+            ("POST", "https://embed.invalid/v1/embeddings"): {"data": [{"embedding": [.4, .5]}]},
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["settings"]["response_path"], "data[*].embedding")
+        self.assertEqual(report["settings"]["model_selection"], "server_default")
+        self.assertEqual(len(calls), 1)
+
+    def test_server_default_custom_template_and_response_path_are_preserved(self):
+        raw = {"embedding": {"endpoint": "https://embed.invalid/custom", "model_selection": "server_default",
+                              "request_template": {"texts": "{texts}", "normalize": True}, "response_path": "result.vectors"}}
+        report, calls = self.run_report(raw, "embedding", {
+            ("POST", "https://embed.invalid/custom"): {"result": {"vectors": [[.6, .7]]}},
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(calls[0]["body"], {"texts": ["Connection validation"], "normalize": True})
+        self.assertEqual(report["settings"]["response_path"], "result.vectors")
+        self.assertEqual(report["settings"]["request_template"], raw["embedding"]["request_template"])
+
+    def test_wrong_explicit_response_path_is_not_silently_overridden(self):
+        raw = {"embedding": {"endpoint": "https://embed.invalid/v1/embeddings", "response_path": "data[*].embedding"}}
+        report, calls = self.run_report(raw, "embedding", {("POST", "https://embed.invalid/v1/embeddings"): [[.1, .2]]})
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["code"], "RESPONSE_CONTRACT")
+        self.assertEqual(report["settings"], {})
+        self.assertEqual(len(calls), 1)
+
+    def test_server_default_cannot_sneak_model_identity_or_model_parameter(self):
+        cases = [{"model_selection": "server_default", "model": "invented"},
+                 {"model_selection": "server_default", "model_version": "invented"},
+                 {"request_template": {"input": "{texts}", "model": ""}},
+                 {"request_template": {"input": "{texts}", "model_version": ""}},
+                 {"request_template": {"input": "{texts}", "label": "{model}"}},
+                 {"request_template": {"input": "{texts}", "label": "{model_version}"}}]
+        for extra in cases:
+            with self.subTest(extra=extra):
+                raw = {"embedding": {"endpoint": "https://embed.invalid/v1/embeddings", **extra}}
+                report, calls = self.run_report(raw, "embedding", {})
+                self.assertFalse(report["ok"], report)
+                self.assertEqual(calls, [])
+                self.assertIn(report["code"], {"INVALID_SETTINGS", "INVALID_CONTRACT"})
+
+    def test_model_free_request_400_or_422_requires_contract_confirmation(self):
+        for status in (400, 422):
+            with self.subTest(status=status):
+                report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+                    ("GET", "https://embed.invalid/v1/models"): http_error(404),
+                    ("GET", "https://embed.invalid/info"): http_error(405),
+                    ("POST", "https://embed.invalid/v1/embeddings"): http_error(status),
+                })
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["code"], "HTTP_" + str(status))
+                self.assertIn("model kimliği veya özel istek sözleşmesi", report["error"])
+                self.assertEqual(report["settings"], {})
+                self.assertEqual(len(calls), 3)
+
+    def test_metadata_auth_failure_prevents_model_free_fallback(self):
+        for status in (401, 403, 407):
+            with self.subTest(status=status):
+                report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+                    ("GET", "https://embed.invalid/v1/models"): http_error(404),
+                    ("GET", "https://embed.invalid/info"): http_error(status),
+                })
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["code"], "HTTP_" + str(status))
+                self.assertEqual(len(calls), 2)
+
+    def test_model_free_404_or_bad_vector_does_not_claim_success_or_repeat_metadata(self):
+        for body, code in [(http_error(404), "HTTP_404"), ([[True]], "INVALID_VECTOR"),
+                           ([[float("nan")]], "INVALID_VECTOR"), ([], "INVALID_VECTOR"),
+                           ({"error": "not-a-vector"}, "INVALID_VECTOR")]:
+            with self.subTest(code=code):
+                report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+                    ("GET", "https://embed.invalid/v1/models"): http_error(404),
+                    ("GET", "https://embed.invalid/info"): http_error(404),
+                    ("POST", "https://embed.invalid/v1/embeddings"): body,
+                })
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["code"], code)
+                self.assertEqual(report["settings"], {})
+                self.assertEqual(len(calls), 3)
+
+    def test_named_model_stays_explicit_when_metadata_is_unavailable(self):
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid", "model": "selected"}}, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): http_error(404),
+            ("GET", "https://embed.invalid/info"): http_error(404),
+            ("POST", "https://embed.invalid/v1/embeddings"): {"data": [{"embedding": [.2, .4]}]},
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(calls[-1]["body"]["model"], "selected")
+        self.assertNotEqual(report["settings"].get("model_selection"), "server_default")
+
+    def test_explicit_server_default_base_only_does_not_need_metadata(self):
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid/v1", "model_selection": "server_default"}}, "embedding", {
+            ("POST", "https://embed.invalid/v1/embeddings"): [[.3, .6]],
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(len(calls), 1)
+
+    def test_tei_route_fallback_does_not_replace_explicit_custom_contract(self):
+        raw = {"embedding": {"base_url": "https://embed.invalid", "request_template": {"sentences": "{texts}"},
+                              "response_path": "payload", "dimensions": 2}}
+        report, calls = self.run_report(raw, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): {"data": [{"id": "known"}]},
+            ("POST", "https://embed.invalid/v1/embeddings"): http_error(404),
+            ("GET", "https://embed.invalid/info"): {"model_id": "known"},
+            ("POST", "https://embed.invalid/embed"): {"payload": [[.2, .4]]},
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["settings"]["response_path"], "payload")
+        self.assertEqual(report["settings"]["request_template"], {"sentences": "{texts}"})
+        self.assertEqual(calls[-1]["body"], {"sentences": ["Connection validation"]})
+
+    def test_entering_model_after_server_default_cannot_fake_verified_identity(self):
+        raw = {"embedding": {"endpoint": "https://embed.invalid/v1/embeddings", "model_selection": "explicit",
+                              "model": "invented", "request_template": {"input": "{texts}"}, "response_path": "$"}}
+        report, calls = self.run_report(raw, "embedding", {})
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["code"], "MODEL_IDENTITY_UNVERIFIED")
+        self.assertEqual(report["settings"], {})
+        self.assertEqual(calls, [])
+
+    def test_metadata_verified_named_model_can_keep_input_only_contract(self):
+        raw = {"embedding": {"base_url": "https://embed.invalid", "model": "known",
+                              "request_template": {"input": "{texts}"}, "response_path": "$"}}
+        report, calls = self.run_report(raw, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): {"data": [{"id": "known"}]},
+            ("POST", "https://embed.invalid/v1/embeddings"): [[.2, .4]],
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["settings"]["model"], "known")
+        self.assertEqual(calls[-1]["body"], {"input": ["Connection validation"]})
+        # Settings round-trip keeps the named identity verified on a later test.
+        second, calls = self.run_report({"embedding": report["settings"]}, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): {"data": [{"id": "known"}]},
+            ("POST", "https://embed.invalid/v1/embeddings"): [[.2, .4]],
+        })
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(len(calls), 2)
+
+    def test_explicit_named_model_placeholder_contract_remains_supported(self):
+        raw = {"embedding": {"endpoint": "https://embed.invalid/v1/embeddings", "model": "known",
+                              "request_template": {"model": "{model}", "input": "{texts}"}, "response_path": "$"}}
+        report, calls = self.run_report(raw, "embedding", {
+            ("POST", "https://embed.invalid/v1/embeddings"): [[.3, .5]],
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(calls[0]["body"]["model"], "known")
+
+    def test_explicit_named_custom_and_tei_templates_remain_supported(self):
+        for path, template in [("/custom", {"sentences": "{texts}"}), ("/embed", {"inputs": "{texts}"})]:
+            with self.subTest(path=path):
+                raw = {"embedding": {"endpoint": "https://embed.invalid" + path, "model": "known",
+                                      "request_template": template, "response_path": "$"}}
+                report, calls = self.run_report(raw, "embedding", {("POST", "https://embed.invalid" + path): [[.1, .4]]})
+                self.assertTrue(report["ok"], report)
+                self.assertEqual(report["settings"]["request_template"], template)
+                self.assertEqual(len(calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

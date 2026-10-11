@@ -1,4 +1,4 @@
-# İş bilgisayarında kullanım · 0.3.1
+# İş bilgisayarında kullanım · 0.3.2
 
 Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Uygulama tarayıcıda çalışır. Demo seçeneği yoktur.
 
@@ -69,12 +69,14 @@ Fiziksel adın bulunması, iş tanımının aynı olduğunu tek başına kanıtl
 **Bağlantılar** sayfasını açın. Kurumun LLM ve embedding temel adresleri hazır gelir. Oracle araması için model desteği zorunlu değildir.
 
 1. Servis anahtar istiyorsa ilgili **API anahtarı** alanını doldurun. İstemiyorsa boş bırakın.
-2. **Model kimliği** alanını biliyorsanız girin; bilmiyorsanız ilk testte boş bırakabilirsiniz.
+2. LLM **Model kimliği** alanına `qwen38-27b` yazın. Embedding **Model kimliği** alanını boş bırakın; kurumda doğrulanan servis model adı istemiyor.
 3. **LLM bağlantısını test et** düğmesine basın. Ardından **Embedding bağlantısını test et** düğmesine basın.
 4. Birden fazla model bulunursa ilgili **Model kimliği** listesinden doğru modeli seçip aynı testi yeniden çalıştırın.
 5. Her iki test başarılıysa **Değişken inceleme** sayfasında **LLM + embedding desteği** kutusunu açın.
 
 Test, standart servislerin model listesi veya servis bilgisi uçlarını kontrol eder ve sabit, kısa bir metinle gerçek çağrı yapar. Excel ve katalog bilgisi bu bağlantı testine gönderilmez. Servisin OpenAI/TEI uyumu yalnız adres adına bakılarak kabul edilmez. Başarılı test **tam çağrı adresini**, **istek/yanıt biçimini** ve embedding için gerçek **vektör boyutunu** doldurur. Model listesi birden fazla kimlik döndürürse otomatik rastgele model seçilmez. Gerçek dağıtım sürümü servisten okunamıyorsa bu durum etiketlenir; doğrulanmış sürüm bilgisi sayılmaz.
+
+Kurumdaki 11.10.2026 tanılama çıktısında embedding `/v1/embeddings` yolu model adı olmadan **4096 boyutlu vektör** üretti. Bu nedenle embedding model listesi ve `/info` adımlarının `404` olması testi durdurmaz. Son gerçek çağrının başarılı olması beklenir. Model kimliği/sürümü boş kalabilir; ekranda **sunucunun varsayılan embedding modeli** kullanıldığı belirtilir. Boyut ve yanıt yolu yine gerçek yanıttan okunur. Aynı doğrulanmış sözleşme analizde de kullanılır. Model kimliği bilinmediği için kalıcı vektör önbelleği ve eski analiz sonucundan devam kapalıdır; yeni analizde vektörler yeniden üretilir.
 
 **Gelişmiş / özel servis ayarları** bölümünü yalnız standart test servis biçimini tanımazsa veya kurumunuz özel bir sözleşme kullanıyorsa açın. Buradan model ekibinin verdiği tam çağrı adresi, sürüm, JSON şablonu ve yanıt yolunu girebilirsiniz. Kurum CA sertifikası gerekiyorsa PEM dosyasını da bu bölümden seçilen servisin alanına yazın. TLS doğrulaması kapatılmaz. [Adapter ayrıntıları](ADAPTERS.md).
 

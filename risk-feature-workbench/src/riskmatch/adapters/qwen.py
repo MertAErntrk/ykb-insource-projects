@@ -38,19 +38,41 @@ class EmbeddingAdapter:
         validate_endpoint(self.config)
         _bounded_timeout(self.config)
         _bounded_int(self.config.get("max_retries"), 1, 0, 2, "max_retries")
-        self.model, self.model_version = _identity(self.config)
+        self.model_selection = self.config.get("model_selection", "explicit")
+        if self.model_selection not in ("explicit", "server_default"):
+            raise ConfigError("Embedding model_selection explicit veya server_default olmalı.")
+        if self.model_selection == "server_default":
+            if any(self.config.get(key) not in (None, "") for key in ("model", "model_version")):
+                raise ConfigError("Sunucu varsayılanı seçiminde model ve model_version boş kalmalı.")
+            self.model, self.model_version = "", ""
+        else:
+            self.model, self.model_version = _identity(self.config)
+        # A deployment label is not a model revision; its weights may change in place.
+        self.identity_status = ("unknown" if self.model_selection == "server_default"
+                                else "unverified" if self.model_version.startswith("deployment:")
+                                else "configured")
+        self.persistent_cache_safe = self.identity_status == "configured"
         self.dimensions = _bounded_int(self.config.get("dimensions"), None, 1, 8192, "dimensions")
         if self.dimensions is None:
             raise ConfigError("Embedding boyutu dimensions gerekli.")
         if not isinstance(self.config.get("request_template"), dict):
             raise ConfigError("Embedding request_template gerekli.")
+        if self.model_selection == "server_default" and (
+            any(key in self.config["request_template"] for key in ("model", "model_version"))
+            or any(_has_placeholder(self.config["request_template"], key)
+                   for key in ("model", "model_version"))
+        ):
+            raise ConfigError("Sunucu varsayılanı isteği model/model_version alanı veya yer tutucusu içeremez.")
         if not _has_placeholder(self.config["request_template"], "texts"):
             raise ConfigError("Embedding request_template {texts} içermeli.")
         if not isinstance(self.config.get("response_path"), str):
             raise ConfigError("Embedding response_path gerekli.")
-        self.max_batch = _bounded_int(self.config.get("max_batch"), 16, 1, 64, "max_batch")
+        self.max_batch = _bounded_int(self.config.get("max_batch"),
+                                     1 if self.model_selection == "server_default" else 16,
+                                     1, 64, "max_batch")
         contract = {key: self.config.get(key) for key in
                     ("endpoint", "model", "model_version", "dimensions", "request_template", "response_path")}
+        contract["model_selection"] = self.model_selection
         self.cache_identity = hashlib.sha256(json.dumps(contract, sort_keys=True, ensure_ascii=False,
                                                         separators=(",", ":")).encode()).hexdigest()
         self.transport = transport

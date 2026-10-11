@@ -1,6 +1,18 @@
-# Web sürümü doğrulaması — 0.3.1
+# Web sürümü doğrulaması — 0.3.2
 
 2026-10-11 tarihinde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 üzerinde doğrulandı. Kurum Oracle/Qwen servislerine bağlanılmadı; otomatik ve tarayıcı testlerinde Oracle bağlantısı ile model HTTP taşıması kontrollü olarak taklit edildi.
+
+## 0.3.2 doğrulaması
+
+**172 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **14,705 saniyede geçti**. Güncel çıktı: [test-results.txt](test-results.txt). JavaScript sözdizimi ve aşağıda açıklanan 17 arayüz regresyon senaryosu da geçti. Yeni çalışma bağımlılığı yoktur.
+
+- Kullanıcının kurumdan verdiği gerçek çıktı: embedding model listesi ve `/info` yolları 404; model adı içermeyen `POST /v1/embeddings` 200 ve 4096 boyutlu geçerli vektör. LLM `qwen38-27b` ile `/v1/chat/completions` çağrısı ve JSON yanıtı başarılı. Bu kanıt küçük script çağrılarına aittir; kurumda tam uygulama analizi doğrulaması değildir.
+- Regresyonlar, bu desenin uygulama keşfi → ayar aktarımı → iki değişkenli gerçek-mod analiz boyunca çalıştığını doğrular. Yalnız Oracle ve HTTP taşıması taklit edilir. Kök vektör dizisi ve `data[*].embedding` yanıtlarının ikisi de kapsanır; 4096 boyut yanıttan okunur. İstekler yalnız `input` içerir ve tek metinliktir; gerçek analizde LLM çağrısı ve kaynak kanıtları da doğrulanır.
+- Model kimliği/sürümü bilinmediğinde uydurulmaz; `server_default` ayarı dışa aktarma ve gerçek analizde korunur. Kalıcı vektör önbelleği ve checkpoint sonucu kullanılmaz. `deployment:` etiketi de gerçek sürüm sayılmaz. Aynı girdinin ikinci analizde model çağrılarını yeniden yaptığı test edilir.
+- Model adı girilmiş ama istek şablonunda model seçimi bulunmayan standart embedding çağrısı, metadata doğrulaması olmadan başarı sayılmaz. Önceden doğrulanmış named-model/TEI ve özel sözleşme akışları korunur.
+- Parola/API anahtarı rapor, profil ve checkpoint dosyalarına taşınmaz; auth/TLS hataları başarılı sayılmaz.
+
+Yerel tarayıcı kontrolünde model kimliği boş embedding testi, aynı ayarla yeniden test, 4096 boyutun ve model alanı içermeyen şablonun doldurulması, LLM+embedding açık iki değişkenli analizin tamamlanması görüldü. Model adı değişince önceki endpoint/şablon/boyut doğrulaması temizlendi. Tarayıcı hata/uyarı kaydı boştu; bağlantı kartları görsel olarak kontrol edildi. Bu tarayıcı sunucusundaki Oracle ve model yanıtları kontrollü test yanıtlarıdır; uygulamaya demo modu eklenmedi.
 
 ## Kurulum
 
@@ -10,9 +22,9 @@
 - pip check: bağımlılık çakışması yok. JavaScript sözdizimi kontrolü başarılı.
 - PowerShell tırnak aktarımı düzeltmesi ve Türkçe mesajlar için UTF-8 BOM korundu. Tk arayüzü kaldırıldı; start.ps1 web uygulamasını başlatır.
 
-## Otomatik kontroller
+## Önceki 0.3.1 otomatik kontrolleri
 
-**146 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **16,514 saniyede geçti**. Çıktı: [test-results.txt](test-results.txt). Önceki 0.3.0 sürümündeki 115 teste, bağlantı tanılaması için 31 test eklendi. `pip check` bağımlılık çakışması bildirmedi; JavaScript sözdizimi kontrolü geçti.
+**146 Python testi**, önceki 0.3.1 doğrulamasında gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **16,514 saniyede geçti**. Önceki 0.3.0 sürümündeki 115 teste, bağlantı tanılaması için 31 test eklendi. `pip check` bağımlılık çakışması bildirmedi; JavaScript sözdizimi kontrolü geçti. Güncel sürümün test sayısı ve çıktısı yukarıdadır.
 
 0.3.1 yeni çalışma bağımlılığı eklemez. Önceki web kurulumu üzerinde güncelleme yeterlidir. Verilen kurum adresleri kodda tanımlıdır; parola veya API anahtarı bu değerlere dahil değildir.
 

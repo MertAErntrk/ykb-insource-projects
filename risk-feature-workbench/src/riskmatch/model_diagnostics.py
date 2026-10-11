@@ -17,7 +17,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .adapters._http import _NoRedirect, response_path, validate_endpoint
-from .adapters.qwen import EmbeddingAdapter, LLMAdapter
+from .adapters.qwen import EmbeddingAdapter, LLMAdapter, _has_placeholder
 from .deployment import EMBEDDING_BASE_URL, LLM_BASE_URL
 from .errors import ConfigError, IntegrationError
 
@@ -203,6 +203,15 @@ def _base_config(base, endpoint, model, version, ca_file):
             **({"ca_file": ca_file} if ca_file else {})}
 
 
+def _server_default_config(base, endpoint, ca_file):
+    config = _base_config(base, endpoint, "", "", ca_file)
+    config.update(model_selection="server_default", max_batch=1,
+                  request_template={"input": "{texts}"})
+    # response_path is established from the actual response, unless supplied
+    # explicitly by the user. No model identity or model version is invented.
+    return config
+
+
 def _llm_probe(client, config):
     adapter = LLMAdapter(config, transport=client, api_key=client.key)
     adapter.evaluate({"name": "CONNECTION_CHECK", "description": "Connection validation"},
@@ -214,9 +223,24 @@ def _embedding_probe(client, config):
     # Discover dimension from one real vector, then validate it through the same
     # adapter used by analyses, without issuing a second inference request.
     from .adapters._http import post_json, render_template
+    EmbeddingAdapter({**config, "dimensions": config.get("dimensions") or 1,
+                      "response_path": config.get("response_path") or "$"},
+                     transport=client, api_key=client.key)
     payload = render_template(config["request_template"], {"texts": ["Connection validation"],
                               "model": config["model"], "model_version": config["model_version"]})
-    body = post_json(config, payload, transport=client, api_key=client.key)
+    try:
+        body = post_json(config, payload, transport=client, api_key=client.key)
+    except _Failure as failure:
+        if config.get("model_selection") == "server_default" and failure.code in {"HTTP_400", "HTTP_422"}:
+            raise _Failure(failure.code, "Sunucu model alanı olmadan deneme isteğini kabul etmedi; model kimliği veya özel istek sözleşmesi servis ekibinden doğrulanmalı.") from None
+        raise
+    if not config.get("response_path"):
+        if isinstance(body, list):
+            config["response_path"] = "$"
+        elif isinstance(body, dict) and isinstance(body.get("data"), list):
+            config["response_path"] = "data[*].embedding"
+        else:
+            raise _Failure("INVALID_VECTOR", "Embedding yanıtında desteklenen vektör dizisi bulunamadı; özel yanıt yolunu kontrol edin.")
     vectors = response_path(body, config["response_path"])
     if (not isinstance(vectors, list) or len(vectors) != 1 or not isinstance(vectors[0], list)
             or not 1 <= len(vectors[0]) <= 8192
@@ -290,25 +314,34 @@ def discover_model(raw, name):
         if endpoint:
             endpoint = _same_origin(base, _url(endpoint))
         selected = _string(value.get("model"), "Model kimliği", 512)
+        selection = value.get("model_selection")
+        if selection not in (None, "", "explicit", "server_default"):
+            raise _Failure("INVALID_SETTINGS", "Model seçim biçimi geçersiz.")
+        if selection == "server_default" and (name != "embedding" or selected or value.get("model_version")):
+            raise _Failure("INVALID_SETTINGS", "Sunucu varsayılanı yalnız embedding için kullanılabilir; model kimliği ve sürümü boş olmalı.")
         client = report.run("HTTPS ve sertifika ayarları", lambda: _Client(base, key, ca_file))
         config = None
         models_endpoint = ""
         models_endpoint_verified = False
+        api = base if base.endswith("/v1") else base + "/v1"
+        if selection == "server_default" and not endpoint:
+            endpoint = api + "/embeddings"
 
-        if endpoint and selected:
-            config = _base_config(base, endpoint, selected, _version(value, selected), ca_file)
+        if endpoint and (selected or name == "embedding"):
+            config = (_base_config(base, endpoint, selected, _version(value, selected), ca_file)
+                      if selected else _server_default_config(base, endpoint, ca_file))
             if name == "llm":
                 config["contract"] = value.get("contract") or "openai_chat"
-            elif value.get("request_template") and value.get("response_path"):
+            elif value.get("request_template"):
                 pass
             elif urlsplit(endpoint).path.rstrip("/").endswith("/embed"):
                 config.update(request_template={"inputs": "{texts}"}, response_path="$")
             elif urlsplit(endpoint).path.rstrip("/").endswith("/embeddings"):
-                config.update(request_template={"model": "{model}", "input": "{texts}"}, response_path="data[*].embedding")
+                if selected:
+                    config.update(request_template={"model": "{model}", "input": "{texts}"}, response_path="data[*].embedding")
             else:
                 raise _Failure("EXPLICIT_CONTRACT_REQUIRED", "Özel embedding adresi için istek şablonu ve yanıt yolu gerekli.")
         else:
-            api = base if base.endswith("/v1") else base + "/v1"
             models_endpoint = _same_origin(base, _url(_string(value.get("models_endpoint"), "Model listesi adresi") or api + "/models"))
             try:
                 report.models = report.run("GET " + urlsplit(models_endpoint).path + " · model listesi", lambda: _models(client, models_endpoint))
@@ -317,7 +350,13 @@ def discover_model(raw, name):
                 if failure.code not in FALLBACK_CODES:
                     raise
                 if name == "embedding":
-                    config = _tei(client, report, base, value, endpoint, selected)
+                    try:
+                        config = _tei(client, report, base, value, endpoint, selected)
+                    except _Failure as info_failure:
+                        if info_failure.code not in {"HTTP_404", "HTTP_405"}:
+                            raise
+                        if not selected:
+                            config = _server_default_config(base, endpoint or api + "/embeddings", ca_file)
                 elif not selected:
                     raise _Failure("MODEL_ID_REQUIRED", "Standart model listesi okunamadı. Servis ekibinin bildirdiği model kimliğini girip testi tekrarlayın.") from None
             if config is None:
@@ -334,6 +373,18 @@ def discover_model(raw, name):
                 config[setting] = value[setting]
         if name == "llm" and value.get("contract"):
             config["contract"] = value["contract"]
+        if (name == "embedding" and config.get("model")
+                and urlsplit(config["endpoint"]).path.rstrip("/").endswith("/embeddings")
+                and not models_endpoint_verified
+                and not _has_placeholder(config.get("request_template"), "model")):
+            configured_models = _string(value.get("models_endpoint"), "Model listesi adresi")
+            if not configured_models:
+                raise _Failure("MODEL_IDENTITY_UNVERIFIED", "Model alanı içermeyen embedding isteği girilen model kimliğini doğrulayamaz. Sunucu varsayılanı için model kimliğini boş bırakın; belirli model seçimi için {model} içeren servis sözleşmesi veya model listesinden yeniden keşif gerekli.")
+            models_endpoint = _same_origin(base, _url(configured_models))
+            report.models = report.run("GET " + urlsplit(models_endpoint).path + " · model kimliğini yeniden doğrulama",
+                                       lambda: _models(client, models_endpoint))
+            _select_model(report.models, config["model"])
+            models_endpoint_verified = True
         if name == "embedding" and value.get("dimensions"):
             dimensions = value["dimensions"]
             if isinstance(dimensions, bool) or not isinstance(dimensions, int) or not 1 <= dimensions <= 8192:
@@ -347,18 +398,24 @@ def discover_model(raw, name):
             try:
                 config["dimensions"] = report.run(label, lambda: _embedding_probe(client, config))
             except _Failure as failure:
-                if explicit_endpoint or failure.code not in {"HTTP_404", "HTTP_405"} or config["response_path"] == "$":
+                if (explicit_endpoint or config.get("model_selection") == "server_default"
+                        or failure.code not in {"HTTP_404", "HTTP_405"} or config.get("response_path") == "$"):
                     raise
                 config = _tei(client, report, base, value, "", selected)
+                for setting in ("request_template", "response_path", "dimensions"):
+                    if value.get(setting):
+                        config[setting] = value[setting]
                 config["dimensions"] = report.run("POST " + urlsplit(config["endpoint"]).path + " · gerçek deneme ve yanıt doğrulama", lambda: _embedding_probe(client, config))
 
-        allowed = {"base_url", "endpoint", "model", "model_version", "contract", "request_template", "response_path", "dimensions", "ca_file"}
+        allowed = {"base_url", "endpoint", "model", "model_version", "model_selection", "max_batch", "contract", "request_template", "response_path", "dimensions", "ca_file"}
         settings = {k: v for k, v in config.items() if k in allowed}
         if models_endpoint_verified:
             settings["models_endpoint"] = models_endpoint
         message = ("LLM gerçek çağrısı ve JSON yanıt sözleşmesi doğrulandı." if name == "llm"
                    else "Embedding gerçek çağrısı doğrulandı; vektör boyutu yanıttan okundu.")
-        if settings["model_version"].startswith("deployment:"):
+        if settings.get("model_selection") == "server_default":
+            message += " Sunucunun varsayılan embedding modeli kullanılıyor; servis model kimliği ve sürümü bildirmiyor. İstekler tek metinlik gruplarla gönderilecek."
+        elif settings["model_version"].startswith("deployment:"):
             message += " Servis model sürümü bildirmedi; deployment etiketi yalnız dağıtım kimliğidir. Model değişirse yeniden doğrulayın."
         return {"ok": True, "checks": report.checks, "message": message, "settings": settings, "models": report.models,
                 **({"dimensions": settings["dimensions"]} if name == "embedding" else {})}
