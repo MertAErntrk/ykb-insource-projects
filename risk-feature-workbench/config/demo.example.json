@@ -1,0 +1,6 @@
+{
+  "mode": "demo",
+  "retrieval": {"limit": 8, "expanded_limit": 24},
+  "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}},
+  "notes": "Yalnız sentetik katalog. Qwen veya banka veritabanı çağrılmaz."
+}

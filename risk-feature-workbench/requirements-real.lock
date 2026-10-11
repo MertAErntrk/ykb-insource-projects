@@ -1,0 +1,9 @@
+# Windows x64 / CPython 3.9.7; official PyPI resolution 2026-10-11.
+# Install with: pip install --require-hashes -r this-file
+cffi==2.0.0 --hash=sha256:b882b3df248017dba09d6b16defe9b5c407fe32fc7c65a9c69798e6175601be9
+cryptography==50.0.2 --hash=sha256:4e81d95e5bafc2d6e34e4bed780e53e4d5b9a2f928573428aa4d35fbec1eb0de
+et_xmlfile==2.0.0 --hash=sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa
+openpyxl==3.1.5 --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2
+oracledb==4.0.2 --hash=sha256:6c8f3e34a077d7d2d39aa25c28b1aa53fd4fd6aa2437e4d48d9f18b2b28b95e4
+pycparser==2.23 --hash=sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934
+typing_extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8

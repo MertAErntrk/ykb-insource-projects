@@ -10,6 +10,7 @@ YKB'de insource olarak geliştirilen projelerin reposudur.
 | [`mrm-ai/`](mrm-ai/) | MRM AI | MRM AI projesi |
 | [`laya/`](laya/) | Laya | Laya projesi |
 | [`strateji-cevap/`](strateji-cevap/) | Strateji Cevap Motoru | Strateji çıktıları hakkındaki Smile çağrılarına otomatik cevap taslağı üreten motor |
+| [`risk-feature-workbench/`](risk-feature-workbench/) | Risk Feature Workbench | Excel risk alanı taleplerini Oracle katalog kanıtlarıyla inceleyen yerel masaüstü uygulaması; [iş bilgisayarı rehberi](risk-feature-workbench/docs/IS_BILGISAYARINDA_BASLANGIC.md) |
 
 Her proje kendi klasöründe durur. Yeni proje eklerken kök dizinde yeni bir klasör açıp bu tabloya bir satır ekle.
 
@@ -28,8 +29,7 @@ cd ykb-insource-projects
 git pull
 ```
 
-Repo private olduğu için giriş isterse şifre yerine GitHub Personal Access Token kullan
-(GitHub → Settings → Developer settings → Personal access tokens).
+Repo herkese açıktır; clone/pull için normalde GitHub girişi gerekmez. Kurum ağında GitHub erişimi ayrıca kısıtlı olabilir.
 
 ## Dikkat
 

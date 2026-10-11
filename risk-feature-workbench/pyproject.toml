@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "risk-feature-workbench"
+version = "0.1.0"
+description = "Yerel, kanıta dayalı Oracle risk feature incelemesi"
+requires-python = ">=3.9"
+dependencies = ["openpyxl==3.1.5", "et-xmlfile==2.0.0"]
+
+[project.scripts]
+riskmatch = "riskmatch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+riskmatch = ["data/*.json", "data/*.xlsx"]
