@@ -7,7 +7,8 @@ from .errors import ConfigError
 
 DEFAULTS = {
     "mode": "demo",
-    "retrieval": {"limit": 8, "expanded_limit": 24},
+    "retrieval": {"limit": 8, "expanded_limit": 24, "search_mode": "full", "candidate_limit": 24, "embedding_budget": 256},
+    "llm_review": True,
     "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}},
 }
 
@@ -31,6 +32,16 @@ def load_config(path=None, mode="demo", *, data=None):
     retrieval = config.get("retrieval", {})
     if not isinstance(retrieval,dict):
         raise ConfigError("retrieval ayarı nesne olmalı.")
+    retrieval = {**DEFAULTS["retrieval"], **retrieval}
+    config["retrieval"] = retrieval
+    if retrieval["search_mode"] not in {"fast", "full"}:
+        raise ConfigError("Arama biçimi fast veya full olmalı.")
+    for field, low, high in (("candidate_limit", 8, 100), ("embedding_budget", 0, 2048)):
+        value = retrieval[field]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ConfigError("Arama bütçesi geçersiz: " + field)
+    if not isinstance(config.get("llm_review"), bool):
+        raise ConfigError("llm_review true veya false olmalı.")
     naming=config.get("naming")
     if not isinstance(naming,dict) or not isinstance(naming.get("windows"),dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in naming["windows"].items()):
         raise ConfigError("naming.windows metin anahtar/değer sözlüğü olmalı.")
@@ -53,7 +64,8 @@ def load_config(path=None, mode="demo", *, data=None):
         use_models=config.get("use_models",True)
         if not isinstance(use_models,bool):
             raise ConfigError("use_models true veya false olmalı.")
-        for section in (("oracle", "llm", "embedding") if use_models else ("oracle",)):
+        model_sections = ("embedding", "llm") if config["llm_review"] else ("embedding",)
+        for section in (("oracle",) + model_sections if use_models else ("oracle",)):
             if not isinstance(config.get(section), dict):
                 raise ConfigError(f"Gerçek mod için {section} ayarları gerekli.")
         # Validate both model contracts before Oracle can initiate a connection.
@@ -62,7 +74,8 @@ def load_config(path=None, mode="demo", *, data=None):
         OracleAdapter(config["oracle"])
         if use_models:
             EmbeddingAdapter(config["embedding"])
-            LLMAdapter(config["llm"])
+            if config["llm_review"]:
+                LLMAdapter(config["llm"])
     return config
 
 def signature_config(config):

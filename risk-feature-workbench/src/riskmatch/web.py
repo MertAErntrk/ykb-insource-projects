@@ -9,7 +9,7 @@ import time
 from flask import Flask, jsonify, render_template, request, send_file, session
 from werkzeug.exceptions import HTTPException
 
-from .errors import ConfigError, InputError, IntegrationError, CatalogScanError
+from .errors import ConfigError, InputError, IntegrationError, CatalogScanError, AnalysisCancelled
 from .excelio import LABELS, reason_text
 from .pipeline import analyze
 from . import web_services as services
@@ -127,7 +127,7 @@ def create_app(runtime_dir=None, *, analyzer=None):
         # The browser can configure optional model contracts, never the DB address/context.
         models=data.get("settings",{})
         if not isinstance(models,dict):raise ConfigError("Model ayarları geçersiz.")
-        settings.update({key:models[key] for key in ("use_models","llm","embedding") if key in models})
+        settings.update({key:models[key] for key in ("use_models","llm","embedding","search_mode","llm_review") if key in models})
         return services.build_run(settings)
 
     @app.post("/api/profile")
@@ -173,22 +173,42 @@ def create_app(runtime_dir=None, *, analyzer=None):
 
     def worker(identity,path,mapping,config,credentials,requests):
         job=jobs[identity]
+        request_map={r["row_id"]:r for r in requests}
         def progress(value):
-            with guard:job["progress"]=value
+            with guard:
+                job["progress"]=value
+                job["updated"]=time.time()
+        def annotate(source):
+            row=deepcopy(source)
+            original=request_map[row["row_id"]]
+            row["request"]={k:original.get(k,"") for k in ("name","description","category","data_type","reported","sheet","excel_row")}
+            row["labels"]={k:LABELS.get(row[k],row[k]) for k in ("physical_name","semantic_status","production_status")}
+            row["reason_texts"]=[reason_text(v) for v in row["reasons"]]
+            for candidate in row["candidates"]:
+                candidate["label"]=LABELS.get(candidate["status"],candidate["status"])
+                candidate["reason_texts"]=[reason_text(v) for v in candidate.get("reasons",[])]
+            return row
+        def result_callback(row):
+            prepared=annotate(row)
+            with guard:
+                # A final dependency pass may replace an earlier row without adding duplicates.
+                index=job["row_positions"].get(prepared["row_id"])
+                if index is None:
+                    job["row_positions"][prepared["row_id"]]=len(job["partial_results"])
+                    job["partial_results"].append(prepared)
+                else:job["partial_results"][index]=prepared
+                job["updated"]=time.time()
         try:
             result=run(path,root/identity/"sonuclar.xlsx",mode="real",config_data=config,
-                       credentials=credentials,column_mapping=mapping,state_dir=root/identity/"state",progress=progress)
-            request_map={r["row_id"]:r for r in requests}
-            for row in result["results"]:
-                original=request_map[row["row_id"]]
-                row["request"]={k:original.get(k,"") for k in ("name","description","category","data_type","reported","sheet","excel_row")}
-                row["labels"]={k:LABELS.get(row[k],row[k]) for k in ("physical_name","semantic_status","production_status")}
-                row["reason_texts"]=[reason_text(v) for v in row["reasons"]]
-                for candidate in row["candidates"]:
-                    candidate["label"]=LABELS.get(candidate["status"],candidate["status"])
-                    candidate["reason_texts"]=[reason_text(v) for v in candidate.get("reasons",[])]
+                       credentials=credentials,column_mapping=mapping,state_dir=root/identity/"state",progress=progress,
+                       result_callback=result_callback,cancelled=job["cancel_event"].is_set)
+            result["results"]=[annotate(row) for row in result["results"]]
             with guard:
-                job.update(status="complete",result=result,finished=time.time())
+                job.update(status="cancelled" if job["cancel_event"].is_set() else "complete",result=result,
+                           finished=time.time(),updated=time.time())
+        except AnalysisCancelled:
+            with guard:
+                job.update(status="cancelled",finished=time.time(),updated=time.time())
         except CatalogScanError as error:
             source="Excel okundu" if job["input_type"]=="excel" else "Girdi alındı"
             with guard:
@@ -222,11 +242,13 @@ def create_app(runtime_dir=None, *, analyzer=None):
             filename=upload["filename"]
         requests=services.validate_mapping(path,mapping)
         with guard:
-            if any(j["status"]=="running" for j in jobs.values()):
+            if any(j["status"] in ("running","cancelling") for j in jobs.values()):
                 return jsonify(error="Bir analiz devam ediyor. Tamamlandıktan sonra yeniden deneyin."),409
             if len(jobs)>=20:raise InputError("Analiz sınırına ulaşıldı. Uygulamayı yeniden başlatın.")
             jobs[identity]={"id":identity,"owner":session["owner"],"status":"running",
                 "filename":filename,"input_type":"manual" if manual else "excel",
+                "created":time.time(),"updated":time.time(),"cancel_event":threading.Event(),
+                "partial_results":[],"row_positions":{},"search_mode":config.get("retrieval",{}).get("search_mode","fast"),
                 "progress":{"stage":"Analiz hazırlanıyor","completed":0,"total":len(requests)}}
         executor.submit(worker,identity,path,mapping,config,credentials,requests)
         return jsonify(id=identity),202
@@ -235,10 +257,24 @@ def create_app(runtime_dir=None, *, analyzer=None):
     def status(identity):
         with guard:
             job=owned(jobs,identity)
-            data={k:v for k,v in job.items() if k not in ("owner","result")}
+            data={k:v for k,v in job.items() if k not in ("owner","result","cancel_event","partial_results","row_positions")}
+            data["results"]=deepcopy(job["partial_results"])
+            now=time.time()
+            data["elapsed_seconds"]=round(max(0,job.get("finished",now)-job["created"]),1)
+            data["last_update_seconds"]=round(max(0,now-job["updated"]),1)
             if job.get("result"):
                 data.update(results=job["result"]["results"],run_info=job["result"]["run_info"])
         return jsonify(data)
+
+    @app.post("/api/jobs/<identity>/cancel")
+    def cancel(identity):
+        with guard:
+            job=owned(jobs,identity)
+            if job["status"] in ("running","cancelling"):
+                job["cancel_event"].set()
+                job["status"]="cancelling"
+                job["updated"]=time.time()
+        return jsonify(id=identity,status=job["status"])
 
     @app.get("/api/jobs/<identity>/download")
     def download(identity):

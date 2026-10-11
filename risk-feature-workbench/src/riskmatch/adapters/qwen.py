@@ -7,6 +7,7 @@ import math
 from riskmatch.adapters._http import (
     _bounded_int,
     _bounded_timeout,
+    _ReusableHTTPS,
     post_json,
     render_template,
     response_path,
@@ -75,7 +76,7 @@ class EmbeddingAdapter:
         contract["model_selection"] = self.model_selection
         self.cache_identity = hashlib.sha256(json.dumps(contract, sort_keys=True, ensure_ascii=False,
                                                         separators=(",", ":")).encode()).hexdigest()
-        self.transport = transport
+        self.transport = transport if transport is not None else _ReusableHTTPS()
 
     def embed(self, texts):
         if not isinstance(texts, list) or any(not isinstance(text, str) for text in texts):
@@ -129,7 +130,7 @@ class LLMAdapter:
         self.max_output_tokens = _bounded_int(
             self.config.get("max_output_tokens"), 600, 64, 2048, "max_output_tokens"
         )
-        self.transport = transport
+        self.transport = transport if transport is not None else _ReusableHTTPS()
 
     def evaluate(self, request, candidates):
         if not isinstance(request, dict) or not isinstance(candidates, list):

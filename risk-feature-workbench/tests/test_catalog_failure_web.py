@@ -17,6 +17,7 @@ ROW_COUNT = 273
 SCHEMAS = ["RISK_DWH", "RISK_SECOND", "RISK_THIRD"]
 MODEL_SETTINGS = {
     "use_models": True,
+    "search_mode": "full", "llm_review": True,
     "llm": {"endpoint": "https://llm.invalid/v1/chat/completions",
             "model": "qwen38-27b", "model_version": "test-v1", "contract": "openai_chat",
             "api_key": "LLM_SECRET_SENTINEL"},

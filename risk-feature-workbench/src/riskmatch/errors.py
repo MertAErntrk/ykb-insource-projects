@@ -4,6 +4,9 @@ class ConfigError(ValueError):
 class IntegrationError(RuntimeError):
     """Güvenli mesajla dış entegrasyon hatası."""
 
+class AnalysisCancelled(Exception):
+    """Cooperative user cancellation; never a row or integration failure."""
+
 class OracleOperationError(IntegrationError):
     """Only a controlled phase, error code and guidance; never raw driver text."""
 

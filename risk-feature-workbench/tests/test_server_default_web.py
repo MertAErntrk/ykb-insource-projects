@@ -77,7 +77,7 @@ class ServerDefaultWebTests(unittest.TestCase):
         for response_shape in ("data[*].embedding", "$"):
             with self.subTest(response_shape=response_shape):
                 service = ModelService(response_shape)
-                raw = {"use_models": True,
+                raw = {"use_models": True, "llm_review": True, "search_mode": "full",
                        "embedding": {"base_url": "https://embedding.invalid",
                                      "api_key": "EMBED_SECRET_SENTINEL"},
                        "llm": {"base_url": "https://llm.invalid/v1",

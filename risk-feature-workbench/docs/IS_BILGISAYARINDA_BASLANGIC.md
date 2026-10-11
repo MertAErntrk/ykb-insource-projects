@@ -1,4 +1,4 @@
-# İş bilgisayarında kullanım · 0.3.3
+# İş bilgisayarında kullanım · 0.4.0
 
 Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Uygulama tarayıcıda çalışır. Demo seçeneği yoktur.
 
@@ -62,6 +62,12 @@ Katalogdan hiç kayıt alınamazsa **“Katalog okunamadı; arama başlatılamad
 
 ## 5. Sonuçları incele
 
+273 satırlık Excel ve büyük şema için **Hızlı aday araması** seçili kalsın. Bu mod önce bütün okunmuş katalogda ad/açıklama eşleşmelerini bulur, ardından değişken başına en fazla 24 aday için embedding kullanır. İş başına 256 farklı katalog metni sınırından sonra ad/açıklama araması sürer; sınır ve modelin kullanılmadığı sonuçların detayında belirtilir. Kelime olarak benzemeyen adaylar kaçabilir. **Tüm katalogda anlamsal arama** bu kısıtı kaldırır, fakat ilk hazırlığı ve aramaları daha uzun sürebilir. Her iki mod da Oracle'dan gerçekten okunmuş kapsamla sınırlıdır.
+
+İlk denemede **Her değişken için LLM yorumu ekle** kapalı kalsın. LLM yorumları kaynak aramasından ayrıdır; 273 ayrı model çağrısı ekleyebilir. Embedding desteğini açmak için yalnız embedding testinin başarılı olması yeterlidir; LLM yorumu da seçilirse LLM testi gerekir.
+
+Sonuçların tamamını beklemeden, biten değişkenleri tabloda görebilirsiniz. Hazırlık sırasında işlenen metin sayısı, değişken adı, geçen süre ve son güncelleme görünür. **Durdur** mevcut servis çağrısı tamamlanınca yeni işlemleri durdurur; görünen kısmi sonuçları ve girdilerinizi korur. İptal edilen analiz nihai rapor gibi indirilemez; tekrar aramada yeni iş başlar. Satır sonuçları erken görünse de bağımlılık değerlendirmesi ve nihai Excel tamamlanana kadar ekran **Kısmi sonuçlar** der.
+
 Her değişkenin karşısında olası **şema.tablo.kolon** görünür. **Detay**, alternatif adayları, gerçek kolon/tablo açıklamalarını ve eşleşme gerekçelerini açar. **Excel sonucunu indir** tüm girdileri, adayları ve kanıtları ayrı rapora kaydeder.
 
 Fiziksel adın bulunması, iş tanımının aynı olduğunu tek başına kanıtlamaz. Benzer ad farklı anlam taşıyabilir. Arama skoru doğruluk yüzdesi değildir. Eksik metadata, bağlantı hatası veya 10.000 kolon sınırına ulaşılması durumunda tarama eksik gösterilir; “DB'de yok” sonucu verilmez. Sınır aşılırsa seçili şema sayısını azaltın.
@@ -78,7 +84,7 @@ Katalog taraması artık şema bazında, en fazla 25 tablo/görünüm içeren gr
 2. LLM **Model kimliği** alanına `qwen38-27b` yazın. Embedding **Model kimliği** alanını boş bırakın; kurumda doğrulanan servis model adı istemiyor.
 3. **LLM bağlantısını test et** düğmesine basın. Ardından **Embedding bağlantısını test et** düğmesine basın.
 4. Birden fazla model bulunursa ilgili **Model kimliği** listesinden doğru modeli seçip aynı testi yeniden çalıştırın.
-5. Her iki test başarılıysa **Değişken inceleme** sayfasında **LLM + embedding desteği** kutusunu açın.
+5. Embedding testi başarılıysa **Değişken inceleme** sayfasında embedding desteğini açın. LLM yorumlarını ayrıca istiyorsanız **Her değişken için LLM yorumu ekle** kutusunu seçin; bu durumda LLM testi de başarılı olmalıdır.
 
 Test, standart servislerin model listesi veya servis bilgisi uçlarını kontrol eder ve sabit, kısa bir metinle gerçek çağrı yapar. Excel ve katalog bilgisi bu bağlantı testine gönderilmez. Servisin OpenAI/TEI uyumu yalnız adres adına bakılarak kabul edilmez. Başarılı test **tam çağrı adresini**, **istek/yanıt biçimini** ve embedding için gerçek **vektör boyutunu** doldurur. Model listesi birden fazla kimlik döndürürse otomatik rastgele model seçilmez. Gerçek dağıtım sürümü servisten okunamıyorsa bu durum etiketlenir; doğrulanmış sürüm bilgisi sayılmaz.
 

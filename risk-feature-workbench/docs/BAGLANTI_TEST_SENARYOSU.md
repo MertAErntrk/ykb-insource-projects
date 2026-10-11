@@ -1,4 +1,4 @@
-# Kurumda bağlantı test senaryosu · 0.3.3
+# Kurumda bağlantı test senaryosu · 0.4.0
 
 Bu senaryo iş bilgisayarında **gerçek Oracle hesabınız ve kurum servislerinizle** uygulanır. Amaç, hangi bağlantı adımının çalıştığını ve hangisinin hata verdiğini ayırmaktır. Geliştirme bilgisayarındaki otomatik testler gerçek kurum erişiminin yerine geçmez.
 
@@ -13,7 +13,7 @@ git pull --ff-only
 .\scripts\start.ps1
 ```
 
-Önceki web sürümü kuruluysa yeni paket kurulumu gerekmez. Tarayıcıda **Ctrl+F5** yapın. Test boyunca kurum ağı/VPN bağlantınızı açık tutun. Başlangıçta **LLM + embedding desteği** kapalı kalsın.
+Önceki web sürümü kuruluysa yeni paket kurulumu gerekmez. Tarayıcıda **Ctrl+F5** yapın. Test boyunca kurum ağı/VPN bağlantınızı açık tutun. Başlangıçta **Hızlı aday araması** seçili, **Embedding ile anlam karşılaştırması** ve **Her değişken için LLM yorumu ekle** kapalı kalsın.
 
 ## 2. Oracle oturumunu ve şema listesini test edin
 
@@ -97,11 +97,20 @@ Kullanıcının daha sonra paylaştığı uygulama ekranlarında da embedding ge
 1. **Değişken inceleme → Ekrandan değişken ekle** bölümünde kendi sözlüğünüzden gerçek bir alan adı ve açıklama girin. İlk kontrol için seçili şemada fiziksel yerini bildiğiniz bir alanı kullanın.
 2. **+ Değişken ekle** ile ikinci gerçek değişkeninizi ekleyin.
 3. Model desteği kapalıyken **Değişkenleri ara** düğmesine basın. İki girdi için ayrı sonuç, şema/tablo/kolon adayları ve varsa gerçek açıklamalar geldiğini kontrol edin.
-4. İki model bağlantısı da doğrulandıysa **LLM + embedding desteği** seçeneğini açıp aynı girdilerle tekrar çalıştırın. Model yorumunu fiziksel katalog kanıtından ayrı değerlendirin.
+4. Embedding bağlantısı doğrulandıysa **Embedding ile anlam karşılaştırması** seçeneğini açıp aynı girdilerle tekrar çalıştırın. **Her değişken için LLM yorumu ekle** ayrı ve isteğe bağlıdır; bunu açacaksanız LLM testini de tamamlayın. Model yorumunu fiziksel katalog kanıtından ayrı değerlendirin.
 5. Son olarak **Excel ile toplu ara** bölümünden kendi Excel'inizi seçin. `Alan Adı` ve `Açıklama` eşleşmelerini ve seçili sayfaları kontrol ederek aramayı başlatın.
 6. **Excel sonucunu indir** ile girdilerin ve sonuçların raporda bulunduğunu doğrulayın.
 
 Bir kolonun aynı adla bulunması, iş tanımının aynı olduğunu kanıtlamaz. Tarama eksikse “DB'de yok” sonucunu kabul etmeyin. 10.000 kolon sınırı veya zaman aşımı görülürse şema kapsamını daraltın. Başarılı tek satırlık erişim testi, tam katalog taramasının tamamlanacağını garanti etmez.
+
+### Büyük Excel için hızlı aramayı kontrol edin
+
+273 satırlık dosyanız için **Hızlı aday araması** kullanın; ilk denemede LLM yorumu kapalı kalsın. Önce ad/açıklama eşleşmeleriyle değişken başına en fazla 24 aday seçilir. Analiz boyunca en fazla 256 farklı katalog metni için embedding çağrılır; bu sınırdan sonra ad/açıklama araması sürer ve satır detayında sınır açıklanır. Aynı kolon vektörü aynı analiz içinde yeniden kullanılır. Kelime olarak benzemeyen adaylar kaçabilir; sonuç alınmaması kesin yokluk kanıtı değildir. Daha geniş semantik tarama için **Tüm katalogda anlamsal arama** seçeneği vardır ve hazırlığı uzun sürebilir.
+
+- Katalog okunduktan sonra bütün kolonlar için embedding hazırlanmasını beklemeden ilk değişkenin adayları işlenmelidir.
+- Tamamlanan satırlar analiz sürerken görünmeli; süre, son güncelleme, mevcut değişken ve metin sayacı ilerlemelidir.
+- **Durdur** mevcut servis çağrısı bittikten sonra işi durdurmalı, tamamlanan satırları ve yüklenen Excel'i korumalıdır. İptal edilen iş için nihai Excel raporu üretilmez.
+- Aynı dosyayı yeniden yüklemeden aramayı tekrar başlatabilirsiniz. Model kimliği/sürümü bilinmediği için önceki işin vektörleri sonraki işe taşınmaz.
 
 ## 6. Excel okunduğu halde katalog taraması kalırsa
 

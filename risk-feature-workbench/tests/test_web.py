@@ -193,6 +193,7 @@ class WebTests(unittest.TestCase):
 
     def test_model_enabled_web_pipeline_uses_both_explicit_services(self):
         identity,mapping=self.upload();data=deepcopy(SETTINGS);data["use_models"]=True
+        data["llm_review"]=True
         data["llm"]={"endpoint":"https://llm.invalid/chat","model":"llm-id","model_version":"v1","contract":"openai_chat","api_key":"LLM_SECRET_SENTINEL"}
         data["embedding"]={"endpoint":"https://embed.invalid/embed","model":"embed-id","model_version":"v1","request_template":{"inputs":"{texts}"},"response_path":"$","dimensions":2,"api_key":"EMBED_SECRET_SENTINEL"}
         seen=[]
