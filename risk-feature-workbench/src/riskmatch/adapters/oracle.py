@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from time import monotonic
 
-from riskmatch.errors import ConfigError, IntegrationError, OracleOperationError
+from riskmatch.errors import ConfigError, IntegrationError, OracleOperationError, AnalysisCancelled
 from riskmatch.semantics import parse_definition
 
 
@@ -225,7 +225,7 @@ class OracleAdapter:
             began = monotonic()
             try:
                 count = operation()
-            except _ScopeMismatch:
+            except (_ScopeMismatch, AnalysisCancelled):
                 raise
             except Exception as error:
                 safe = str(error) if isinstance(error, OracleOperationError) else str(oracle_error(error, schema + " · " + name))
@@ -412,7 +412,7 @@ class OracleAdapter:
                     if schema not in incomplete_schemas:
                         completed += 1
                     notify(schema + " · şema taraması tamamlandı")
-                except _ScopeMismatch:
+                except (_ScopeMismatch, AnalysisCancelled):
                     raise
                 except Exception as error:
                     # measure() already captured the safe phase/code. Discard a

@@ -1,5 +1,17 @@
 # Mimari değerlendirme ve karar kaydı
 
+## 0.4.0 büyük katalog optimizasyonu
+
+Önceki akış ilk değişkenin embedding aramasında bütün katalog vektörlerini hazırlıyor, sonra her sorguyu bütün vektörlerle Python'da karşılaştırıyordu. 273 satır, 273 katalog kaydı değildir: 10.000 kolon ve 4096 boyutta bir geçiş 2,73 milyon vektör karşılaştırması oluşturur. İkinci maliyet, üretim kanıtı değerlendirmesinde aynı katalog tanımlarının her talep için tekrar çözümlenmesiydi.
+
+Web varsayılanı iki aşamalıdır: kapsam içindeki tam ad ve ters kelime indeksiyle BM25 kısa listesi; ardından yalnız en fazla 24 aday üzerinde embedding sıralaması. Tam adlar kısa listede önceliklidir. Kelime eşleşmesi yoksa rastgele kolonlar modele gönderilmez. İş başına en fazla 256 farklı katalog metni vektörleştirilir; bütçe sonunda ad/metin kanıtları korunur, modelin atlandığı açıkça raporlanır. Bu bir yaklaşık aday bulma stratejisidir; anlamsal geri çağırımın aynı kaldığı iddia edilmez. Fiziksel ad kontrolü bütün okunmuş katalogda kalır; kısa listede aday olmaması semantik yokluk kanıtı değildir.
+
+Aynı analizde eş metinler, normalize edilmiş float32 vektörler ve sorgu vektörleri yeniden kullanılır. Genişletilmiş aday değerlendirmesi aynı vektörleri kullanır. Model kimliği bilinmeyen servis için analizler arası kalıcı yeniden kullanım hâlâ kapalıdır. Ortak vector DB veya kurum servisinde model kurulumu yapılmaz. İlk embedding hatasından sonra hızlı mod kalan çağrıları atlar; ham hata/sır taşınmaz. LLM yorumu ayrı seçilir ve varsayılan kapalıdır; başarısız yorum kaynak kanıtlarını silmez. Hızlı web model çağrıları 15 saniyelik bağlantı/okuma timeout'u ve sıfır otomatik tekrar kullanır; bütün iş için kesin duvar saati garantisi değildir.
+
+Kullanıcı tam anlamsal aramayı açıkça seçebilir. Bu yol bütün okunmuş katalog vektörlerini üretir ve uzun sürebilir; ilerleme artık servis grupları bazında görünür. Her iki modda işbirlikli iptal mevcut çağrı döndükten sonra yeni işi engeller. Sonuçlar tamamlandıkça oturuma ait arayüzde yayınlanır; bağımlılık/üretim değerlendirmesi bitene kadar kısmi olarak etiketlenir. İptal edilen iş tamamlanmış Excel raporu gibi indirilemez. Hızlı mod checkpoint yazımları birinci satırda, ardından 10 satır veya 5 saniyelik aralıklarla birleştirilir.
+
+Oracle taraması ilk hazırlıkta hâlâ gereklidir; katalog erişim ve 10.000 kolon sınırı korunur. Bir sonraki kurumsal mimari adımı, model revision'ı sabitlenmiş, kullanıcı yetkileriyle filtrelenen ve değişen/silinen metadata'yı takip eden ortak indeks olabilir. Bu sürüm bu altyapının kurulduğunu iddia etmez.
+
 ## 0.2 web sürümü
 
 Güncel kullanıcı arayüzü Flask + Waitress üzerinde, yalnız 127.0.0.1 adresine bağlı yerel web uygulamasıdır. HTML/CSS/JavaScript paket içindedir; CDN, Node veya Tk gerekmez. Kullanıcı Oracle ve isteğe bağlı model bağlantılarını formdan girer, kendi Excel'ini yükler ve sayfa/sütun eşler. Tek arka plan worker ilerlemeyi raporlar; kaynak konumu/kolon açıklaması adaylarda ve Excel'de taşınır. Fiziksel varlık ve semantik destek ayrımı korunur.

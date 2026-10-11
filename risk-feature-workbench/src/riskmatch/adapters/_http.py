@@ -4,6 +4,7 @@ import json
 import os
 import time
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +15,37 @@ from riskmatch.errors import ConfigError, IntegrationError
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         return None
+
+
+def _ssl_context(ca_file):
+    try:
+        return ssl.create_default_context(cafile=ca_file)
+    except (OSError, ssl.SSLError):
+        raise ConfigError("Kurum CA dosyası okunamadı; PEM dosyasının yolunu kontrol edin.") from None
+
+
+class _ReusableHTTPS:
+    """Adapter-owned TLS setup, created only when a validated POST is ready.
+
+    This caches the verified context and redirect policy, not responses, request
+    headers, credentials or live sockets. A changed CA path replaces the opener.
+    """
+
+    def __init__(self):
+        self._opener = None
+        self._ca_file = None
+        self._lock = threading.Lock()
+
+    def get_opener(self, config):
+        ca_file = config.get("ca_file") or None
+        with self._lock:
+            if self._opener is None or ca_file != self._ca_file:
+                context = _ssl_context(ca_file)
+                opener = urllib.request.build_opener(
+                    _NoRedirect(), urllib.request.HTTPSHandler(context=context)
+                )
+                self._opener, self._ca_file = opener, ca_file
+            return self._opener
 
 
 def validate_endpoint(config):
@@ -69,11 +101,14 @@ def post_json(config, payload, *, transport=None, api_key=None):
     if len(body) > 512_000:
         raise ConfigError("Servis isteği boyut sınırını aşıyor.")
     request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-    try:
-        context=ssl.create_default_context(cafile=config.get("ca_file") or None)
-    except (OSError,ssl.SSLError):
-        raise ConfigError("Kurum CA dosyası okunamadı; PEM dosyasının yolunu kontrol edin.") from None
-    opener = transport or urllib.request.build_opener(_NoRedirect(),urllib.request.HTTPSHandler(context=context))
+    if isinstance(transport, _ReusableHTTPS):
+        opener = transport.get_opener(config)
+    else:
+        # Preserve validation for direct callers and explicitly injected transports.
+        context = _ssl_context(config.get("ca_file") or None)
+        opener = transport or urllib.request.build_opener(
+            _NoRedirect(), urllib.request.HTTPSHandler(context=context)
+        )
     for attempt in range(retries + 1):
         try:
             with opener.open(request, timeout=timeout) as response:

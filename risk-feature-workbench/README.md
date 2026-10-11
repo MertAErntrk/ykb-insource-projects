@@ -39,7 +39,9 @@ Standart başlıklar: `Kategori | Alan Adı | Alan tipi | Açıklama | Halihazı
 
 `DPY-4024`, Oracle çağrısının zaman sınırını aştığını belirtir; tek başına parola veya yetki sorunu demek değildir. Ayrıntılı ayırma adımları [bağlantı test senaryosundadır](docs/BAGLANTI_TEST_SENARYOSU.md). Gerçek kurum bağlantısı ancak iş bilgisayarındaki testle doğrulanabilir.
 
-**0.3.3:** Oracle kataloğu şema ve en fazla 25 tablo içeren gruplarla okunur; kolon ve açıklama görünümleri tek büyük sorguda birleştirilmez. Tarama aşaması ve okunan kolon sayısı gösterilir. Katalog hiç okunamazsa Excel'in okunduğu açıkça belirtilir, arama başlamaz ve boş sonuç satırları üretilmez. Önceden okunmuş katalog kayıtları varsa korunur; eksik kapsamda yokluk sonucu verilmez.
+**0.4.0:** Web'de varsayılan **Hızlı aday araması**, ad/açıklama indeksinden en fazla 24 aday seçer ve yalnız bu adaylar için embedding kullanır. İş başına 256 farklı katalog metni sınırı vardır; sınırdan sonra metin araması sürer ve sonuçlarda açıkça belirtilir. Tam ad kontrolü bütün okunmuş katalogda yapılır. Kelime olarak benzemeyen adaylar kaçabilir; **Tüm katalogda anlamsal arama** ayrıca seçilebilir. LLM yorumu ayrı ve varsayılan olarak kapalıdır. Sonuçlar satır satır görünür; aşama, metin sayısı, geçen süre ve **Durdur** düğmesi vardır. Yeni paket kurulumu gerekmez.
+
+Oracle kataloğu şema ve en fazla 25 tablo içeren gruplarla okunur; kolon ve açıklama görünümleri tek büyük sorguda birleştirilmez. Katalog hiç okunamazsa arama başlamaz. Kısmi kayıtlar korunur; eksik kapsamda yokluk sonucu verilmez. Katalog tarama sınırı 10.000 kolondur; hızlı aday araması bu sınırı kaldırmaz.
 
 Embedding için model kimliğini boş bırakın; LLM için doğrulanan model `qwen38-27b`'dir. Gerçek embedding çağrısı başarılıysa isteğe bağlı `/v1/models` ve `/info` yollarındaki 404/405, nötr **Desteklenmiyor** durumuyla gösterilir. Son gerçek çağrının başarısız olması hâlâ hata sayılır. Kullanıcının kurum testinde `/v1/embeddings` model adı olmadan 4096 boyut döndürmüştür; aynı sözleşme analizde kullanılır.
 

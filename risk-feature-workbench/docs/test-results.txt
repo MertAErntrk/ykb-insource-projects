@@ -22,6 +22,25 @@ test_timeout_returns_prior_passed_steps_without_accepting_login (test_diagnostic
 test_ids_persist_through_edit_of_prepared_copy (test_excelio.ExcelTests) ... ok
 test_preserves_all_values_sheets_order_and_neutralizes_formula (test_excelio.ExcelTests) ... ok
 test_unrecognized_sheet_and_formula_exposed (test_excelio.ExcelTests) ... ok
+test_500_single_text_requests_build_one_verified_opener_lazily (test_http_reuse.ReusableHTTPTests) ... ok
+test_changed_ca_path_rebuilds_and_bad_ca_cannot_fall_back (test_http_reuse.ReusableHTTPTests) ... ok
+test_endpoint_allowlist_and_request_limits_remain_checked_after_reuse (test_http_reuse.ReusableHTTPTests) ... ok
+test_injected_transport_keeps_explicit_ca_validation (test_http_reuse.ReusableHTTPTests) ... ok
+test_llm_reuses_setup_and_empty_candidates_do_not_create_it (test_http_reuse.ReusableHTTPTests) ... ok
+test_retry_and_response_limits_are_preserved (test_http_reuse.ReusableHTTPTests) ... ok
+test_separate_adapters_never_share_opener_or_credentials (test_http_reuse.ReusableHTTPTests) ... ok
+test_10000_columns_and_273_rows_stream_before_global_embedding_finishes (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_cancellation_stops_before_the_next_row_or_model_call (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_complete_stable_model_results_still_resume_without_extra_calls (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_fast_search_does_not_require_an_unused_llm_configuration (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_stable_model_resume_retries_embedding_after_transient_failure (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_stable_model_resume_retries_llm_review_after_transient_failure (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_unavailable_embedding_keeps_lexical_evidence_and_exposes_degradation (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_unknown_model_vectors_and_checkpoints_are_not_reused_between_fast_runs (test_large_catalog_pipeline.LargeCatalogPipelineTests) ... ok
+test_catalog_context_is_scoped_to_its_own_snapshot (test_large_catalog_pipeline.ProductionPreparationTests) ... ok
+test_catalog_definition_parsing_is_once_per_run_and_movement_evidence_is_preserved (test_large_catalog_pipeline.ProductionPreparationTests) ... ok
+test_ratio_trust_checks_match_the_unprepared_path (test_large_catalog_pipeline.ProductionPreparationTests) ... ok
+test_untrusted_requested_transaction_never_iterates_the_catalog (test_large_catalog_pipeline.ProductionPreparationTests) ... ok
 test_alternative_inference_success_does_not_hide_failed_post (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_bad_ca_file_is_reported_without_network (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_default_built_in_addresses_are_available_without_endpoint_fields (test_model_diagnostics.ModelDiagnosticsTests) ... ok
@@ -59,6 +78,24 @@ test_tei_route_fallback_does_not_replace_explicit_custom_contract (test_model_di
 test_total_deadline_bounds_later_calls (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_unknown_selected_model_is_not_silently_substituted (test_model_diagnostics.ModelDiagnosticsTests) ... ok
 test_wrong_explicit_response_path_is_not_silently_overridden (test_model_diagnostics.ModelDiagnosticsTests) ... ok
+test_10000_columns_273_queries_have_bounded_vectors_and_comparisons (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_cancellation_before_first_network_call_and_between_batches (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_configuration_bounds (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_exact_physical_match_reserves_slot_even_at_end_of_catalog (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_exhausted_budget_preserves_lexical_candidates_and_discloses_skip (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_full_mode_keeps_all_candidates_and_emits_per_batch_progress (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_identical_catalog_text_deduplicates_and_expansion_reuses_query (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_invalid_vector_degrades_to_lexical_and_opens_circuit (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_no_lexical_match_never_embeds_arbitrary_catalog_prefix (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_provider_failure_opens_circuit_and_never_leaks_raw_error (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_scope_is_applied_before_shortlist_and_provider_calls (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_unversioned_cache_is_local_to_index_and_ignores_disk (test_optimized_retrieval.OptimizedRetrievalTests) ... ok
+test_cancel_before_first_result_reports_zero_processed (test_optimized_web.OptimizedWebTests) ... ok
+test_cancel_requires_csrf_and_job_owner_then_preserves_completed_rows (test_optimized_web.OptimizedWebTests) ... ok
+test_failure_keeps_partial_evidence_without_raw_exception (test_optimized_web.OptimizedWebTests) ... ok
+test_finished_rows_replace_partial_snapshot_and_mode_reaches_pipeline (test_optimized_web.OptimizedWebTests) ... ok
+test_live_partial_results_are_annotated_and_progress_is_phase_specific (test_optimized_web.OptimizedWebTests) ... ok
+test_shell_has_accessible_analysis_choices_and_cancellation (test_optimized_web.OptimizedWebTests) ... ok
 test_all_schema_timeouts_return_zero_records_and_safe_phase_evidence (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
 test_comment_timeout_retains_physical_columns_without_inventing_comments (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
 test_exact_last_batch_record_limit_can_still_be_complete (test_oracle_catalog_scan.OracleCatalogScanTests) ... ok
@@ -191,7 +228,8 @@ test_schema_selection_required_and_must_come_from_login (test_web_workflow.Workf
 test_standard_excel_can_run_without_mapping_payload (test_web_workflow.WorkflowTests) ... ok
 
 ----------------------------------------------------------------------
-Ran 191 tests in 28.448s
+Ran 228 tests in 98.507s
 
 OK
 Yapılandırma biçimi doğrulandı. Ağ bağlantısı denenmedi.
+Large catalog fixture: 10000 columns / 273 requests; first row 0.531s; total 49.718s; catalog embeddings 256; query embeddings 273; LLM calls 0

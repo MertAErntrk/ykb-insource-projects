@@ -32,6 +32,10 @@ def clean_profile(raw):
     if raw.get("mode","real") != "real":raise ConfigError("Web uygulaması yalnız gerçek kurum bağlantılarıyla çalışır.")
     if not isinstance(raw.get("use_models",False),bool):raise ConfigError("Model seçimi geçersiz.")
     result={"mode":"real","use_models":raw.get("use_models",False)}
+    result["search_mode"] = raw.get("search_mode", "fast")
+    result["llm_review"] = raw.get("llm_review", False)
+    if result["search_mode"] not in ("fast", "full") or not isinstance(result["llm_review"], bool):
+        raise ConfigError("Arama ve LLM yorum seçimi geçersiz.")
     for section,keys in PROFILE_KEYS.items():
         values=raw.get(section,{})
         if not isinstance(values,dict):raise ConfigError("Bağlantı bölümleri nesne olmalı.")
@@ -114,11 +118,16 @@ def model_config(raw,name):
 def build_run(raw):
     profile=clean_profile(raw)
     oracle,credentials=oracle_inputs(raw)
-    config={"mode":"real","allow_real_connections":True,"use_models":profile["use_models"],"oracle":oracle}
+    config={"mode":"real","allow_real_connections":True,"use_models":profile["use_models"],"oracle":oracle,
+            "llm_review":profile["llm_review"],
+            "retrieval":{"limit":8,"expanded_limit":24,"search_mode":profile["search_mode"],
+                         "candidate_limit":24,"embedding_budget":256}}
     secrets={"oracle":credentials}
     if profile["use_models"]:
-        for name in ("llm","embedding"):
+        for name in (("embedding","llm") if profile["llm_review"] else ("embedding",)):
             config[name]=model_config(raw,name)
+            if profile["search_mode"] == "fast":
+                config[name].update(timeout_seconds=15,max_retries=0)
             key=raw[name].get("api_key","")
             if not isinstance(key,str) or len(key)>8192:raise ConfigError("Servis anahtarı geçersiz.")
             secrets[name]=key

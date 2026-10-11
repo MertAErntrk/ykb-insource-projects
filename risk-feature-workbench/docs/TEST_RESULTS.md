@@ -1,10 +1,22 @@
-# Web sürümü doğrulaması — 0.3.3
+# Web sürümü doğrulaması — 0.4.0
 
 2026-10-11 tarihinde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 üzerinde doğrulandı. Kurum Oracle/Qwen servislerine bağlanılmadı; otomatik ve tarayıcı testlerinde Oracle bağlantısı ile model HTTP taşıması kontrollü olarak taklit edildi.
 
-## 0.3.3 doğrulaması
+## 0.4.0 büyük katalog doğrulaması
 
-**191 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **28,448 saniyede geçti**. Güncel çıktı: [test-results.txt](test-results.txt). JavaScript sözdizimi ve 17 arayüz regresyon senaryosu da geçti. Yeni çalışma bağımlılığı yoktur.
+**228 Python testi**, gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **98,507 saniyede geçti**. Güncel çıktı: [test-results.txt](test-results.txt). Son metin düzeltmesinden sonra yedi pipeline testi, JavaScript sözdizimi ve 17 arayüz regresyon senaryosu tekrar geçti. Yeni çalışma bağımlılığı yoktur.
+
+- Gerçek Excel okuma/yazma ve gerçek embedding adapter sözleşmesiyle **10.000 kolon, 273 talep ve 4096 boyut** sınandı. Son tam test koşusunda ilk satır **0,531 sn**, tüm çalışma **49,718 sn** sürdü. Bunlar kontrollü yerel ölçümlerdir; Oracle/HTTP taşıması taklittir, kurum performansı veya eşleşme doğruluğu iddiası değildir. Tarayıcı kontrolü aynı sırada çalıştığından süre donanım/yüke de bağlıdır.
+- Katalog için **256**, sorgular için **273** embedding metni işlendi; **0 LLM çağrısı** yapıldı. Son katalog kayıtlarındaki tam fiziksel adlar da bulundu. Aynı satırın genişletilmiş aday incelemesinde sorgu vektörü tekrar çağrılmadı. Fiziksel eşleşme, eksik katalog, şema sınırı, kısa listede eşleşme olmaması ve bütçe sınırı test edildi.
+- Geçici embedding hatası sonraki model çağrılarını durdururken kaynak adaylarını korur. İsteğe bağlı LLM hatası eşleşme kanıtını silmez. Kimliği sabit servis toparlandığında eksik model değerlendirmesi checkpoint'ten kalıcı biçimde atlanmaz; tam başarılı checkpoint hâlâ yeniden kullanılabilir. Model kimliği bilinmiyorsa analizler arası vektör veya sonuç kullanımı yoktur.
+- 500 adapter POST çağrısında TLS context/opener yalnız bir kez kuruldu. CA değişikliği, geçersiz CA, ayrı adapter/anahtar izolasyonu, izinli host, boyut, retry ve yanıt sınırları korundu. Bu test socket havuzu veya gerçek servis hızlanması kanıtı değildir.
+- Tarayıcıda yalnız embedding testi yapılarak hızlı arama başlatıldı; LLM testi gerekmedi. Kısmi satırlar iş sürerken göründü. **Durdur** sonrasında 53 sonuç korundu, rapor indirme açılmadı. Aynı 273 satırlık dosya yeniden yüklenmeden tekrar çalıştırıldı; **273/273** sonuç ve Excel indirme doğrulandı. İndirilen dosyada 273 sonuç, 6.552 aday ve özgün 273 girdi satırı vardı. Tarayıcı hata/uyarı kaydı boştu.
+
+Hızlı arama bütün kataloğun semantik eşdeğeri değildir: ad/açıklama ön elemesi kelime olarak benzemeyen adayları kaçırabilir; 256 kolon bütçesinden sonra ad/metin araması sürer. Uyarılar satır detayında ve çalışma özetinde gösterilir. Tam anlamsal arama ayrıca seçilebilir. Oracle katalog hazırlığı ve 10.000 kolon sınırı devam eder. Gerçek DM_CAD erişim süresi ve kullanıcı Excel'i bu bilgisayarda doğrulanmamıştır.
+
+## Önceki 0.3.3 doğrulaması
+
+**191 Python testi**, önceki 0.3.3 sürümünde gerçek Python 3.9.7 x64 ve Windows PowerShell 5.1 ile **28,448 saniyede geçti**. JavaScript sözdizimi ve 17 arayüz regresyon senaryosu da geçti. Yeni çalışma bağımlılığı yoktur.
 
 - İsteğe bağlı model listesi ve TEI bilgi yollarının 404/405 yanıtı, yalnız gerçek model çağrısı doğrulanmışsa nötr **Desteklenmiyor** olarak gösterilir. Hata kodu ve süre raporda korunur. Başarısız gerçek çağrı, yetki/TLS sorunu ve bozuk vektör başarıya çevrilmez.
 - Oracle taraması seçili şemaları ve en fazla 25 nesnelik grupları ayrı sorgular. Kolon, kolon açıklaması, tablo açıklaması ve anahtar bilgileri ayrı okunur. Bağlı parametreler, kayıt/süre sınırı, eksik görünürlük, kısmi kayıtların korunması, zaman aşımından sonra yeni bağlantı ve veritabanı/bağlam tutarlılığı test edilir.

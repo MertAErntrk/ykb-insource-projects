@@ -377,7 +377,29 @@ def build_dependencies(requests):
     return {"nodes": nodes, "edges": edges, "issues": issues}
 
 
-def assess_production(request, results_by_id, dependency_graph, records):
+def prepare_production_catalog(records):
+    """Prepare immutable-for-this-run lookup data without a shared/global cache.
+
+    Metadata definitions are parsed at most once here. Movement-source discovery
+    then uses the same trusted grain/transaction predicates as the direct path.
+    The caller must rebuild this context after changing the catalog snapshot.
+    """
+    by_id, definitions, movements = {}, {}, defaultdict(list)
+    for record in records:
+        identity = record["catalog_id"]
+        by_id[identity] = record
+        definition = _definition(record, True)
+        definitions[identity] = definition
+        facts = definition["facts"]
+        grain, transaction = facts.get("grain", {}), facts.get("transaction", {})
+        if (_trusted(grain, "grain") and grain["value"] == "transaction"
+                and _trusted(transaction, "transaction")):
+            movements[_key(transaction["value"])].append(identity)
+    return {"records_by_id": by_id, "definitions_by_id": definitions,
+            "movement_sources": dict(movements)}
+
+
+def assess_production(request, results_by_id, dependency_graph, records, catalog_context=None):
     """Assess a proposal, never generate SQL or compute customer data.
 
     A candidate requires ready operands, compatible verified keys and scope, and
@@ -395,11 +417,17 @@ def assess_production(request, results_by_id, dependency_graph, records):
         # A movement source is an explicitly tagged source, not a lexical hit.
         requested_transaction = definition["facts"].get("transaction", {})
         source_ids = []
-        for record in records:
-            facts = _definition(record, True)["facts"]
-            grain, transaction = facts.get("grain", {}), facts.get("transaction", {})
-            if _trusted(grain, "grain") and grain["value"] == "transaction" and _trusted(transaction, "transaction") and _trusted(requested_transaction, "transaction") and _key(transaction["value"]) == _key(requested_transaction["value"]):
-                source_ids.append(record.get("catalog_id"))
+        # Without a trusted requested transaction no record can satisfy this
+        # predicate. Do not reparse an entire catalog to establish that fact.
+        if _trusted(requested_transaction, "transaction"):
+            if catalog_context is not None:
+                source_ids = list(catalog_context["movement_sources"].get(_key(requested_transaction["value"]), ()))
+            else:
+                for record in records:
+                    facts = _definition(record, True)["facts"]
+                    grain, transaction = facts.get("grain", {}), facts.get("transaction", {})
+                    if _trusted(grain, "grain") and grain["value"] == "transaction" and _trusted(transaction, "transaction") and _key(transaction["value"]) == _key(requested_transaction["value"]):
+                        source_ids.append(record.get("catalog_id"))
         return {"status": "source_only" if source_ids else "insufficient", "reasons": reasons + (["movement_sources_only; aggregation_not_verified"] if source_ids else ["no_verified_derivation"]), "dependencies": source_ids}
     facts = definition["facts"]
     for dimension in ("entity", "grain", "reference_date", "zero_policy", "null_policy", "numerator", "denominator"):
@@ -409,7 +437,12 @@ def assess_production(request, results_by_id, dependency_graph, records):
         reasons.append("unsupported_formula")
     if {e["role"] for e in dependencies} != {"numerator", "denominator"}:
         reasons.append("unresolved_operands")
-    by_record = {r["catalog_id"]: r for r in records}
+    by_record = (catalog_context["records_by_id"] if catalog_context is not None
+                 else {r["catalog_id"]: r for r in records})
+    def record_definition(record):
+        if catalog_context is not None:
+            return catalog_context["definitions_by_id"][record["catalog_id"]]
+        return _definition(record, True)
     selected = []
     for edge in dependencies:
         dep_id = edge["target"]
@@ -425,7 +458,7 @@ def assess_production(request, results_by_id, dependency_graph, records):
             reasons.append("operand_catalog_missing:" + dep_id)
             continue
         selected.append(record)
-        actual = _definition(record, True)["facts"]
+        actual = record_definition(record)["facts"]
         for dimension in ("entity", "grain", "reference_date", "business_scope"):
             value = actual.get(dimension)
             if not _trusted(value, dimension):
@@ -439,7 +472,7 @@ def assess_production(request, results_by_id, dependency_graph, records):
         # Same object and verified unique key is a conservative sufficient join
         # condition. Cross-object joins need a future lineage/relationship plugin.
         for dimension in ("entity", "grain", "reference_date", "business_scope", "measure", "transaction", "direction", "person_key", "unit"):
-            x, y = _definition(a, True)["facts"].get(dimension), _definition(b, True)["facts"].get(dimension)
+            x, y = record_definition(a)["facts"].get(dimension), record_definition(b)["facts"].get(dimension)
             if x or y:
                 if not _trusted(x, dimension) or not _trusted(y, dimension):
                     reasons.append("operands_missing:" + dimension)
