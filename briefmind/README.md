@@ -48,7 +48,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 - **Gösterim.** `Ad` (güven ≥ 0,7); `Ad?` (ad var ama güven düşük); `Bilinmeyen` (kimse yok); `A → B` (klipte sıralı devir); `A / B (aynı anda)` (çakışma: bu satırdan karar ya da aksiyon çıkmaz, metin ⟨⟩ içinde).
 - **Terimler otomatik.** Terim düzeltmesi ve öğrenme onay istemez; LLM yalnızca öneri verir, kelime sınırı, ek uyumu ve sayı/tarih kapıları karar verir.
 - **Belirsizler paneli.** Kararsız kelimeler, emin olunmayan konuşmacılar ve şüpheli klipler Not sekmesinde salt okunur listelenir; `ts:` bağlantısı transkripti o ana açar. Şüpheli klip nota girmez.
-- **Sahiplik temkinli.** Sorumlu ataması kesin kaynaklarla sınırlanır (Faz 4, devam ediyor); belirsiz sahipler e-posta ve Jira taslağına girmez.
+- **Sahiplik temkinli.** Sorumlu yalnız kesin kaynaktan atanır (güvenli konuşmacının kendi taahhüdü ya da adıyla görev verilen katılımcı); belirsiz sahipler "Sahibi belirsiz" bloğunda kalır, e-posta ve Jira taslağına girmez.
 - **Ölçüm araçları.** `tools/olcum.py` (WER, SER, belirsiz oranı), `tools/etiketle.py` (klip etiketleme), `tools/replay.py` (kaydı çevrimdışı yeniden işletme). Kayıt yalnızca `olcum_kaydi` açıkken yazılır.
 
 ## Kurulum
