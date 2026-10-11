@@ -9,6 +9,7 @@ Kullanim (briefmind klasorunden; PowerShell tirnak sorunu olmaz):
   python tools\\servis_kesfet.py https://<embedding-adresi>
   python tools\\servis_kesfet.py https://<adres> --anahtar <token>      (servis token istiyorsa)
   python tools\\servis_kesfet.py https://<adres> --proxy                (Windows proxy'si uzerinden)
+  python tools\\servis_kesfet.py --llm                                 (LLM: adres/model/anahtar config.json'dan)
 
 Cikti ekrana ve servis_kesfet_cikti.txt'ye yazilir; adres <ADRES> diye maskelenir, paylasmak guvenlidir.
 """
@@ -27,6 +28,8 @@ SORGU = "test ortami ne zaman hazir"
 GET_YOLLAR = ["/", "/health", "/healthz", "/ping", "/info", "/v1/models", "/models", "/docs", "/redoc"]
 EMB_YOLLAR = ["/v1/embeddings", "/embeddings", "/embed", "/v1/embed", "/encode", "/embedding", "/api/embed",
               "/api/embeddings", "/predict", "/invocations"]
+SOHBET_YOLLAR = ["/v1/chat/completions", "/chat/completions", "/v1/completions", "/completions", "/generate",
+                 "/v1/generate", "/chat", "/api/chat", "/invoke", "/v1/responses"]
 RR_YOLLAR = ["/rerank", "/v1/rerank", "/score", "/v1/score", "/reranking", "/v1/reranking", "/api/rerank"]
 SATIRLAR = []
 
@@ -113,6 +116,41 @@ def sema_alanlari(spec, islem):
         return []
 
 
+def sohbet_dene(ist, spec, model_adi, m):
+    """LLM: sohbet yolu ve govde bicimini bulur (404 -> yol yok; 422 -> yol var, govde farkli)."""
+    yaz("\n== 5) Sohbet (LLM) denemesi ==")
+    aday = list(SOHBET_YOLLAR)
+    if spec:
+        aday = [p for p, isl in spec["paths"].items() if "post" in isl and any(
+            k in p.lower() for k in ("chat", "complet", "generat", "invoke", "respons"))] + aday
+    mesaj = [{"role": "user", "content": "Tek kelimeyle cevap ver: merhaba"}]
+    govdeler = [{"model": model_adi, "messages": mesaj, "max_tokens": 16},
+                {"messages": mesaj, "max_tokens": 16},
+                {"model": model_adi, "prompt": "merhaba", "max_tokens": 16},
+                {"inputs": "merhaba", "parameters": {"max_new_tokens": 16}}]
+    if not model_adi:
+        govdeler = govdeler[1:]
+    bulundu = False
+    for yol in dict.fromkeys(aday):
+        for govde in govdeler:
+            durum, j = ist.iste("POST", yol, govde)
+            if durum == 404 or durum is None:
+                if durum is None:
+                    yaz(f"  POST {yol:22} -> baglanti hatasi: {m(kisa(j, 160))}")
+                break
+            alanlar = sorted(j) if isinstance(j, dict) else type(j).__name__
+            yaz(f"  POST {yol:22} govde {sorted(govde)} -> {durum}  alanlar: {alanlar}  {m(kisa(j, 220))}")
+            if durum == 200:
+                bulundu = True
+                break
+        if bulundu:
+            break
+    if bulundu:
+        yaz(f"  CALISAN sohbet yolu: {yol}  (config 'route' bu yolun koku + gerekirse '/v1' olmali)")
+    else:
+        yaz("  calisan sohbet yolu bulunamadi; 404 disi cevaplari (ozellikle 401/403/422) bana gonder.")
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -121,12 +159,26 @@ def main():
     import warnings
     warnings.filterwarnings("ignore")
     a = argparse.ArgumentParser()
-    a.add_argument("adres")
+    a.add_argument("adres", nargs="?", default="")
+    a.add_argument("--llm", action="store_true", help="adres/model/anahtar config.json'daki LLM ayarindan")
     a.add_argument("--anahtar", default="")
     a.add_argument("--model", default="", help="biliniyorsa model adi (govdeye eklenir)")
     a.add_argument("--proxy", action="store_true", help="Windows/ortam proxy ayarini kullan")
     a.add_argument("--ca", default="", help="kok sertifika dosyasi (yoksa TLS dogrulamasi kapali)")
     g = a.parse_args()
+    if g.llm or not g.adres:
+        try:
+            with open("config.json", encoding="utf-8-sig") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            print(f"config.json okunamadi: {e}")
+            return
+        g.adres = g.adres or cfg.get("route", "")
+        g.model = g.model or str(cfg.get("model") or "")
+        g.anahtar = g.anahtar or str(cfg.get("llm_key") or cfg.get("api_key") or "")
+        g.proxy = g.proxy or bool(cfg.get("llm_proxy", False))
+        g.ca = g.ca or (cfg.get("ca_bundle") or "")
+        g.llm = True
     adres = g.adres.strip().rstrip("/")
     if adres.endswith("/v1"):
         adres = adres[:-3]
@@ -164,63 +216,67 @@ def main():
             model_adi = model_adi or j["data"][0].get("id", "")
     yaz(f"  model adi: {model_adi or '(bilinmiyor — gerekirse --model ile ver)'}")
 
-    yaz("\n== 3) Embedding denemesi ==")
-    govdeler = [{"input": ORNEK}, {"inputs": ORNEK}, {"texts": ORNEK}, {"sentences": ORNEK}, {"text": ORNEK[0]},
-                {"input": ORNEK[0]}]
-    if model_adi:
-        govdeler = [dict(x, model=model_adi) for x in govdeler] + govdeler
-    bulunan = None
-    for yol in dict.fromkeys(emb_aday):
-        ilk = None
-        for govde in govdeler:
-            durum, j = ist.iste("POST", yol, govde)
-            ilk = ilk or (durum, j)
-            if durum == 404 or durum is None:
-                break                                                   # yol yok: diger govdeleri deneme
-            v = vektor_bul(j) if durum == 200 else None
-            if v:
-                bulunan = (yol, list(govde), v)
+    if not g.llm:
+        yaz("\n== 3) Embedding denemesi ==")
+        govdeler = [{"input": ORNEK}, {"inputs": ORNEK}, {"texts": ORNEK}, {"sentences": ORNEK}, {"text": ORNEK[0]},
+                    {"input": ORNEK[0]}]
+        if model_adi:
+            govdeler = [dict(x, model=model_adi) for x in govdeler] + govdeler
+        bulunan = None
+        for yol in dict.fromkeys(emb_aday):
+            ilk = None
+            for govde in govdeler:
+                durum, j = ist.iste("POST", yol, govde)
+                ilk = ilk or (durum, j)
+                if durum == 404 or durum is None:
+                    break                                                   # yol yok: diger govdeleri deneme
+                v = vektor_bul(j) if durum == 200 else None
+                if v:
+                    bulunan = (yol, list(govde), v)
+                    break
+            if bulunan:
                 break
+            if ilk and ilk[0] not in (404,):
+                yaz(f"  POST {yol:16} -> {ilk[0]}  {m(kisa(ilk[1], 200))}")
         if bulunan:
-            break
-        if ilk and ilk[0] not in (404,):
-            yaz(f"  POST {yol:16} -> {ilk[0]}  {m(kisa(ilk[1], 200))}")
-    if bulunan:
-        yol, alanlar, (adet, boyut) = bulunan
-        yaz(f"  CALISAN: POST {yol}  govde alanlari: {alanlar}  -> {adet} vektor, boyut {boyut}"
-            + ("  (bge-m3 ile uyumlu)" if boyut == 1024 else ""))
-    else:
-        yaz("  calisan embedding yolu bulunamadi (yukarida 404 disi cevap varsa onu bana gonder).")
+            yol, alanlar, (adet, boyut) = bulunan
+            yaz(f"  CALISAN: POST {yol}  govde alanlari: {alanlar}  -> {adet} vektor, boyut {boyut}"
+                + ("  (bge-m3 ile uyumlu)" if boyut == 1024 else ""))
+        else:
+            yaz("  calisan embedding yolu bulunamadi (yukarida 404 disi cevap varsa onu bana gonder).")
 
-    yaz("\n== 4) Reranker denemesi ==")
-    rr_govdeler = [{"query": SORGU, "texts": ORNEK}, {"query": SORGU, "documents": ORNEK},
-                   {"text_1": SORGU, "text_2": ORNEK}, {"query": SORGU, "passages": ORNEK},
-                   {"pairs": [[SORGU, x] for x in ORNEK]}]
-    if model_adi:
-        rr_govdeler = [dict(x, model=model_adi) for x in rr_govdeler] + rr_govdeler
-    rr = None
-    for yol in dict.fromkeys(rr_aday):
-        ilk = None
-        for govde in rr_govdeler:
-            durum, j = ist.iste("POST", yol, govde)
-            ilk = ilk or (durum, j)
-            if durum == 404 or durum is None:
+        yaz("\n== 4) Reranker denemesi ==")
+        rr_govdeler = [{"query": SORGU, "texts": ORNEK}, {"query": SORGU, "documents": ORNEK},
+                       {"text_1": SORGU, "text_2": ORNEK}, {"query": SORGU, "passages": ORNEK},
+                       {"pairs": [[SORGU, x] for x in ORNEK]}]
+        if model_adi:
+            rr_govdeler = [dict(x, model=model_adi) for x in rr_govdeler] + rr_govdeler
+        rr = None
+        for yol in dict.fromkeys(rr_aday):
+            ilk = None
+            for govde in rr_govdeler:
+                durum, j = ist.iste("POST", yol, govde)
+                ilk = ilk or (durum, j)
+                if durum == 404 or durum is None:
+                    break
+                if durum == 200:
+                    rr = (yol, list(govde), j)
+                    break
+            if rr:
                 break
-            if durum == 200:
-                rr = (yol, list(govde), j)
-                break
+            if ilk and ilk[0] != 404:
+                yaz(f"  POST {yol:16} -> {ilk[0]}  {m(kisa(ilk[1], 200))}")
         if rr:
-            break
-        if ilk and ilk[0] != 404:
-            yaz(f"  POST {yol:16} -> {ilk[0]}  {m(kisa(ilk[1], 200))}")
-    if rr:
-        yaz(f"  CALISAN: POST {rr[0]}  govde alanlari: {rr[1]}  cevap: {m(kisa(rr[2], 200))}")
+            yaz(f"  CALISAN: POST {rr[0]}  govde alanlari: {rr[1]}  cevap: {m(kisa(rr[2], 200))}")
+        else:
+            yaz("  bu adreste reranker yok (tum yollar 404). Sorun degil: siralama RRF ile yapilir.")
     else:
-        yaz("  bu adreste reranker yok (tum yollar 404). Sorun degil: siralama RRF ile yapilir.")
+        sohbet_dene(ist, spec, model_adi, m)
 
-    with open(CIKTI, "w", encoding="utf-8") as f:
+    cikti = "servis_kesfet_llm_cikti.txt" if g.llm else CIKTI
+    with open(cikti, "w", encoding="utf-8") as f:
         f.write("\n".join(SATIRLAR) + "\n")
-    yaz(f"\nKaydedildi: {CIKTI} (adres maskeli). Bu dosyanin icerigini bana gonder.")
+    yaz(f"\nKaydedildi: {cikti} (adres maskeli). Bu dosyanin icerigini bana gonder.")
 
 
 if __name__ == "__main__":
