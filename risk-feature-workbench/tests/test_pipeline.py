@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from riskmatch.demo import demo_snapshot,DemoEmbedding
-from riskmatch.errors import IntegrationError
+from riskmatch.errors import IntegrationError,CatalogScanError
 from riskmatch.excelio import read_requests
 from riskmatch.pipeline import analyze
 
@@ -93,10 +93,20 @@ class PipelineTests(unittest.TestCase):
     def test_real_scan_failure_has_no_demo_fallback(self):
         config={"mode":"real","oracle":{"source_database":"TEST","environment":"TEST","container":"TEST","schemas":["RISK"]},"embedding":{},"llm":{},"naming":{},"retrieval":{"limit":8,"expanded_limit":24}}
         with tempfile.TemporaryDirectory() as directory,patch("riskmatch.pipeline.load_config",return_value=config),patch("riskmatch.adapters.oracle.OracleAdapter") as oracle,patch("riskmatch.adapters.qwen.EmbeddingAdapter"),patch("riskmatch.adapters.qwen.LLMAdapter"),patch("riskmatch.demo.demo_snapshot",side_effect=AssertionError("Must not run")):
-            oracle.return_value.scan.side_effect=IntegrationError("DB offline")
-            result=analyze(SAMPLE,Path(directory)/"out.xlsx",mode="real")
-            self.assertEqual({r["semantic_status"] for r in result["results"]},{"incomplete"})
-            self.assertEqual({r["physical_name"] for r in result["results"]},{"unknown"})
-            self.assertIn("GERÇEK",result["run_info"]["Mod"])
+            oracle.return_value.scan.side_effect=IntegrationError("DB offline RAW_SECRET")
+            updates=[]
+            with self.assertRaises(CatalogScanError) as caught:
+                analyze(SAMPLE,Path(directory)/"out.xlsx",mode="real",progress=updates.append)
+            self.assertEqual(caught.exception.code,"CATALOG_UNAVAILABLE")
+            self.assertFalse(caught.exception.diagnostics["ok"])
+            self.assertEqual(caught.exception.diagnostics["record_count"],0)
+            self.assertNotIn("RAW_SECRET",str(caught.exception))
+            self.assertTrue(updates)
+            self.assertTrue(all(update["completed"]==0 for update in updates))
+            self.assertFalse((Path(directory)/"out.xlsx").exists())
+            self.assertFalse(list(Path(directory).rglob("last_run.json")))
+            report=Path(directory)/"runtime"/"catalog-diagnostics.json"
+            self.assertTrue(report.exists())
+            self.assertNotIn("RAW_SECRET",report.read_text("utf-8"))
 
 if __name__=="__main__":unittest.main()

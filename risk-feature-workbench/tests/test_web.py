@@ -14,7 +14,7 @@ from riskmatch.web import create_app
 from riskmatch.web_services import clean_profile,inspect_workbook,validate_mapping,build_run,probe_model,normalize_dsn
 from riskmatch.adapters._http import response_path
 from riskmatch.errors import ConfigError,InputError,IntegrationError
-from test_adapters import FakeConnection, ORACLE
+from test_adapters import FakeConnection, FakeCursor, ORACLE
 from riskmatch.adapters.oracle import OracleAdapter
 
 SETTINGS={"mode":"real","use_models":False,"oracle":{"dsn":"host.invalid:1521/service","user":"test-user","password":"SECRET_SENTINEL_93424","source_database":"risk","environment":"dev","container":"PDB1","schemas":["RISK_DWH"]}}
@@ -31,6 +31,12 @@ class WebTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
         self.app=create_app(self.root);self.client=self.app.test_client();self.client.get("/")
         with self.client.session_transaction() as s:self.headers={"X-CSRF-Token":s["csrf"]}
+        self.connect()
+    def connect(self):
+        connection=FakeConnection();connection.cur.fetchmany=lambda count:[("RISK_DWH",),("ANOTHER_SCHEMA",)]
+        with patch.object(OracleAdapter,"_connect",return_value=connection):
+            response=self.client.post("/api/connect",json={"user":"test-user","password":SETTINGS["oracle"]["password"]},headers=self.headers)
+        self.assertEqual(response.status_code,200,response.json)
     def tearDown(self):
         self.app.extensions["riskmatch"]["executor"].shutdown(wait=True)
         self.tmp.cleanup()
@@ -88,13 +94,13 @@ class WebTests(unittest.TestCase):
     def test_upload_ownership_and_path_traversal(self):
         identity,mapping=self.upload();other=self.app.test_client();other.get("/")
         with other.session_transaction() as s:headers={"X-CSRF-Token":s["csrf"]}
-        self.assertEqual(other.post("/api/analyze",json={"upload_id":identity,"mapping":mapping,"settings":SETTINGS},headers=headers).status_code,404)
+        self.assertEqual(other.post("/api/analyze",json={"schemas":["RISK_DWH"],"upload_id":identity,"mapping":mapping,"settings":SETTINGS},headers=headers).status_code,404)
         self.assertEqual(self.client.get("/api/jobs/unknown/download").status_code,404)
     def test_live_pipeline_returns_source_and_download_without_secrets(self):
         identity,mapping=self.upload()
         connection=FakeConnection()
         with patch("riskmatch.adapters.oracle.OracleAdapter._connect",return_value=connection),patch("riskmatch.adapters.qwen.post_json",side_effect=AssertionError("Models disabled")):
-            response=self.client.post("/api/analyze",json={"upload_id":identity,"mapping":mapping,"settings":SETTINGS},headers=self.headers)
+            response=self.client.post("/api/analyze",json={"schemas":["RISK_DWH"],"upload_id":identity,"mapping":mapping,"settings":SETTINGS},headers=self.headers)
             self.assertEqual(response.status_code,202,response.json)
             result=self.finish(response.json["id"])
         self.assertEqual(result["status"],"complete")
@@ -114,13 +120,19 @@ class WebTests(unittest.TestCase):
         self.assertNotIn(SETTINGS["oracle"]["password"],json.dumps(result))
         other=self.app.test_client();other.get("/")
         self.assertEqual(other.get("/api/jobs/"+result["id"]).status_code,404)
-    def test_oracle_failure_stays_incomplete(self):
+    def test_oracle_failure_stops_before_any_analysis_or_download(self):
         identity,mapping=self.upload()
         with patch("riskmatch.adapters.oracle.OracleAdapter._connect",side_effect=IntegrationError("SECRET_RAW_DRIVER")):
-            response=self.client.post("/api/analyze",json={"upload_id":identity,"mapping":mapping,"settings":SETTINGS},headers=self.headers)
+            response=self.client.post("/api/analyze",json={"schemas":["RISK_DWH"],"upload_id":identity,"mapping":mapping,"settings":SETTINGS},headers=self.headers)
             result=self.finish(response.json["id"])
-        self.assertFalse(result["run_info"]["Tarama tamamlandı"])
-        self.assertEqual(result["results"][0]["physical_name"],"unknown")
+        self.assertEqual(result["status"],"failed")
+        self.assertEqual(result["failure_stage"],"catalog")
+        self.assertEqual(result["code"],"CATALOG_UNAVAILABLE")
+        self.assertEqual(result["progress"]["completed"],0)
+        self.assertEqual(result["progress"]["total"],1)
+        self.assertFalse(result.get("results"))
+        self.assertFalse(result["catalog_diagnostics"]["ok"])
+        self.assertEqual(self.client.get("/api/jobs/"+result["id"]+"/download").status_code,400)
         self.assertNotIn("SECRET_RAW_DRIVER",json.dumps(result))
     def test_oracle_probe_closes_and_finds_scope(self):
         connection=FakeConnection();connection.cur.fetchmany=lambda count:[("RISK_DWH",)]
@@ -141,8 +153,14 @@ class WebTests(unittest.TestCase):
         self.assertEqual(normalize_dsn("EDW = (DESCRIPTION=(ADDRESS=(HOST=host.invalid)))"),"(DESCRIPTION=(ADDRESS=(HOST=host.invalid)))")
 
     def test_catalog_limit_prevents_absence_claim(self):
+        class LimitedCursor(FakeCursor):
+            def rows_for_query(self):
+                rows=super().rows_for_query()
+                if "ALL_TAB_COLUMNS" in self.sql and rows:
+                    return rows+[("RISK_DWH","CUSTOMER_METRIC","HAV_OTHER","NUMBER",22,10,0,"Y")]
+                return rows
         connection=FakeConnection()
-        connection.cur.fetchmany=lambda count:connection.cur.fetchall()*2
+        connection.cur=LimitedCursor()
         adapter=OracleAdapter({**ORACLE,"max_records":1},credentials={"user":"u","password":"p","dsn":"d"},connector=lambda **kwargs:connection)
         snapshot=adapter.scan()
         self.assertFalse(snapshot["complete"])
@@ -162,9 +180,9 @@ class WebTests(unittest.TestCase):
 
     def test_second_analysis_rejected_while_worker_active(self):
         identity,mapping=self.upload();gate=threading.Event();started=threading.Event()
-        def delayed_scan(self):started.set();gate.wait(5);raise IntegrationError("test")
+        def delayed_scan(self,progress=None):started.set();gate.wait(5);raise IntegrationError("test")
         with patch.object(OracleAdapter,"scan",delayed_scan):
-            request={"upload_id":identity,"mapping":mapping,"settings":SETTINGS}
+            request={"schemas":["RISK_DWH"],"upload_id":identity,"mapping":mapping,"settings":SETTINGS}
             first=self.client.post("/api/analyze",json=request,headers=self.headers)
             self.assertTrue(started.wait(2))
             try:
@@ -183,7 +201,7 @@ class WebTests(unittest.TestCase):
             if "inputs" in payload:return [[.3,.7] for _ in payload["inputs"]]
             return {"choices":[{"message":{"content":json.dumps({"assessments":[]})}}]}
         with patch.object(OracleAdapter,"_connect",return_value=FakeConnection()),patch("riskmatch.adapters.qwen.post_json",side_effect=transport):
-            response=self.client.post("/api/analyze",json={"upload_id":identity,"mapping":mapping,"settings":data},headers=self.headers)
+            response=self.client.post("/api/analyze",json={"schemas":["RISK_DWH"],"upload_id":identity,"mapping":mapping,"settings":data},headers=self.headers)
             self.assertEqual(response.status_code,202,response.json)
             result=self.finish(response.json["id"])
         self.assertEqual(result["status"],"complete")

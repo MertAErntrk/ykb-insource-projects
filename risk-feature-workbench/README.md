@@ -1,36 +1,47 @@
 # Risk Feature Workbench
 
-Excel'deki değişkenleri gerçek Oracle kataloğunda arayan **yerel web uygulaması**. Her satır için olası **şema, tablo, kolon, veritabanı açıklaması, alternatif adaylar ve gerekçeler** gösterilir. Aynı fiziksel adın varlığı ile iş tanımına uyum ayrı değerlendirilir. Sonuçlar Excel olarak indirilebilir.
+Ekrandan eklenen birden fazla değişkeni veya Excel sözlüğünü gerçek Oracle kataloğunda arayan **yerel web uygulaması**. Her satır için olası **şema, tablo, kolon, veritabanı açıklaması, alternatif adaylar ve gerekçeler** gösterilir. Aynı fiziksel adın varlığı ile iş tanımına uyum ayrı değerlendirilir. Sonuçlar Excel olarak indirilebilir.
 
 Uygulamada demo seçeneği yoktur. Graphify kurulmaz. Müşteri kayıtları sorgulanmaz; yalnız erişilebilir katalog metadata'sı okunur. Python **3.9.7 x64** ve Windows PowerShell **5.1** desteklenir. Node.js, masaüstü GUI veya Tcl/Tk gerekmez.
 
 ## Başlatma
 
-Proje klasöründe:
+Kurulu uygulamayı PowerShell penceresinde **Ctrl+C** ile kapatın. Proje klasöründe:
 
 ```powershell
 git pull --ff-only
-# Kurumunuzdaki gerçek paket aynası adresini kullanın:
-$env:PIP_INDEX_URL = 'https://KURUM-ARTIFACTORY-ADRESI/api/pypi/REPO/simple'
-.\scripts\setup.ps1
 .\scripts\start.ps1
+```
+
+Önceki web sürümü kuruluysa yeniden kurulum gerekmez. İlk kurulumda `start.ps1` öncesinde:
+
+```powershell
+.\scripts\setup.ps1 -IndexUrl 'https://sdlc.yapikredi.com.tr/artifactory/api/pypi/external-python/simple'
 ```
 
 Tarayıcıda **http://127.0.0.1:8765** açılır. PowerShell penceresi açık kalmalıdır; kapatmak için Ctrl+C. Uygulama yalnız bu bilgisayardan erişilir, internete yayımlanmaz.
 
-**[Adım adım iş bilgisayarı rehberi](docs/IS_BILGISAYARINDA_BASLANGIC.md)** · [Model/Oracle sözleşmeleri](docs/ADAPTERS.md) · [Testler](docs/TEST_RESULTS.md)
+**[Adım adım iş bilgisayarı rehberi](docs/IS_BILGISAYARINDA_BASLANGIC.md)** · **[Kurumda bağlantı test senaryosu](docs/BAGLANTI_TEST_SENARYOSU.md)** · [Model/Oracle sözleşmeleri](docs/ADAPTERS.md) · [Testler](docs/TEST_RESULTS.md)
 
 ## Kullanım
 
-1. **Bağlantılar** ekranında ayar profilinizi içe aktarın veya Oracle DSN, kullanıcı adı ve parolasını girin.
-2. **Oracle bağlantısını dene** ile kaynak/container ve erişilebilir şemaları alın. Taranacak şemaları seçin.
-3. **Değişken inceleme** ekranında kendi `.xlsx` dosyanızı seçip **Dosyayı oku** düğmesine basın. Sayfaları ve sütunları kontrol edin.
-4. **İncelemeyi başlat** ile gerçek katalogda arayın. **Detay** bütün adayların kaynak yolunu, açıklamasını ve kanıtlarını açar.
-5. **Excel sonucunu indir** ile kaynak dosyanızı koruyan ayrı rapor alın.
+1. **EDWLIVE bağlantısı** alanına yalnız kullanıcı adı ve parolayı girin. Kurum DSN'i uygulamada hazırdır.
+2. **Bağlan ve şemaları getir** sonrasında açılır listeden taranacak şemaları seçin. İlk denemede bir veya iki şema seçip **Seçili şemaları test et** düğmesiyle katalog erişimini doğrulayın.
+3. **Ekrandan değişken ekle** bölümünde alan adı/açıklama girin; **+ Değişken ekle** ile satırları çoğaltın. Alternatif olarak **Excel ile toplu ara** seçip dosyanızı yükleyin.
+4. Ekrandan eklenen değişkenler için **Değişkenleri ara**, Excel için **Excel'deki değişkenleri ara** düğmesine basın. Standart Excel başlıkları otomatik eşleştirilir; farklı başlıklar için eşleştirme bölümü açılır.
+5. **Detay** bütün adayların kaynak yolunu, açıklamasını ve kanıtlarını açar. **Excel sonucunu indir** ayrı rapor üretir.
 
 Standart başlıklar: `Kategori | Alan Adı | Alan tipi | Açıklama | Halihazırda bildiriliyor mu`. Yalnız **Alan Adı** ve **Açıklama** sütunları zorunludur; başka başlıklar ekrandan eşlenebilir. Görüş/hazırlama süresi varsa korunur, zorunlu değildir. Bildirim bilgisi kullanıcı beyanıdır, veritabanı kanıtı sayılmaz.
 
-**LLM + embedding desteği** isteğe bağlıdır. Kapalıyken de gerçek Oracle kataloğunda ad ve açıklama araması yapılır. Açıldığında iki servisin tam çağrı adresi, model kimliği, sürümü ve istek/yanıt sözleşmesi gerekir. Embedding boyutu bağlantı testinden okunur. Temel URL'den çağrı yolu veya model kimliği tahmin edilmez. LLM yorumu doğrulanmış eşleşme kararının yerine geçmez.
+Şema listesi `ALL_USERS` üzerinden alınan **adayları** gösterir; listede görünmek o şemadaki kolonlara erişildiğini kanıtlamaz. Seçili şema testi her şema için en fazla bir katalog satırı okur. Tüm veritabanının kolon kataloğu giriş sırasında taranmaz. Her aşamanın süresi ve hata kodu **Bağlantı test sonuçları** bölümünde görünür; **Tanılama raporunu indir** yerel bir JSON raporu oluşturur.
+
+**LLM + embedding desteği** isteğe bağlıdır. Kapalıyken de gerçek Oracle kataloğunda ad ve açıklama araması yapılır. **Bağlantılar** sayfasındaki kurum adresleri hazırdır. **LLM bağlantısını test et** ve **Embedding bağlantısını test et** düğmeleri servis bilgilerini okuyup küçük bir gerçek çağrıyla doğrular. Birden fazla model varsa listeden seçim yapıp testi yineleyin; gerekiyorsa API anahtarı girin. Başarılı test çağrı adresini, sözleşmeyi ve embedding boyutunu doldurur. Özel servis alanları **Gelişmiş / özel servis ayarları** altında bulunur. LLM yorumu doğrulanmış eşleşme kararının yerine geçmez.
+
+`DPY-4024`, Oracle çağrısının zaman sınırını aştığını belirtir; tek başına parola veya yetki sorunu demek değildir. Ayrıntılı ayırma adımları [bağlantı test senaryosundadır](docs/BAGLANTI_TEST_SENARYOSU.md). Gerçek kurum bağlantısı ancak iş bilgisayarındaki testle doğrulanabilir.
+
+**0.3.3:** Oracle kataloğu şema ve en fazla 25 tablo içeren gruplarla okunur; kolon ve açıklama görünümleri tek büyük sorguda birleştirilmez. Tarama aşaması ve okunan kolon sayısı gösterilir. Katalog hiç okunamazsa Excel'in okunduğu açıkça belirtilir, arama başlamaz ve boş sonuç satırları üretilmez. Önceden okunmuş katalog kayıtları varsa korunur; eksik kapsamda yokluk sonucu verilmez.
+
+Embedding için model kimliğini boş bırakın; LLM için doğrulanan model `qwen38-27b`'dir. Gerçek embedding çağrısı başarılıysa isteğe bağlı `/v1/models` ve `/info` yollarındaki 404/405, nötr **Desteklenmiyor** durumuyla gösterilir. Son gerçek çağrının başarısız olması hâlâ hata sayılır. Kullanıcının kurum testinde `/v1/embeddings` model adı olmadan 4096 boyut döndürmüştür; aynı sözleşme analizde kullanılır.
 
 ## Rapor
 
@@ -44,7 +55,7 @@ Bağlantı hatası veya katalog sınırı, veritabanında yok diye gösterilmez.
 
 ## Yerel veri ve geliştirme
 
-Parolalar/API anahtarları işlem belleğinde tutulur; indirilen `.local.json` profiline veya rapora kaydedilmez. Excel, rapor ve checkpoint bu bilgisayardaki `runtime/web/` dizinindedir. Gerçek dosyalar, profiller ve kurum sertifikaları Git dışında tutulur. Profil host/DSN içerebilir; kurum içinde saklayın.
+Parolalar/API anahtarları işlem belleğinde tutulur; tarayıcı çerezine veya rapora kaydedilmez. Oracle bağlantısı bir saat kullanılmadığında kapanır; Bağlantıyı değiştir oturumu temizler. Excel, rapor ve checkpoint bu bilgisayardaki `runtime/web/` dizinindedir. Gerçek dosyalar, profiller ve kurum sertifikaları Git dışında tutulur. Kurum bağlantı adresleri `src/riskmatch/deployment.py` içindedir; kullanıcı parolası ve servis anahtarı burada bulunmaz. Ayar profili yüklemek gerekmez.
 
 ```powershell
 .\scripts\test.ps1

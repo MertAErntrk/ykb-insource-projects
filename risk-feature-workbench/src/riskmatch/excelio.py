@@ -94,7 +94,7 @@ def read_requests(path, column_mapping=None):
             name = str(get("Alan Adı") or "")
             if not name.strip():
                 errors.append("Alan adı boş.")
-            requests.append({"row_id":rid,"sheet":sheet.title,"excel_row":cells[0].row,"name":name,"description":str(get("Açıklama") or ""),"data_type":str(get("Alan tipi") or ""),"category":str(get("Kategori") or ""),"original":original,"input_errors":errors,"name_column":mapping.get(norm("Alan Adı"),1)+1})
+            requests.append({"row_id":rid,"sheet":sheet.title,"excel_row":cells[0].row,"name":name,"description":str(get("Açıklama") or ""),"data_type":str(get("Alan tipi") or ""),"category":str(get("Kategori") or ""),"reported":str(get(HEADERS[4]) or ""),"original":original,"input_errors":errors,"name_column":mapping.get(norm("Alan Adı"),1)+1})
     wb.close()
     if not requests:
         raise InputError("Çalışma kitabında incelenecek satır bulunamadı.")

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from riskmatch.adapters.qwen import EmbeddingAdapter, LLMAdapter
 from riskmatch.cli import main
 from riskmatch.config import load_config
-from riskmatch.errors import ConfigError, IntegrationError
+from riskmatch.errors import ConfigError, IntegrationError, CatalogScanError
 from riskmatch.retrieval import HybridIndex
 
 
@@ -107,7 +107,7 @@ class IntegrationTests(unittest.TestCase):
             self.assertNotEqual(HybridIndex(snap, first, directory)._cache_path([0]),
                                 HybridIndex(snap, second, directory)._cache_path([0]))
 
-    def test_real_oracle_failure_is_incomplete_without_demo_fallback(self):
+    def test_real_oracle_failure_stops_without_output_or_demo_fallback(self):
         from riskmatch.pipeline import analyze
 
         with tempfile.TemporaryDirectory() as directory:
@@ -120,15 +120,19 @@ class IntegrationTests(unittest.TestCase):
                          "data_type": "Numeric", "category": "Risk", "original": {},
                          "sheet": "Requests", "excel_row": 2}]
             with patch("riskmatch.pipeline.read_requests", return_value=requests), \
-                 patch("riskmatch.pipeline.write_results", return_value=str(folder / "out.xlsx")), \
+                 patch("riskmatch.pipeline.write_results", return_value=str(folder / "out.xlsx")) as write_results, \
                  patch("riskmatch.adapters.oracle.OracleAdapter.scan", side_effect=IntegrationError("scan failed")), \
                  patch("riskmatch.demo.demo_snapshot", side_effect=AssertionError("demo fallback")) as demo:
-                result = analyze(source, folder / "out.xlsx", mode="real", config_path=config,
-                                 state_dir=folder / "state")
+                with self.assertRaises(CatalogScanError) as caught:
+                    analyze(source, folder / "out.xlsx", mode="real", config_path=config,
+                            state_dir=folder / "state")
             demo.assert_not_called()
-            self.assertEqual(result["results"][0]["semantic_status"], "incomplete")
-            self.assertEqual(result["results"][0]["physical_name"], "unknown")
-            self.assertFalse(result["run_info"]["Tarama tamamlandı"])
+            write_results.assert_not_called()
+            self.assertEqual(caught.exception.code, "CATALOG_UNAVAILABLE")
+            self.assertFalse(caught.exception.diagnostics["ok"])
+            self.assertEqual(caught.exception.diagnostics["record_count"], 0)
+            self.assertTrue((folder / "state" / "catalog-diagnostics.json").exists())
+            self.assertFalse((folder / "out.xlsx").exists())
 
 
 if __name__ == "__main__":

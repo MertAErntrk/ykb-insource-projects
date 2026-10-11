@@ -8,7 +8,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .adapters._http import _NoRedirect, post_json, render_template, response_path, validate_endpoint
-from .adapters.oracle import OracleAdapter, CONTEXT_SQL
+from .oracle_diagnostics import diagnose_oracle
 from .adapters.qwen import LLMAdapter
 from .config import load_config
 from .errors import ConfigError, InputError, IntegrationError
@@ -23,7 +23,7 @@ ALIASES = {"name":["Alan Adı","Değişken Adı","Kolon Adı","Variable Name","C
 PROFILE_KEYS = {
     "oracle": {"dsn","user","source_database","environment","container","schemas","wallet_dir","max_records"},
     "llm": {"base_url","endpoint","model","model_version","contract","request_template","response_path","models_endpoint","ca_file"},
-    "embedding": {"base_url","endpoint","model","model_version","dimensions","request_template","response_path","models_endpoint","ca_file"},
+    "embedding": {"base_url","endpoint","model","model_version","model_selection","max_batch","dimensions","request_template","response_path","models_endpoint","ca_file"},
 }
 
 
@@ -95,12 +95,16 @@ def model_config(raw,name):
     endpoint=text(value.get("endpoint"),label+" tam çağrı adresi",True)
     parts=urlsplit(endpoint)
     if parts.query:raise ConfigError(label+" adresine anahtar veya sorgu parametresi eklemeyin.")
+    selection=value.get("model_selection","explicit") if name=="embedding" else "explicit"
+    if selection not in ("explicit","server_default"):raise ConfigError("Embedding model seçimi geçersiz.")
+    require_identity=selection!="server_default"
     config={"endpoint":endpoint,"allowed_hosts":[parts.hostname],
-            "model":text(value.get("model"),label+" model kimliği",True),
-            "model_version":text(value.get("model_version"),label+" model sürümü",True),
+            "model":text(value.get("model"),label+" model kimliği",require_identity),
+            "model_version":text(value.get("model_version"),label+" model sürümü",require_identity),
             "timeout_seconds":30,"max_retries":1}
     if name=="llm":config.update(contract=value.get("contract",""),max_candidates=8,max_chars=1800,max_output_tokens=1200)
-    else:config.update(dimensions=value.get("dimensions",0),max_batch=16)
+    else:config.update(dimensions=value.get("dimensions",0),model_selection=selection,
+                       max_batch=value.get("max_batch",1 if selection=="server_default" else 16))
     for key in ("request_template","response_path","ca_file"):
         if value.get(key):config[key]=deepcopy(value[key])
     validate_endpoint(config)
@@ -123,20 +127,7 @@ def build_run(raw):
 
 def probe_oracle(raw):
     config,credentials=oracle_inputs(raw,probe=True)
-    connection=OracleAdapter(config,credentials=credentials)._connect()
-    try:
-        connection.call_timeout=30000
-        cursor=connection.cursor()
-        cursor.execute(CONTEXT_SQL)
-        context=cursor.fetchone()
-        if not context or not all(context):raise IntegrationError("Oracle veritabanı bağlamı okunamadı.")
-        cursor.execute("SELECT DISTINCT OWNER FROM ALL_TAB_COLUMNS WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','XDB') ORDER BY OWNER")
-        rows=cursor.fetchmany(1001)
-        return {"ok":True,"db_name":str(context[0]),"container":str(context[1]),
-                "schemas":[str(row[0]) for row in rows[:1000]],"truncated":len(rows)>1000}
-    except IntegrationError:raise
-    except Exception:raise IntegrationError("Oracle bağlamı veya şema listesi okunamadı; katalog yetkilerini kontrol edin.") from None
-    finally:connection.close()
+    return diagnose_oracle(config,credentials)
 
 
 def probe_model(raw,name):
@@ -216,3 +207,31 @@ def validate_mapping(path,mapping):
     requests=read_requests(path,mapping)
     if len(requests)>2000:raise InputError("Bir analizde en fazla 2.000 değişken seçin; Excel'i bölerek çalıştırın.")
     return requests
+
+
+def automatic_mapping(path):
+    sheets=inspect_workbook(path)
+    result={s["name"]:{"header_row":s["header_row"],"columns":s["suggested"]}
+            for s in sheets if s["suggested"]["name"] and s["suggested"]["description"]}
+    if not result:raise InputError("Alan adı ve açıklama başlıkları tanınmadı. Sütun eşleştirmesini açıp seçin.")
+    return result
+
+
+def write_manual_request(path, values):
+    from openpyxl import Workbook
+    if not isinstance(values,list) or not 1<=len(values)<=100:
+        raise InputError("Ekrandan 1–100 değişken ekleyebilirsiniz. Daha fazlası için Excel kullanın.")
+    rows=[]
+    for index,value in enumerate(values,1):
+        if not isinstance(value,dict):raise InputError("Değişken satırı geçersiz.")
+        name=text(value.get("name"),str(index)+". değişkenin alan adı",True,256)
+        description=text(value.get("description"),str(index)+". değişkenin açıklaması",True,8000)
+        rows.append([name,description])
+    wb=Workbook();sheet=wb.active;sheet.title="Ekrandan eklenenler"
+    sheet.append(["Alan Adı","Açıklama"])
+    for row in rows:
+        sheet.append(row)
+        for cell in sheet[sheet.max_row]:cell.data_type="s"
+    path.parent.mkdir(parents=True,exist_ok=True)
+    wb.save(path);wb.close()
+    return {"Ekrandan eklenenler":{"header_row":1,"columns":{"name":1,"description":2}}}

@@ -125,7 +125,8 @@ class HybridIndex:
         return sorted(results, key=lambda item: (-item[1], self.records[item[0]]["catalog_id"]))
 
     def _cache_path(self, eligible):
-        if not self.cache_dir or not self.embedding:
+        if (not self.cache_dir or not self.embedding
+                or getattr(self.embedding, "persistent_cache_safe", True) is False):
             return None
         scope_key = hashlib.sha256(json.dumps({"scope": self.scope,
             "model": getattr(self.embedding, "model", ""),

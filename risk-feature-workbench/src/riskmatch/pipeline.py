@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import load_config, signature_config
-from .errors import ConfigError, IntegrationError, StaleIndexError
+from .errors import ConfigError, IntegrationError, StaleIndexError, OracleOperationError, CatalogScanError
 from .excelio import read_requests, write_results
 
 def digest(value):
@@ -34,6 +34,8 @@ def _blank_result(req,snapshot):
 
 def _safe_error(error):
     # Never persist raw network, SQL, driver, credential or filesystem exception strings.
+    if isinstance(error,OracleOperationError):
+        return str(error)
     if isinstance(error,StaleIndexError):
         return "İndeks sürümü katalogla uyuşmuyor; yeniden indeksleme gerekli."
     if isinstance(error,ConfigError):
@@ -49,9 +51,11 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
     started=datetime.now(timezone.utc).isoformat()
     config=load_config(config_path,mode,**({"data":config_data} if config_data is not None else {}))
     requests=read_requests(input_path,column_mapping)
-    def notify(stage,completed=0):
-        if progress:progress({"stage":stage,"completed":completed,"total":len(requests)})
-    notify("Oracle kataloğu okunuyor")
+    def notify(stage,completed=0,phase="analysis"):
+        if progress:progress({"stage":stage,"completed":completed,"total":len(requests),"phase":phase})
+    def catalog_progress(value):
+        if progress:progress({**value,"completed":0,"total":len(requests),"phase":"catalog"})
+    notify("Oracle kataloğu okunuyor",phase="catalog")
     for req in requests:
         req["definition"]=parse_definition(req["name"],req.get("description_for_parse",req["description"]),config["naming"])
     state_dir=Path(state_dir or Path(output_path).parent/"runtime")
@@ -61,7 +65,7 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
         snapshot=demo_snapshot()
         embedding=DemoEmbedding()
     else:
-        from .adapters.oracle import OracleAdapter
+        from .adapters.oracle import OracleAdapter, oracle_error_code
         from .adapters.qwen import EmbeddingAdapter,LLMAdapter
         use_models=config.get("use_models",True)
         keys=credentials or {}
@@ -69,14 +73,28 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
         llm=LLMAdapter(config["llm"],**({"api_key":keys.get("llm","")} if credentials is not None else {})) if use_models else None
         if not use_models and strategy in {"hybrid","embedding"}:strategy="bm25"
         try:
-            snapshot=OracleAdapter(config["oracle"],**({"credentials":keys.get("oracle",{})} if credentials is not None else {})).scan()
+            snapshot=OracleAdapter(config["oracle"],**({"credentials":keys.get("oracle",{})} if credentials is not None else {})).scan(progress=catalog_progress)
         except Exception as error:
             errors.append(_safe_error(error))
             oracle=config["oracle"]
             snapshot={"records":[],"scope":{k:oracle.get(k) for k in ("source_database","environment","container","schemas")},"complete":False,"errors":errors.copy(),"version":"scan_failed","captured_at":started}
+            snapshot["checks"]=[{"name":"Oracle katalog taraması","status":"failed","elapsed_ms":0,
+                                 "message":errors[-1],"code":oracle_error_code(error) or "CATALOG_UNAVAILABLE"}]
     # Scope enforcement also protects exact-name checks and dependency evidence.
     scope=snapshot["scope"]
     snapshot["records"]=[r for r in snapshot["records"] if r.get("schema") in scope.get("schemas",[]) and all(r.get(k)==scope.get(k) for k in ("source_database","environment","container"))]
+    catalog_diagnostics={"ok":bool(snapshot["complete"]),"checks":snapshot.get("checks",[]),
+                         "record_count":len(snapshot["records"]),"scope":scope,
+                         "stats":snapshot.get("scan_stats",{}),
+                         "errors":list(dict.fromkeys(errors+snapshot.get("errors",[])))}
+    if mode=="real" and not snapshot["complete"] and not snapshot["records"]:
+        notify("Oracle kataloğu okunamadı",phase="catalog")
+        message=" ".join(catalog_diagnostics["errors"]) or "Seçili şemalarda okunabilen katalog kaydı yok. Şema seçimini ve katalog erişimini kontrol edin."
+        catalog_diagnostics["message"]=message
+        atomic_json(state_dir/"catalog-diagnostics.json",catalog_diagnostics)
+        code=next((check["code"] for check in catalog_diagnostics["checks"]
+                   if check.get("status")=="failed" and check.get("code")),"CATALOG_UNAVAILABLE")
+        raise CatalogScanError(message,catalog_diagnostics,code)
     reviewed_manifest=None
     if config.get("reviewed_definitions_path"):
         from .reviewed import apply_reviewed
@@ -88,7 +106,10 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
     state_key=digest({"input":hashlib.sha256(Path(input_path).read_bytes()).hexdigest(),"catalog":snapshot_signature,"requests":[r["definition"] for r in requests],"review":reviewed_manifest,"config":signature_config(config),"source":_source_version(),"strategy":strategy})
     checkpoint=state_dir/"checkpoints"/(state_key+".json")
     prior={}
-    if resume and checkpoint.exists():
+    # An unknown model or deployment label can change behind the same URL/dimensions.
+    # Re-run its analysis even when all local inputs and metadata are identical.
+    reusable_model_state=getattr(embedding,"persistent_cache_safe",True) is not False
+    if resume and reusable_model_state and checkpoint.exists():
         try:
             saved=json.loads(checkpoint.read_text(encoding="utf-8"))
             if saved.get("key")==state_key:
@@ -174,6 +195,22 @@ def analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None
         result["reasons"]=list(dict.fromkeys(result["reasons"]+production.get("reasons",[])+graph["issues"].get(req["row_id"],[])))
     complete=bool(snapshot["complete"] and not errors and all(not r["errors"] for r in results))
     run_info={"Mod":"DEMO — sentetik, banka entegrasyonu doğrulanmadı" if mode=="demo" else "GERÇEK — yapılandırılmış kurum servisleri", "Tamamlanma":"Tamamlandı" if complete else "Eksik / teknik hata", "Uygulama sürümü":__version__,"Kod imzası":_source_version(),"Katalog sürümü":snapshot["version"],"Katalog içerik imzası":snapshot_signature,"Kapsam":scope,"Tarama tamamlandı":snapshot["complete"],"Metadata alım zamanı":snapshot["captured_at"],"Başlangıç UTC":started,"Bitiş UTC":datetime.now(timezone.utc).isoformat(),"Talep sayısı":len(requests),"Devam edilen satır":resumed,"Arama yaklaşımı":strategy,"Sonuç dağılımı":dict(Counter(r["semantic_status"] for r in results)),"Hatalar":errors+snapshot.get("errors",[]),"Model doğrulaması":"Sentetik embedding, Qwen çağrısı yok" if mode=="demo" else ({k:{f:config[k].get(f) for f in ("model","model_version","dimensions")} for k in ("llm","embedding")} if config.get("use_models",True) else "Model kullanılmadı; canlı Oracle kataloğunda ad ve metin araması"),"Yorum":"Arama skorları doğruluk yüzdesi değildir. Uzman kararı kullanıcı tarafından doldurulur. Görüş ve hazırlama süresi korunur.","Girdi koruması":"Girdi sayfaları değer/metin ve hücre biçimleriyle kopyalandı. Formüller güvenli metin olarak tutulur; çalıştırılmaz. Grafik/makro/harici bağlantı yürütülmez.","İşlenen sayfalar":list(dict.fromkeys(r["sheet"] for r in requests))}
+    if mode=="real" and config.get("use_models",True):
+        run_info["Model doğrulaması"]["embedding"].update({
+            "model_selection":getattr(embedding,"model_selection","explicit"),
+            "identity_status":getattr(embedding,"identity_status","configured"),
+            "persistent_cache_safe":reusable_model_state,
+        })
+    run_info["Hatalar"]=list(dict.fromkeys(errors+snapshot.get("errors",[])))
+    run_info["Katalog tanılama"]=catalog_diagnostics
+    run_info["Önbellek ve devam politikası"]={
+        "persistent_embedding_cache":reusable_model_state,
+        "checkpoint_resume":bool(resume and reusable_model_state),
+        "reason":("Deployment etiketi model sürümünü doğrulamaz; vektörler yeniden üretilir ve eski sonuçlardan devam edilmez."
+                  if getattr(embedding,"identity_status",None)=="unverified" else
+                  "Model kimliği ve sürümü bilinmiyor; vektörler yeniden üretilir ve eski sonuçlardan devam edilmez."
+                  if not reusable_model_state else "Yapılandırılan sürüm ve kapsam eşleşmesiyle yeniden kullanım açık."),
+    }
     output=write_results(input_path,output_path,requests,results,run_info)
     atomic_json(state_dir/"feature_dependencies.json",graph)
     atomic_json(checkpoint,{"key":state_key,"status":"complete" if complete else "partial","results":results})
