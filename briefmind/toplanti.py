@@ -105,6 +105,7 @@ def ses_servisi_kur(m, ayar, klasor):
             ayar.get("stt_url", ""),
             ipucu_fn=lambda akis=None: m.terimler.prompt(m.seri, list(m.katilimcilar)),   # ad + <=20 ilgili terim
             mod="otomatik", mik_cihaz=ayar.get("mikrofon_cihaz"), olay=olay, olay_fn=m.ses_olayi,
+            cihaz_otomatik=ayar.get("cihaz_otomatik", True), altyazi_fn=ses_mod.altyazi_son_fn(m),
             model=ayar.get("stt_model", "whisper"), api_key=ayar.get("stt_key", ""),
             proxy=ayar.get("stt_proxy", True), verify=ayar_mod.tls_dogrulama(ayar),
             esikler=ayar.get("esikler"), stt_ipucu=bool(ayar.get("stt_ipucu", True)),
@@ -114,6 +115,8 @@ def ses_servisi_kur(m, ayar, klasor):
         elif ayar.get("kesinti_kaydi", False):
             servis.kesinti_kaydi_ac(klasor)
         m.yeniden_kes_fn = servis.yeniden_kes
+        if ayar.get("ses_izi", False):
+            m.ses_izi_kur(ayar, servis.ses_al)
         if servis.baslat():
             return servis
         neden = "ses yakalama açılamadı"

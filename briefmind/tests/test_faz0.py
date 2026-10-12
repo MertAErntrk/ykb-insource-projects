@@ -487,5 +487,22 @@ def test_canli_gorunum_beklemede_karar_sil_degistir_seritler(pencere, qapp):
     assert p.kapsama_serit.isVisibleTo(p) and "Konuşmacı bilgisi yok" in p.kapsama_serit.text()
     p.olay("kapsama", {"var": True, "bas": None})
     assert not p.kapsama_serit.isVisibleTo(p)
+    # otomatik mikrofon secimi (cihaz.py): etiket + bir kez gelen ses uyarisi, ses donunce kalkar
+    assert not p.mik_etiket.isVisibleTo(p) and not p.ses_serit.isVisibleTo(p)
+    p.olay("mikrofon", {"kimlik": "H", "ad": "Kulaklık", "otomatik": True, "neden": "Windows varsayılanı sessiz"})
+    assert p.mik_etiket.isVisibleTo(p) and p.mik_etiket.text() == "Mikrofon: Kulaklık (otomatik)"
+    p.olay("mikrofon", {"kimlik": "U", "ad": "USB", "otomatik": False, "neden": ""})
+    assert p.mik_etiket.text() == "Mikrofon: USB (elle ayarlı)"
+    p.olay("mikrofon", {"kimlik": "U", "ad": "USB", "otomatik": False, "neden": "", "sessizde": True})
+    assert p.mik_etiket.text() == "Mikrofon: USB (elle ayarlı) — sessizde"
+    p.olay("mikrofon", {"kimlik": "U", "ad": "USB", "otomatik": False, "neden": "", "sessizde": False})
+    assert p.mik_etiket.text() == "Mikrofon: USB (elle ayarlı)"
+    p.olay("ses_uyari", {"tur": "mikrofon", "var": True, "metin": "Mikrofondan ses gelmiyor"})
+    p.olay("ses_uyari", {"tur": "loopback", "var": True, "metin": "Hoparlör sesi yok"})
+    assert p.ses_serit.isVisibleTo(p) and p.ses_serit.text() == "Mikrofondan ses gelmiyor\nHoparlör sesi yok"
+    p.olay("ses_uyari", {"tur": "mikrofon", "var": False})
+    assert p.ses_serit.text() == "Hoparlör sesi yok"
+    p.olay("ses_uyari", {"tur": "loopback", "var": False})
+    assert not p.ses_serit.isVisibleTo(p)
     assert p.a_kaynak.count() == 1 and p.a_kaynak.currentData() == "ses"
     assert not p.a_altyazi_yedek.isChecked()

@@ -309,7 +309,8 @@ Eksikler: heartbeat/kapsama **eklendi**; erteleme sırasında `beklemede…` **e
 - **Faz 0, tamam:** ölçüm araçları (`olcum`, `etiketle`, `replay`), klip ve okuma kaydı, çökme ve kilit düzeltmeleri.
 - **Faz 1, tamam:** zaman tabanı, `konusmaci.py` zaman kesişimi, devir ve çakışma, `stt.py` ayrımı, göç.
 - **Faz 2, tamam:** sözlük kaldırıldı; otomatik terim havuzu, kurallı düzeltme kapısı, halüsinasyon puanı, Whisper ipucu.
-- **Faz 4, devam ediyor:** §6 not hattı (sorumlu ve dayanak, birleştirme, prompt).
-- **Faz 5, devam ediyor:** §7 kabuk ve paketleme (durum makinesi, COM/UIA iş parçacığı, temizlik).
-- **Faz 3, bekliyor:** kapı: replay WER göreli −25% (hedef) / −10% (alt sınır), parça kapanış gecikmesi ≤ 20 sn, GPU yükü ölçülmüş olmalı.
-- **Faz 6, bekliyor:** kapı: RTF < 0,3, `?` centroid doğruluğu ≥ %50, yanlış 0.
+- **Faz 4, tamam:** sahip `{ad, durum}`, satır bazlı dayanak, son denetim (kişiye göre liste, sonraki adım ve özette sahip/değer koruması), kademeli birleştirme, `thinking_token_budget`.
+- **Faz 5, tamam:** tek durum makinesi, arka plan COM/UIA, güvenli kapanış, config BOM/göç/atomik yazma, `%LOCALAPPDATA%` hata.log, paketleme ve `--duman`.
+- **Faz 3, kod tamam, varsayılan kapalı (`uzun_pencere`):** açma kapısı gerçek kayıtta ölçülür: `tools/replay.py <toplantı> --stt --uzun` ile WER göreli −25% (hedef) / −10% (alt sınır), p95 klip gecikmesi ≤ 10 sn.
+- **Faz 6, kod tamam, varsayılan kapalı (`ses_izi`):** sherpa-onnx + konuşmacı gömme modeli gerekir; `tools/ses_izi_dene.py` ile RTF < 0,3, `?` satırlarının ≥ %50'si doğru, yanlış 0 sağlanınca açılır. Atanan satır her zaman `Ad?` (güven ≤ 0,6), sahip üretmez.
+- **Bilinen açık:** kesin gösterilen satırın bir kısmında (sentetik düzenekte 13 senaryo/tohum) diğer konuşmacıdan 1-2 kelime karışabiliyor (`tests/e2e` `b2_kirli` xfail).

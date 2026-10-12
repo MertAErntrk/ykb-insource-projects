@@ -19,9 +19,17 @@ olay_fn verilmezse eski yol: satir_fn(ts, konusmaci, metin, kaynak).
 
 Halusinasyon: klip metni stt.halusinasyon_puani ile puanlanir (klip olayinda hal_puani); >= hal_supheli 'supheli', >= hal_at atilir.
 Whisper prompt'u (ipucu_fn) yalniz yeterli RMS'li klipte gider; supheli sonuc promptsuz bir kez tekrar cozulur.
-Mikrofon 16 kHz disindaki cihaz hizinda acilirsa YenidenOrnekleyici (alcak geciren + secme; scipy varsa resample_poly) indirir.
+Cihazlar (cihaz.py): mikrofon akisi acik mikrofonlardan otomatik secilenin, loopback akisi tum cikis cihazlarinin
+loopback karisiminin bloklaridir (soundcard, 16 kHz; tak-cikar 3 sn'de gorulur). Cihaz degisiminde akisa Gecis isareti
+gelir: acik klip kapatilir, ornek sayaci surer, gerekirse saat capasi yenilenir ('capa' olayi). config 'mikrofon_cihaz'
+yalniz elle ayardir. soundcard yoksa / acilamazsa eski yol: varsayilan hoparlor + sounddevice mikrofonu.
+Eski yolda mikrofon 16 kHz disindaki cihaz hizinda acilirsa YenidenOrnekleyici (alcak geciren + secme; scipy varsa
+resample_poly) indirir.
 
 Halka tampon: her akisin son 10 dk'si float16 olarak bellekte; yeniden_kes(klip_no, an) klibi en sessiz blokta ikiye boler.
+
+Uzun pencere (Faz 3, config 'uzun_pencere', varsayilan kapali): UzunPencere iscisi halka tampondan 20-28 sn'lik, sessizlikte
+bolunmus, 1.5 sn ortusen pencereleri yeniden cozer; metin uzun.pencere_hizala ile kisa kliplere dagitilir ({"tur": "uzun"}).
 
 Ses diske YAZILMAZ: klip bellekte tutulur, STT cevabi gelince silinir. Istisnalar (yerel, repo disi):
   - olcum kaydi (config 'olcum_kaydi', varsayilan kapali): klipler <klasor>/olcum/ altina yazilir.
@@ -44,7 +52,9 @@ import time
 import numpy as np
 import requests
 
+import cihaz as cihaz_mod               # otomatik mikrofon secimi + loopback karisimi
 import saat as saat_mod                 # adima dayanikli zaman kaynagi (time.time yerine)
+import uzun as uzun_mod                 # Faz 3 uzun pencere hizalamasi (saf mantik)
 
 # STT ve metin suzgecleri stt.py'ye tasindi; eski importlar (ses.SttIstemci, ses.sonuc_gecerli, ses.requests...) calismaya devam eder
 from stt import (HAL_ESIKLER, HALUSINASYON, IPUCU_GONDER, IPUCU_KR_TAVAN, KISA_GECERLI, ORNEK, KesintiKuyrugu, SttIstemci,
@@ -55,8 +65,11 @@ from stt import (HAL_ESIKLER, HALUSINASYON, IPUCU_GONDER, IPUCU_KR_TAVAN, KISA_G
 __all__ = ["HAL_ESIKLER", "HALUSINASYON", "IPUCU_GONDER", "IPUCU_KR_TAVAN", "KISA_GECERLI", "ORNEK", "KesintiKuyrugu",
            "SttIstemci", "cumlelere_bol", "hal_esik", "halusinasyon_puani", "kesinti_hatasi_mi", "requests",
            "segment_ozeti", "sonuc_gecerli", "tekrar_temizle", "wav_bayt", "wav_oku",
-           "AkisYakalayici", "HalkaTampon", "KulaklikTespit", "OlcumKaydi", "SesServisi", "YenidenOrnekleyici",
-           "bolme_noktasi", "cihazlari_listele", "normalize_et", "yeniden_ornekle", "zarf_hesapla"]
+           "AkisYakalayici", "HalkaTampon", "KulaklikTespit", "OlcumKaydi", "SesServisi", "UzunPencere",
+           "YenidenOrnekleyici", "altyazi_son_fn", "bolme_noktasi", "cihazlari_listele", "normalize_et", "yeniden_ornekle",
+           "zarf_hesapla"]
+
+altyazi_son_fn = cihaz_mod.altyazi_son_fn      # isler/toplanti: SesServisi(altyazi_fn=ses.altyazi_son_fn(motor))
 
 MIN_SN = 1.5                 # bundan kisa "cumle" gonderilmez (cok kisa klipte Whisper tekrar uretir)
 CUMLE_SESSIZLIK = 0.55       # cumle sonu sayilan sessizlik (kisa: konusmaci degisimi ayni klibe dusmesin)
@@ -84,6 +97,7 @@ KES_KONTRAST = 0.4           # kesim blogu RMS'i klibin medyan blok RMS'inin bu 
                              # sinir ust uste binen konusmanin icinde, kesilmez ("A -> B" kalir)
 CAPA_ARALIK_SN = 60          # saat capasi bu sure aralikla (akis zamani) denetlenir
 CAPA_ESIK_SN = 0.3           # |simdi - t| bundan buyukse yeniden capalanir
+CAPA_GECIS_ESIK_SN = 0.05    # cihaz gecisinden sonraki ilk blokta bu esikle denetlenir (gecis boslugu/ortusmesi)
 HOL_SN = 60                  # sirada bekleyen sonuc icin: bastaki numara bu kadar gelmezse atlanir
 IPUCU_RMS = 0.015            # Whisper prompt'u yalniz sesli aralik RMS'i bundan buyuk klipte gider (config esikler 'ipucu_rms');
                              # sessiz/gurultulu klipte prompt kelimeleri ciktiya sizar (Faz 0 denemesi)
@@ -104,6 +118,18 @@ KULAKLIK_YUKSEK = 0.40       # korelasyon >= bu: hoparlor (kulaklik yok)
 KULAKLIK_DUSUK = 0.25        # korelasyon < bu: kulaklik var; arasi: karar yok, onceki durum korunur
 KULAKLIK_YUMUSAK = 11        # yavas bilesen (konusma var/yok basamaklari) 1.1 sn'lik ortalama ile cikarilir
 KULAKLIK_DEGERLENDIR_SN = 5  # degerlendirme sikligi (akis zamani)
+
+# Faz 3 uzun pencere (config 'uzun_pencere', varsayilan kapali; MIMARI_v3 §4 "Uzun pencere")
+UZUN_MIN_SN = 20.0           # pencere sesi (ortusme + sahip klipler + kuyruk) bu kadar olunca klip sinirinda bolunur ...
+UZUN_MAKS_SN = 28.0          # ... ve bunu asmaz (aradaki en genis sessizlikte)
+UZUN_ORTUSME_SN = 1.5        # pencere ilk sahip klibinden bu kadar once baslar (onceki pencereyle ortusme; LCS dikisi)
+UZUN_KUYRUK_SN = 0.3         # son sahip klibin ardindan pencereye eklenen ses (sonraki klibe tasmaz)
+UZUN_SESSIZLIK_SN = 2.0      # klibin ardindan bu kadar sessizlik: pencere orada kapanir (uzun sessizlik pencereye girmez)
+UZUN_METIN_BEKLE_SN = 30     # pencerenin kisa klip metinleri en fazla bu kadar beklenir (gelmezse pencere atlanir)
+UZUN_YOKLAMA_SN = 0.5        # uzun pencere iscisinin tur araligi
+UZUN_BITIS_SN = 60           # durdurulurken kalan pencerelerin cozulmesi icin en fazla bekleme
+UZUN_RAPOR_SN = 600          # GPU yuku: STT istek sayisi (saatlik) bu aralikla loglanir
+UZUN_KLIP_TAVAN = 4000       # kayitta tutulan en fazla klip (eskiler dusurulur)
 
 
 # ---------------------------------------------------------------- cihazlar
@@ -367,6 +393,15 @@ class KulaklikTespit:
         self.sabit = True
         self._degistir(durum, 1.0)
 
+    def sifirla(self):
+        """Mikrofon cihazi degisti: korelasyon penceresi bosaltilir (eski cihazin zarfi yeni karari bozmasin).
+        Izlenen durum korunur; yeni cihazla yeterli veri gelince yeniden degerlendirilir."""
+        with self._kilit:
+            for d in self._kareler.values():
+                d.clear()
+            self._son_deger = None
+            self.korelasyon = None
+
     def blok_ekle(self, akis, t_orta, rms):
         """Akis iplerinden: bir blogun orta epoch'u ve RMS'i. Degerlendirme 5 sn'de bir."""
         if akis not in self._kareler or self.sabit:
@@ -436,11 +471,20 @@ class AkisYakalayici(threading.Thread):
     """Tek bir ses akisini (loopback ya da mikrofon) klip klip boler, kuyruga koyar.
 
     Zaman tabani: epoch_capa (akisin sifirinci orneginin epoch'u) + toplam_ornek sayaci. ornek_epoch(n)/epoch_ornek(t)
-    capa gecmisini kullanir (yeniden capalamadan onceki orneklerin zamani degismez)."""
+    capa gecmisini kullanir (yeniden capalamadan onceki orneklerin zamani degismez).
+
+    secici (cihaz.py) verilirse bloklar ondan gelir; cihaz.Gecis isaretinde acik klip kapatilir (klip iki cihazin sesini
+    karistirmaz), gurultu tabani sifirlanir, sonraki ilk blokta saat capasi CAPA_GECIS_ESIK_SN ile denetlenir. Ornek sayaci
+    kesintisiz surer. Secici calismazsa (cihaz.ArkaYok) eski yola (sounddevice / varsayilan hoparlor) dusulur."""
 
     def __init__(self, kaynak, kuyruk, loopback=False, cihaz=None, olay=None, sayac=None, blok_fn=None, tasma_fn=None,
-                 saat=None, halka_sn=HALKA_SN):
+                 saat=None, halka_sn=HALKA_SN, klip_fn=None, secici=None, gecis_fn=None):
         super().__init__(daemon=True)
+        self.secici = secici                    # cihaz.MikrofonSecici / LoopbackSecici | None (eski yol)
+        self._gecis_fn = gecis_fn               # (akis, cihaz.Gecis): cihaz degisti (kulaklik tespiti sifirlanir)
+        self._capa_bekle = None                 # Gecis sonrasi ilk blokta capa denetimi: (an | None,)
+        self._klip_fn = klip_fn                 # (akis, klip sozlugu): her olusan klip (Faz 3 uzun pencere kaydi)
+        self._acik_ornek = None                 # acik (henuz kapanmamis) klibin ilk ornegi | None
         self.kaynak, self.kuyruk, self.loopback, self.cihaz = kaynak, kuyruk, loopback, cihaz
         self._sayac = sayac                     # paylasilan sira sayaci: cikti kuyruga giris sirasinda yayilir
         self._yerel_sayac = itertools.count()   # sayac verilmediyse (testler) klip_no buradan
@@ -471,6 +515,14 @@ class AkisYakalayici(threading.Thread):
                 return capa + n / ORNEK
         return (self._capalar[0][1] if self._capalar else (self.epoch_capa or 0.0)) + n / ORNEK
 
+    def ilerleme(self):
+        """Klip bolmesinin kesinlestigi an (epoch): acik klip varsa onun basi, yoksa akisin yakaladigi son ornek. Bu andan
+        once yeni klip olusmaz (uzun pencere sessizlik karari bununla verilir). Hic blok gelmediyse None."""
+        if not self._capalar:
+            return None
+        acik = self._acik_ornek
+        return self.ornek_epoch(acik if acik is not None else self.toplam_ornek)
+
     def epoch_ornek(self, t):
         """Epoch saniye -> akis ornek numarasi (float)."""
         for ob, capa in reversed(self._capalar):
@@ -479,31 +531,52 @@ class AkisYakalayici(threading.Thread):
                 return n
         return (t - (self._capalar[0][1] if self._capalar else (self.epoch_capa or 0.0))) * ORNEK
 
-    def _capa_kur(self, blok_uzunluk):
-        self.epoch_capa = self._saat() - blok_uzunluk / ORNEK       # blok yeni bitti
+    def _capa_kur(self, blok_uzunluk, simdi=None):
+        self.epoch_capa = (self._saat() if simdi is None else simdi) - blok_uzunluk / ORNEK       # blok yeni bitti
         self._capalar = [(0, self.epoch_capa)]
 
-    def _capa_kontrol(self):
-        """Her CAPA_ARALIK_SN'de (akis zamani) sayac zamani ile saati karsilastirir; kayma > CAPA_ESIK_SN ise yeniden capalar."""
-        if self.toplam_ornek < self._sonraki_capa or not self._capalar:
+    def _capa_kontrol(self, simdi=None, gecis=False, ilk_ornek=None):
+        """Her CAPA_ARALIK_SN'de (akis zamani) sayac zamani ile saati karsilastirir; kayma > CAPA_ESIK_SN ise yeniden capalar.
+        gecis=True: cihaz gecisinden sonraki ilk blok; aralik beklenmez, esik CAPA_GECIS_ESIK_SN, simdi = blogun varis ani,
+        yeni capa ilk_ornek'ten (yeni cihazin ilk blogunun basi) gecerli: o blok da yeni zamanla damgalanir."""
+        if not self._capalar:
             return
-        while self._sonraki_capa <= self.toplam_ornek:
-            self._sonraki_capa += CAPA_ARALIK_SN * ORNEK
-        saat_mod.adim_denetle()                 # duvar saati adimi yalniz loglanir (simdi() etkilenmez)
-        simdi = self._saat()
+        if not gecis:
+            if self.toplam_ornek < self._sonraki_capa:
+                return
+            while self._sonraki_capa <= self.toplam_ornek:
+                self._sonraki_capa += CAPA_ARALIK_SN * ORNEK
+            saat_mod.adim_denetle()             # duvar saati adimi yalniz loglanir (simdi() etkilenmez)
+        simdi = self._saat() if simdi is None else simdi
         fark = simdi - self.ornek_epoch(self.toplam_ornek)
-        if abs(fark) <= CAPA_ESIK_SN:
+        if abs(fark) <= (CAPA_GECIS_ESIK_SN if gecis else CAPA_ESIK_SN):
             return
         yeni = simdi - self.toplam_ornek / ORNEK
-        self._capalar.append((self.toplam_ornek, yeni))
+        ob = self.toplam_ornek if ilk_ornek is None else max(int(ilk_ornek), self._capalar[-1][0])
+        self._capalar.append((ob, yeni))
         self.epoch_capa = yeni
         self.capa_sayisi += 1
-        self._olay("capa", {"akis": self.kaynak, "fark": round(fark, 3), "ornek": self.toplam_ornek,
-                            "epoch_capa": yeni, "saat": simdi})
-        self._olay("log", f"  · {self.kaynak} saat çapası yenilendi (fark {fark:+.2f} sn)")
+        self._olay("capa", {"akis": self.kaynak, "fark": round(fark, 3), "ornek": ob,
+                            "epoch_capa": yeni, "saat": simdi, **({"neden": "gecis"} if gecis else {})})
+        self._olay("log", f"  · {self.kaynak} saat çapası yenilendi (fark {fark:+.2f} sn{', cihaz geçişi' if gecis else ''})")
 
     # --- ses kaynaklari ---
+    def _klip_acik(self):
+        return self._acik_ornek is not None
+
+    def _secici_bloklari(self):
+        """Secicinin bloklari; secici calismazsa (ArkaYok) False dondurur (cagiran eski yola duser)."""
+        try:
+            yield from self.secici.bloklar(self._dur, klip_acik_fn=self._klip_acik)
+            return True
+        except cihaz_mod.ArkaYok as e:
+            self._olay("log", f"! {self.kaynak} otomatik cihaz seçimi çalışmadı ({e}); Windows varsayılanı kullanılıyor")
+            return False
+
     def _bloklar_loopback(self):
+        if self.secici is not None:
+            if (yield from self._secici_bloklari()):
+                return
         import soundcard as sc
         hoparlor = sc.default_speaker()
         mik = sc.get_microphone(str(hoparlor.name), include_loopback=True)
@@ -512,6 +585,13 @@ class AkisYakalayici(threading.Thread):
                 yield kayit.record(numframes=BLOK).reshape(-1)
 
     def _bloklar_mikrofon(self):
+        if self.secici is not None:
+            if (yield from self._secici_bloklari()):
+                return
+        yield from self._bloklar_sd()
+
+    def _bloklar_sd(self):
+        """Eski yol: sounddevice (config 'mikrofon_cihaz' ya da PortAudio varsayilani; tak-cikar gorulmez)."""
         import sounddevice as sd
         q = queue.Queue()
         # Cihaz kendi hizinda acilir, 16 kHz'e indirilir: WASAPI cihazlari 16 kHz'i reddeder, config'teki
@@ -551,15 +631,41 @@ class AkisYakalayici(threading.Thread):
         try:
             bloklar = self._bloklar_loopback() if self.loopback else self._bloklar_mikrofon()
             for blok in bloklar:
+                if isinstance(blok, cihaz_mod.Gecis):
+                    # cihaz degisti: acik klip once kapanir (iki cihazin sesi ayni klibe girmez), sayac surer
+                    if blok.kapat and tampon:
+                        self._gonder(tampon, None, sum(bayrak) / len(tampon), parca_ornek, enerji, bayrak)
+                        tampon, enerji, bayrak, sessiz_sn = [], [], [], 0.0
+                    if blok.kapat:
+                        self._acik_ornek = None
+                        onyuk, aday = [], []
+                        # yeni cihazin gurultu tabani (secici olctu); SESSIZ_ESIK'ten baslatmak konusma ortasinda
+                        # gecildiyse konusmayi taban sanip klibi hic acmayabilirdi
+                        taban = min(SESSIZ_ESIK, max(1e-6, blok.taban)) if blok.taban is not None else SESSIZ_ESIK
+                    self._capa_bekle = (blok.an,)
+                    if self._gecis_fn is not None:
+                        try:
+                            self._gecis_fn(self.kaynak, blok)
+                        except Exception:
+                            pass
+                    continue
                 if blok is None or not len(blok):
                     continue
                 sn = len(blok) / ORNEK
                 blok_ornek = self.toplam_ornek                  # bu blogun akis ornek numarasi
+                gecis_an = None
+                if self._capa_bekle is not None:
+                    gecis_an, self._capa_bekle = self._capa_bekle[0], None
+                    if self.epoch_capa is not None:
+                        gecis_an = gecis_an if gecis_an is not None else self._saat()
                 if self.epoch_capa is None:
-                    self._capa_kur(len(blok))
+                    self._capa_kur(len(blok), simdi=gecis_an)
+                    gecis_an = None
                 self.toplam_sn += sn
                 self.toplam_ornek += len(blok)
                 self.halka.ekle(blok_ornek, blok)
+                if gecis_an is not None:
+                    self._capa_kontrol(simdi=gecis_an, gecis=True, ilk_ornek=blok_ornek)
                 rms = float(np.sqrt(np.mean(np.square(blok))))
                 if self._blok_fn is not None:
                     try:
@@ -582,6 +688,7 @@ class AkisYakalayici(threading.Thread):
                     bayrak = [False] * (len(onyuk) - ACILIS_BLOK) + [True] * ACILIS_BLOK
                     aday, onyuk = [], []
                     parca_ornek = self.toplam_ornek - sum(len(b) for b in tampon)
+                    self._acik_ornek = parca_ornek
                     sessiz_sn = 0.0
                     continue
                 tampon.append(blok)
@@ -593,6 +700,7 @@ class AkisYakalayici(threading.Thread):
                         or (uzunluk >= TAVAN_SN and sessiz_sn >= NEFES_SESSIZLIK)):  # uzun konusma, nefes payi
                     self._gonder(tampon, None, sum(bayrak) / len(tampon), parca_ornek, enerji, bayrak)
                     tampon, enerji, bayrak, sessiz_sn = [], [], [], 0.0
+                    self._acik_ornek = None
                 elif uzunluk >= ZORLA_SN:
                     # Sessizlik hic gelmedi. Tam ZORLA_SN'de kesmek kelimeyi ortadan boler, iki parca da
                     # Whisper'da bozuk cikar: son 1.5 sn'nin en sessiz blogunda bol, kalani sonraki parcaya.
@@ -600,9 +708,11 @@ class AkisYakalayici(threading.Thread):
                     self._gonder(tampon[:bol], None, sum(bayrak[:bol]) / bol, parca_ornek, enerji[:bol], bayrak[:bol])
                     parca_ornek += sum(len(b) for b in tampon[:bol])
                     tampon, enerji, bayrak = tampon[bol:], enerji[bol:], bayrak[bol:]
+                    self._acik_ornek = parca_ornek
                     sessiz_sn = 0.0
             if tampon:
                 self._gonder(tampon, None, sum(bayrak) / len(tampon), parca_ornek, enerji, bayrak)
+            self._acik_ornek = None
         except Exception as e:
             self.hata = e
             ek = ""
@@ -675,6 +785,11 @@ class AkisYakalayici(threading.Thread):
             esik = self.halka.baslangic
             while self.klipler and next(iter(self.klipler.values()))["ornek_bit"] < esik:
                 self.klipler.popitem(last=False)                # halkadan cikmis klip artik kesilemez
+        if self._klip_fn is not None:
+            try:
+                self._klip_fn(self.kaynak, p)
+            except Exception:
+                pass                                            # uzun pencere kaydi yakalamayi durdurmaz
 
     # --- yeniden kesme ---
     def kes(self, klip_no, an):
@@ -888,6 +1003,343 @@ class OlcumKaydi:
             self._kapat(e)
 
 
+# ---------------------------------------------------------------- Faz 3: uzun pencere
+
+class UzunPencere:
+    """Uzun pencere planlayici + cozucu (MIMARI_v3 §4 "Uzun pencere"; is parcacigindan bagimsiz cekirdek: SesServisi
+    iscisi de, sanal saatli duzenek / replay de ayni metotlari cagirir).
+
+    Girdi: klip_kaydet (klip olustu: akis, klip_no, bas/bit epoch, rms), metin_kaydet (klibin yayilan kisa metni, "" =
+    satiri yok), ilerle (akisin klip bolmesinin kesinlestigi an). planla(): akis basina, henuz pencereye girmemis klipleri
+    zaman sirasiyla bir pencerede toplar; pencere sesi (ilk sahip klipten UZUN_ORTUSME_SN once .. son sahip klip +
+    UZUN_KUYRUK_SN) UZUN_MIN_SN..UZUN_MAKS_SN araliginda en genis klip arasi sessizlikte biter; UZUN_SESSIZLIK_SN'lik
+    sessizlik pencereyi erken kapatir. Tek klipli pencere STT'ye gitmez (kazanc yok, GPU yuku). coz(p): halka tampondan
+    (ses_fn) pencere sesi STT'ye; prompt = ayni akisin ONCEKI penceresinin son cumlesi ve yalniz pencerenin sesli RMS'i
+    esikler.ipucu_rms uzerindeyse (prompt sizintisi korumasi); halusinasyon puani supheliyse promptsuz bir kez daha, yine
+    supheliyse pencere atlanir. hizala(p): kisa metinler gelince uzun.pencere_hizala, sonuc olayi yay_fn'e:
+      {"tur": "uzun", "akis", "pencere_no", "bas", "bit", "kapsam", "klipler": [{"klip_no", "text"|None, "belirsiz", "oran"}],
+       "oran", "neden": None | "tek_klip" | "ses_yok" | "stt_hata" | "halusinasyon" | "metin_yok" | "hizalama"}
+    kapsam: bu akista sonucu kesinlesen son an (Motor parca kapanisinda bunu bekler). Pencereler akis basina sirayla yayilir.
+    Konusmaci atamasina dokunulmaz: yalniz klip_no -> metin."""
+
+    def __init__(self, coz_fn, ses_fn, yay_fn, puan_fn=None, metin_fn=None, esik_fn=None, ipucu_acik=True, olay=None,
+                 saat=None, min_sn=UZUN_MIN_SN, maks_sn=UZUN_MAKS_SN, ortusme_sn=UZUN_ORTUSME_SN,
+                 kuyruk_sn=UZUN_KUYRUK_SN, sessizlik_sn=UZUN_SESSIZLIK_SN, hizalama_esik=uzun_mod.ESIK):
+        self._coz_fn = coz_fn                    # (ses, ipucu) -> STT segmentleri
+        self._ses_fn = ses_fn                    # (akis, bas, bit) -> pencere sesi | None (halkadan cikmis)
+        self._yay_fn = yay_fn                    # sonuc olayi -> Motor (SesServisi sirasiyla)
+        self._puan_fn = puan_fn                  # (p, segmentler, ipucu) -> (puan, metin)
+        self._metin_fn = metin_fn or (lambda seg: " ".join((s.get("text") or "").strip() for s in seg).strip())
+        self._esik_fn = esik_fn or (lambda ad: {"ipucu_rms": IPUCU_RMS, "hal_supheli": HAL_ESIKLER["hal_supheli"]}[ad])
+        self.ipucu_acik = bool(ipucu_acik)
+        self._olay = olay or (lambda t, v: None)
+        self._saat = saat or (lambda: saat_mod.simdi())
+        self.min_sn, self.maks_sn, self.ortusme_sn = float(min_sn), float(maks_sn), float(ortusme_sn)
+        self.kuyruk_sn, self.sessizlik_sn, self.esik = float(kuyruk_sn), float(sessizlik_sn), float(hizalama_esik)
+        self._kilit = threading.RLock()
+        self._klip = {}                          # klip_no -> {"klip_no","akis","bas","bit","rms","metin","pencere","baglam"}
+        self._akis = {}                          # akis -> {"klipler": [...], "ilerleme", "sinir", "onceki_cumle"}
+        self._sira = collections.deque()         # planlanmis pencereler (plan sirasi = akis icinde zaman sirasi)
+        self._no = itertools.count(1)
+        self.istek = 0                           # uzun pencere STT istegi (promptsuz tekrar dahil): GPU yuku
+        self.pencere = 0                         # planlanan pencere
+        self.cozulen = 0                         # STT'ye giden pencere
+        self.atlanan = collections.Counter()     # neden -> pencere
+        self.degisen_klip = 0                    # metni uzun pencereyle degisen klip
+        self.ilk_an = None
+
+    # --- girdi ---
+    def _ak(self, akis):
+        ak = self._akis.get(akis)
+        if ak is None:
+            ak = self._akis[akis] = {"klipler": [], "ilerleme": None, "sinir": None, "onceki_cumle": ""}
+        return ak
+
+    def klip_kaydet(self, akis, klip_no, bas, bit, rms=None, ust=None):
+        """Klip olustu (akis ipi / kesinti kuyrugu / yeniden kesme parcasi). ust: yeniden kesilen klibin parcasi: ust klip
+        henuz pencereye girmediyse yerini parcalar alir; girdiyse parca yalniz baglam olur (metni kisa kalir)."""
+        if klip_no is None or bas is None:
+            return
+        with self._kilit:
+            if self.ilk_an is None:
+                self.ilk_an = self._saat()
+            ak = self._ak(akis)
+            bit = max(float(bit if bit is not None else bas), float(bas))
+            k = {"klip_no": klip_no, "akis": akis, "bas": float(bas), "bit": bit,
+                 "rms": float(rms) if isinstance(rms, (int, float)) and not isinstance(rms, bool) else None,
+                 "metin": None, "uzun_metin": None, "pencere": None,
+                 "baglam": ak["sinir"] is not None and float(bas) < ak["sinir"]}     # kapsanmis bolge: sahip olunmaz
+            if ust is not None:
+                u = self._klip.get(ust)
+                if u is not None and u["pencere"] is None and not u["baglam"]:
+                    u["baglam"] = True                    # parcalari sahip olur; ust klip satiri parcalarla degisir
+            self._klip[klip_no] = k
+            liste = ak["klipler"]
+            i = len(liste)
+            while i > 0 and liste[i - 1]["bas"] > k["bas"]:
+                i -= 1
+            liste.insert(i, k)
+            self._buda()
+
+    def metin_kaydet(self, klip_no, metin):
+        """Klibin yayilan kisa metni ("" = metinsiz / satiri yok)."""
+        with self._kilit:
+            k = self._klip.get(klip_no)
+            if k is not None:
+                k["metin"] = (metin or "").strip()
+
+    def ilerle(self, akis, an):
+        """akis icin klip bolmesi `an`a kadar kesin (bu andan once yeni klip olusmaz). float('inf'): akis bitti."""
+        if an is None:
+            return
+        with self._kilit:
+            ak = self._ak(akis)
+            ak["ilerleme"] = an if ak["ilerleme"] is None else max(ak["ilerleme"], an)
+
+    def bitir_isaretle(self):
+        """Yakalama bitti: tum akislar kapanir, kalan klipler son pencerelere girer."""
+        with self._kilit:
+            for akis in list(self._akis):
+                self.ilerle(akis, float("inf"))
+
+    def _buda(self):
+        if len(self._klip) <= UZUN_KLIP_TAVAN:
+            return
+        for ak in self._akis.values():
+            sinir = ak["sinir"]
+            if sinir is None:
+                continue
+            tut = []
+            for k in ak["klipler"]:
+                if k["bit"] < sinir - 120 and (k["pencere"] is not None or k["baglam"]):
+                    self._klip.pop(k["klip_no"], None)
+                else:
+                    tut.append(k)
+            ak["klipler"] = tut
+
+    # --- planlama ---
+    def bekleyen(self):
+        """Planlanmis ama yayilmamis pencere + pencereye girmemis klip sayisi."""
+        with self._kilit:
+            acik = sum(1 for ak in self._akis.values() for k in ak["klipler"] if k["pencere"] is None and not k["baglam"])
+            return len(self._sira) + acik
+
+    def planla(self):
+        """Hazir pencereleri planlar (sira sonuna ekler). Dondurur: yeni pencereler."""
+        yeni = []
+        with self._kilit:
+            for akis in sorted(self._akis):
+                while True:
+                    p = self._akis_planla(akis)
+                    if p is None:
+                        break
+                    self._sira.append(p)
+                    yeni.append(p)
+        return yeni
+
+    def _akis_planla(self, akis):
+        ak = self._akis[akis]
+        adaylar = [k for k in ak["klipler"] if k["pencere"] is None and not k["baglam"]]
+        if not adaylar:
+            return None
+        ilerleme = ak["ilerleme"] if ak["ilerleme"] is not None else -float("inf")
+        ws = adaylar[0]["bas"]
+        a = ws - self.ortusme_sn
+
+        def uzunluk(k):
+            return k["bit"] + self.kuyruk_sn - a
+
+        sinirlar = []                                     # (indeks, ses uzunlugu, ardindaki sessizlik)
+        for i, k in enumerate(adaylar):
+            if i + 1 < len(adaylar):
+                sinirlar.append((i, uzunluk(k), max(0.0, adaylar[i + 1]["bas"] - k["bit"])))
+        son = adaylar[-1]
+        if ilerleme - son["bit"] >= self.sessizlik_sn:   # son klibin ardindan yeterli sessizlik kesinlesti
+            sinirlar.append((len(adaylar) - 1, uzunluk(son), ilerleme - son["bit"]))
+        secilen = None
+        for i, uz, ses_ in sinirlar:                      # 1) uzun sessizlik: pencere orada biter (kisa da olsa)
+            if uz > self.maks_sn:
+                break
+            if ses_ >= self.sessizlik_sn:
+                secilen = i
+                break
+        # 2) pencere ufku (UZUN_MAKS_SN) asildiysa ya da akis bittiyse artik [min, maks] icine yeni sinir gelemez:
+        #    aralikta en genis sessizlikte bol (esitlikte gec olan); aralikta sinir yoksa ufkun altindaki en genis
+        kesin = (ilerleme == float("inf") or uzunluk(son) > self.maks_sn
+                 or ilerleme + self.kuyruk_sn - a > self.maks_sn)
+        if secilen is None and kesin:
+            if not sinirlar or sinirlar[-1][0] != len(adaylar) - 1:
+                sinirlar.append((len(adaylar) - 1, uzunluk(son), max(0.0, min(ilerleme, son["bit"] + 60) - son["bit"])))
+            aralik = [(ses_, i) for i, uz, ses_ in sinirlar if self.min_sn <= uz <= self.maks_sn]
+            alt = [(ses_, i) for i, uz, ses_ in sinirlar if uz <= self.maks_sn]
+            genis = [(ses_, i) for i, uz, ses_ in sinirlar if self.min_sn / 2 <= uz <= self.maks_sn]
+            if aralik:
+                secilen = max(aralik)[1]
+            elif alt:
+                secilen = max(genis or alt)[1]
+            else:
+                secilen = sinirlar[0][0]
+        if secilen is None:
+            return None
+        sahip = adaylar[:secilen + 1]
+        sonraki = adaylar[secilen + 1]["bas"] if secilen + 1 < len(adaylar) else None
+        b = sahip[-1]["bit"] + self.kuyruk_sn
+        if sonraki is not None:
+            b = min(b, sonraki)
+        no = next(self._no)
+        for k in sahip:
+            k["pencere"] = no
+        sahip_no = {k["klip_no"] for k in sahip}
+        baglam = [k for k in ak["klipler"] if k["klip_no"] not in sahip_no and k["bas"] < ws and k["bit"] > a]
+        ak["sinir"] = sahip[-1]["bit"]
+        for k in ak["klipler"]:                           # yeni kapsanmis bolgeye dusen bekleyen klip yalniz baglam olur
+            if k["pencere"] is None and k["bas"] < ak["sinir"]:
+                k["baglam"] = True
+        sure = sum(max(0.0, k["bit"] - k["bas"]) for k in sahip)
+        rms_ = [(k["rms"], k["bit"] - k["bas"]) for k in sahip if k["rms"] is not None and k["bit"] > k["bas"]]
+        rms = math.sqrt(sum(r * r * d for r, d in rms_) / sum(d for _, d in rms_)) if rms_ else None
+        self.pencere += 1
+        p = {"no": no, "akis": akis, "bas": a, "bit": b, "kapsam": sahip[-1]["bit"],
+             "sahip": [k["klip_no"] for k in sahip], "baglam": [k["klip_no"] for k in baglam],
+             "konusma_sn": round(sure, 3), "rms": rms, "plan_an": self._saat(), "metin": None, "neden": None,
+             "cozuldu": False, "ipucu": ""}
+        if len(sahip) < 2:
+            p["neden"], p["cozuldu"] = "tek_klip", True
+        return p
+
+    # --- cozum ---
+    def coz(self, p):
+        """Pencere sesini STT'ye gonderir (korumali prompt + halusinasyon puani). p['metin'] | p['neden']."""
+        if p.get("cozuldu"):
+            return p
+        p["cozuldu"] = True
+        try:
+            ses_ = self._ses_fn(p["akis"], p["bas"], p["bit"])
+        except Exception as e:
+            self._olay("log", f"! uzun pencere sesi alınamadı: {e!r}")
+            ses_ = None
+        if ses_ is None:
+            p["neden"] = "ses_yok"
+            return p
+        ak = self._akis.get(p["akis"]) or {}
+        ipucu = ""
+        rms = p.get("rms")
+        if self.ipucu_acik and isinstance(rms, (int, float)) and rms >= self._esik_fn("ipucu_rms"):
+            ipucu = (ak.get("onceki_cumle") or "")[:IPUCU_KR_TAVAN]
+        try:
+            self.istek += 1
+            seg = self._coz_fn(ses_, ipucu) if ipucu else self._coz_fn(ses_, "")
+            puan = self._puan(p, seg, ipucu)
+            if ipucu and puan >= self._esik_fn("hal_supheli"):
+                try:
+                    self.istek += 1
+                    seg2 = self._coz_fn(ses_, "")
+                    puan2 = self._puan(p, seg2, "")
+                    if puan2 <= puan:
+                        seg, puan, ipucu = seg2, puan2, ""
+                except Exception as e:
+                    self._olay("log", f"! uzun pencere promptsuz tekrar başarısız: {e!r}")
+        except Exception as e:
+            p["neden"] = "stt_hata"
+            self._olay("log", f"! uzun pencere STT hatası (kısa metin korunur): {e!r}")
+            return p
+        p["ipucu"], p["puan"] = ipucu, round(float(puan), 3)
+        if puan >= self._esik_fn("hal_supheli"):
+            p["neden"] = "halusinasyon"
+            return p
+        self.cozulen += 1
+        p["metin"] = self._metin_fn(seg)
+        return p
+
+    def _puan(self, p, seg, ipucu):
+        if self._puan_fn is None:
+            return 0.0
+        return float(self._puan_fn(p, seg, ipucu)[0])
+
+    def hizala(self, p, zorla=False):
+        """Pencere sonucu -> olay (kisa metinler eksikse ve zorla degilse None: sonra tekrar denenir)."""
+        with self._kilit:
+            ev = {"tur": "uzun", "akis": p["akis"], "pencere_no": p["no"], "bas": round(p["bas"], 3),
+                  "bit": round(p["bit"], 3), "kapsam": p["kapsam"], "klipler": [], "oran": None, "neden": p.get("neden")}
+            ak = self._ak(p["akis"])
+            if ev["neden"] is None:
+                sahip = [self._klip.get(n) for n in p["sahip"]]
+                baglam = [self._klip.get(n) for n in p["baglam"]]
+                eksik = [k for k in sahip + baglam if k is None or k["metin"] is None]
+                if eksik and not zorla and self._saat() - p["plan_an"] < UZUN_METIN_BEKLE_SN:
+                    return None
+                if eksik:
+                    ev["neden"] = "metin_yok"
+                else:
+                    s = uzun_mod.pencere_hizala(
+                        p["metin"] or "", [{"klip_no": k["klip_no"], "bas": k["bas"], "bit": k["bit"], "text": k["metin"]}
+                                           for k in sahip],
+                        [{"klip_no": k["klip_no"], "bas": k["bas"], "bit": k["bit"],
+                          "text": k["uzun_metin"] or k["metin"]} for k in baglam],
+                        pencere_bas=p["bas"], esik=self.esik)
+                    ev["oran"], ev["dikis"] = s["oran"], s["dikis"]
+                    for r in s["klipler"]:
+                        k = self._klip.get(r["klip_no"])
+                        if r["text"] is not None and k is not None:
+                            k["uzun_metin"] = r["text"]
+                        if r["text"] is not None and r["text"] != (k or {}).get("metin") or r["belirsiz"]:
+                            ev["klipler"].append(dict(r))
+                    self.degisen_klip += sum(1 for r in ev["klipler"] if r["text"] is not None)
+                    if s["oran"] < self.esik:
+                        ev["neden"] = "hizalama"
+            # sonraki pencerenin prompt'u: bu pencerenin (guvenilir) son cumlesi; supheli / hizalanamayan pencere aktarilmaz
+            son = self._klip.get(p["sahip"][-1]) if p.get("sahip") else None
+            if ev["neden"] in (None, "tek_klip") and son is not None:
+                ak["onceki_cumle"] = uzun_mod.son_cumle(son.get("uzun_metin") or son.get("metin") or "")
+            else:
+                ak["onceki_cumle"] = ""
+            if ev["neden"] is not None:
+                self.atlanan[ev["neden"]] += 1
+            return ev
+
+    def adim(self, zorla=False, cozucu=True, planla=True):
+        """Bir tur: planla, siradaki pencereleri sirayla coz + hizala + yay. Bastaki pencerenin kisa metinleri eksikse
+        (zorla degilse) durur. cozucu=False: STT cagrilmaz (cozulmemis pencerede durur; sanal saatli duzenek coz'u
+        kendisi zamanlar); zorla ile cozulmemis pencere yine cozulur. planla=False: cagiran planlamistir.
+        Dondurur: yayilan pencere sayisi."""
+        if planla:
+            self.planla()
+        n = 0
+        while True:
+            with self._kilit:
+                if not self._sira:
+                    return n
+                p = self._sira[0]
+            if not p.get("cozuldu"):
+                if not cozucu and not zorla:
+                    return n
+                self.coz(p)
+            ev = self.hizala(p, zorla=zorla)
+            if ev is None:
+                return n
+            with self._kilit:
+                if self._sira and self._sira[0] is p:
+                    self._sira.popleft()
+            try:
+                self._yay_fn(ev)
+            except Exception as e:
+                self._olay("log", f"✖ uzun pencere sonucu işlenemedi: {e!r}")
+            n += 1
+
+    def istatistik(self, kisa_istek=None):
+        """GPU yuku: {"pencere", "cozulen", "istek", "saatlik_istek", "kisa_istek", "kisa_saatlik", "sure_sa", "atlanan",
+        "degisen_klip"}."""
+        sure = max(0.0, self._saat() - self.ilk_an) if self.ilk_an is not None else 0.0
+        sa = sure / 3600.0
+        d = {"pencere": self.pencere, "cozulen": self.cozulen, "istek": self.istek, "sure_sa": round(sa, 3),
+             "saatlik_istek": round(self.istek / sa, 1) if sa > 0 else None, "atlanan": dict(self.atlanan),
+             "degisen_klip": self.degisen_klip}
+        if kisa_istek is not None:
+            d["kisa_istek"] = kisa_istek
+            d["kisa_saatlik"] = round(kisa_istek / sa, 1) if sa > 0 else None
+        return d
+
+
 # ---------------------------------------------------------------- servis
 
 class SesServisi:
@@ -907,11 +1359,36 @@ class SesServisi:
     stt_repetition_penalty (config; None: alan gonderilmez). cizelge_fn(akis, bas, bit) -> bool|None puana cizelge kuralini ekler.
 
     STT kesintisi altyazi moduna dusurmez: yakalama surer, klipler bosluk olur; olcum_kaydi/kesinti_kaydi aciksa diske yazilip
-    STT donunce sirayla cozulur. Durum: stt_durumu."""
+    STT donunce sirayla cozulur. Durum: stt_durumu.
+
+    Faz 3 uzun pencere (uzun_pencere=True; None: config.json 'uzun_pencere', varsayilan kapali): arka plan iscisi halka
+    tampondan 20-28 sn'lik pencereleri yeniden cozer (UzunPencere); sonuc olayi {"tur": "uzun", ...} olay_fn'e gider (Motor
+    klip metnini degistirir, konusmaciya dokunmaz). Baslarken {"tur": "uzun_durum", "acik": True}. GPU yuku: STT istek
+    sayisi (kisa + uzun, saatlik) UZUN_RAPOR_SN'de ve durdururken loglanir. Kapaliyken hicbir yol degismez.
+
+    Cihazlar (cihaz.py; cihaz_otomatik=True, varsayilan): mikrofon acik mikrofonlardan otomatik secilir (mik_cihaz = config
+    'mikrofon_cihaz' yalniz elle ayar; sessiz/yoksa otomatige dusulur), loopback tum cikis cihazlarinin karisimidir.
+    Olaylar (olay(tip, veri)): 'mikrofon' {"kimlik","ad","otomatik","neden","sessizde"} her secim/geciste ve secili cihaz
+    sessize alininca / ses donunce; 'ses_uyari' {"tur":
+    'mikrofon'|'loopback', "var", "metin"} (tum mikrofonlar 10 sn tam sessiz / altyazida konusma varken 20 sn loopback
+    sesi yok; ses gelince var=False). secili_mikrofon() UI icin. arka: cihaz arka ucu (testler; None: soundcard).
+    altyazi_fn() -> uzak altyazi etkinliginin son ani (loopback uyarisi; ses.altyazi_son_fn(motor))."""
 
     def __init__(self, stt_adres, ipucu_fn=None, mod="otomatik", mik_cihaz=None, olay=None, satir_fn=None,
                  model="whisper", api_key="", proxy=True, verify=None, olcum_klasor=None, olay_fn=None,
-                 kesinti_klasor=None, esikler=None, stt_ipucu=True, stt_repetition_penalty=None, cizelge_fn=None):
+                 kesinti_klasor=None, esikler=None, stt_ipucu=True, stt_repetition_penalty=None, cizelge_fn=None,
+                 uzun_pencere=None, cihaz_otomatik=True, arka=None, altyazi_fn=None):
+        if uzun_pencere is None:                 # config.json 'uzun_pencere' (yalniz true acar)
+            try:
+                import ayar as ayar_mod
+                uzun_pencere = ayar_mod.ham_oku().get("uzun_pencere") is True
+            except Exception:
+                uzun_pencere = False
+        self.uzun_pencere = bool(uzun_pencere)
+        self.uzun = None                         # UzunPencere (baslat ya da uzun_ac ile kurulur)
+        self._uzun_isci = None
+        self._uzun_dur = threading.Event()
+        self._uzun_rapor_an = None
         self.kuyruk = queue.Queue()
         self.stt = SttIstemci(stt_adres, model=model, api_key=api_key, proxy=proxy, verify=verify,
                               repetition_penalty=stt_repetition_penalty)
@@ -924,7 +1401,12 @@ class SesServisi:
         self.ipucu_yeniden = 0               # supheli prompt'lu sonucun promptsuz tekrarlandigi klip sayisi
         self.atilan_halusinasyon = 0         # puani 'at' esigini asip metni atilan klip sayisi
         self.mod = mod                       # otomatik | cift | tek
-        self.mik_cihaz = mik_cihaz
+        self.mik_cihaz = mik_cihaz           # config 'mikrofon_cihaz': elle ayar (yoksa otomatik secim)
+        self.cihaz_otomatik = cihaz_otomatik is not False
+        self._arka = arka
+        self._altyazi_fn = altyazi_fn
+        self.mik_secici = None               # cihaz.MikrofonSecici (baslat kurar)
+        self.loop_secici = None              # cihaz.LoopbackSecici
         self._olay = olay or (lambda t, v: None)
         self._olay_fn = olay_fn
         self._satir = satir_fn or (lambda *a: None)
@@ -992,14 +1474,42 @@ class SesServisi:
             self._olay("log", f"✖ ses olayı işlenemedi: {e!r}")
 
     def _akis_olayi(self, tip, veri):
-        """Akis ipleri: saat capasi yenilemeyi olaylar.jsonl'e de yazar."""
-        if tip == "capa" and self._olcum is not None:
-            self._olcum.olay_yaz("capa", veri)
+        """Akis ipleri: saat capasi yenilemeyi ve mikrofon secimini olaylar.jsonl'e de yazar."""
+        if tip in ("capa", "mikrofon", "ses_uyari") and self._olcum is not None:
+            self._olcum.olay_yaz(tip, veri)
         self._olay(tip, veri)
         if tip == "capa" and isinstance(veri, dict):
             # motor -> konusmaci: o akisin klip epoch'lari sicradi (L capalari duzeltilir)
             with self._kilit:
                 self._olay_ver({"tur": "capa", "akis": veri.get("akis"), "fark": veri.get("fark")})
+
+    def _secicileri_kur(self):
+        """cihaz.py secicileri (soundcard yoksa ya da cihaz_otomatik kapaliysa None, None: eski yol)."""
+        if not self.cihaz_otomatik:
+            self._olay("log", "ses cihazları: otomatik seçim kapalı (config 'cihaz_otomatik': false) — Windows varsayılan "
+                              "hoparlörü ve " + (f"mikrofon {self.mik_cihaz!r}" if self.mik_cihaz not in (None, "")
+                                                 else "varsayılan mikrofon"))
+            return None, None
+        arka = self._arka if self._arka is not None else cihaz_mod.varsayilan_arka()
+        if arka is None:
+            self._olay("log", "! ses cihazları: soundcard kurulu değil, otomatik seçim yok — Windows varsayılanları kullanılıyor "
+                              "(pip install soundcard)")
+            return None, None
+        saat_fn = getattr(arka, "simdi", None)               # sahte arka ucun saati (testler)
+        loop = cihaz_mod.LoopbackSecici(arka, olay=self._akis_olayi, saat=saat_fn, altyazi_fn=self._altyazi_fn)
+        mik = cihaz_mod.MikrofonSecici(arka, elle=self.mik_cihaz, uzak_fn=loop.aktif_mi, olay=self._akis_olayi,
+                                       saat=saat_fn, hfp_fn=loop.hfp_aktif_mi)
+        return loop, mik
+
+    def secili_mikrofon(self):
+        """UI: {"kimlik","ad","otomatik","neden","sessizde"} | None (secilmedi ya da eski yol)."""
+        m = self.mik_secici
+        return m.secili_mikrofon() if m is not None else None
+
+    def _gecis(self, akis, g):
+        """Akis ipi: mantiksal akista cihaz degisti. Mikrofon degisince kulaklik korelasyon penceresi sifirlanir."""
+        if akis == "mikrofon" and getattr(g, "kapat", False) and self._kulaklik_tespit is not None:
+            self._kulaklik_tespit.sifirla()
 
     def _kulaklik_olayi(self, ev):
         self.kulaklik = ev["durum"]
@@ -1023,16 +1533,142 @@ class SesServisi:
         # Mikrofon HER ZAMAN yakalanir: yalniz toplantida ya da sadece sen konusurken
         # loopback'te ses olmaz. Hoparlorde ayni cumle iki akistan gelir -> konusmaci.py zamana bakip eler.
         ortak = dict(olay=self._akis_olayi, sayac=self._sayac, blok_fn=self._kulaklik_tespit.blok_ekle,
-                     tasma_fn=self._tasma)
-        self.akislar = [AkisYakalayici("loopback", self.kuyruk, loopback=True, **ortak),
-                        AkisYakalayici("mikrofon", self.kuyruk, cihaz=self.mik_cihaz, **ortak)]
+                     tasma_fn=self._tasma, gecis_fn=self._gecis)
+        if self.uzun_pencere:
+            self.uzun_ac()
+            ortak["klip_fn"] = self._uzun_klip
+        # Cihazlar otomatik (cihaz.py): mikrofon = acik mikrofonlardan secilen, loopback = tum cikislarin karisimi
+        self.loop_secici, self.mik_secici = self._secicileri_kur()
+        saat_fn = getattr(self._arka, "simdi", None) if self._arka is not None else None
+        if saat_fn is not None:
+            ortak["saat"] = saat_fn
+        self.akislar = [AkisYakalayici("loopback", self.kuyruk, loopback=True, secici=self.loop_secici, **ortak),
+                        AkisYakalayici("mikrofon", self.kuyruk, cihaz=self.mik_cihaz, secici=self.mik_secici, **ortak)]
         for a in self.akislar:
             a.start()
         self._isciler = [threading.Thread(target=self._calis, daemon=True) for _ in range(ISCI_SAYISI)]
         for i in self._isciler:
             i.start()
         self._isci = self._isciler[0]
+        if self.uzun is not None:
+            self._uzun_isci = threading.Thread(target=self._uzun_dongu, daemon=True, name="uzun-pencere")
+            self._uzun_isci.start()
         return True
+
+    # --- Faz 3: uzun pencere ---
+    def uzun_ac(self):
+        """UzunPencere'yi kurar (baslat bunu bayrak aciksa cagirir; duzenek / replay dogrudan). Motor'a
+        {"tur": "uzun_durum", "acik": True} gider: parca kapanisi uzun pencere sonucunu bekler. Dondurur: UzunPencere."""
+        if self.uzun is None:
+            self.uzun = UzunPencere(lambda ses_, ipucu: self.stt.coz(ses_, ipucu=ipucu), self._uzun_ses, self._uzun_yay,
+                                    puan_fn=self._uzun_puan, metin_fn=lambda seg: self.klip_metni(seg, say=False),
+                                    esik_fn=self._esik, ipucu_acik=self.stt_ipucu, olay=self._olay)
+            self.uzun_pencere = True
+            self._uzun_rapor_an = saat_mod.simdi()
+            self._olay("log", "uzun pencere AÇIK: 20-28 sn'lik pencereler yeniden çözülüyor (STT yükü ~2x)")
+            with self._kilit:
+                self._olay_ver({"tur": "uzun_durum", "acik": True})
+        return self.uzun
+
+    def _uzun_klip(self, akis, p):
+        """Akis ipi (AkisYakalayici._kaydet): klip olustu -> uzun pencere kaydi."""
+        u = self.uzun
+        if u is not None:
+            u.klip_kaydet(akis, p.get("klip_no"), p.get("bas_epoch"), p.get("bit_epoch"), p.get("rms"), p.get("ust_klip"))
+
+    def _uzun_metin(self, klip_no, metin):
+        u = self.uzun
+        if u is not None and klip_no is not None:
+            u.metin_kaydet(klip_no, metin)
+
+    def ses_al(self, akis, bas, bit):
+        """Halka tampondan (akis, epoch araligi) 16 kHz ses; yoksa None (ses izi icin)."""
+        return self._uzun_ses(akis, bas, bit)
+
+    def _uzun_ses(self, akis, bas, bit):
+        """Pencere sesi halka tampondan (epoch araligi); halkadan cikmis / henuz gelmemis kisim kirpilir. < 1 sn: None."""
+        for a in self.akislar:
+            if a.kaynak != akis or not a._capalar:
+                continue
+            s0 = max(int(round(a.epoch_ornek(bas))), a.halka.baslangic)
+            s1 = min(int(round(a.epoch_ornek(bit))), a.halka.bitis)
+            if s1 - s0 < ORNEK:
+                return None
+            ham = a.halka.al(s0, s1)
+            return normalize_et(ham) if ham is not None else None
+        return None
+
+    def _uzun_puan(self, p, segmentler, ipucu):
+        """Uzun pencere halusinasyon puani (kisa klip ile ayni kurallar); sure = pencerenin konusma suresi (klip ici)."""
+        bas = p.get("bas") or 0.0
+        q = {"kaynak": p.get("akis"), "bas_epoch": bas, "bit_epoch": bas + max(float(p.get("konusma_sn") or 0.0), 0.1),
+             "rms": p.get("rms")}
+        return self._puan(q, segmentler, ipucu=ipucu)
+
+    def _uzun_yay(self, ev):
+        with self._kilit:
+            self._olay_ver(ev)
+
+    def uzun_istatistik(self):
+        """GPU yuku: uzun pencere STT istekleri + kisa klip istekleri (saatlik) | None (uzun pencere kapali)."""
+        u = self.uzun
+        return u.istatistik(kisa_istek=self.gonderilen + self.ipucu_yeniden) if u is not None else None
+
+    def _uzun_raporla(self, son=False):
+        d = self.uzun_istatistik()
+        if not d:
+            return
+        saatlik = f"saatte ~{d['saatlik_istek']:.0f}" if d.get("saatlik_istek") is not None else "saatlik: ölçülemedi"
+        kisa = (f"; kısa klip {d['kisa_istek']} istek (saatte ~{d['kisa_saatlik']:.0f})"
+                if d.get("kisa_saatlik") is not None else "")
+        self._olay("log", f"  · uzun pencere{' (son)' if son else ''}: {d['pencere']} pencere, {d['istek']} STT isteği "
+                          f"({saatlik}){kisa}; {d['degisen_klip']} klip metni güncellendi, atlanan {d['atlanan']}")
+
+    def _uzun_ilerlet(self):
+        u = self.uzun
+        for a in self.akislar:
+            try:
+                u.ilerle(a.kaynak, a.ilerleme())
+            except Exception:
+                pass
+
+    def _uzun_dongu(self):
+        """Uzun pencere iscisi: akis ilerlemesi -> planla -> coz -> hizala -> yay. Durdurulunca kalan pencereler en fazla
+        UZUN_BITIS_SN icinde cozulur (kisa klip metinleri o ana kadar gelmistir)."""
+        u = self.uzun
+        while not self._uzun_dur.is_set():
+            try:
+                self._uzun_ilerlet()
+                u.adim()
+            except Exception as e:
+                self._olay("log", f"✖ uzun pencere turu başarısız: {e!r}")
+            simdi = saat_mod.simdi()
+            if self._uzun_rapor_an is not None and simdi - self._uzun_rapor_an >= UZUN_RAPOR_SN:
+                self._uzun_rapor_an = simdi
+                self._uzun_raporla()
+            self._uzun_dur.wait(UZUN_YOKLAMA_SN)
+        son = saat_mod.simdi() + UZUN_BITIS_SN
+        try:
+            self._uzun_ilerlet()
+            u.bitir_isaretle()
+            while u.bekleyen() and saat_mod.simdi() < son:
+                if not u.adim(zorla=True):
+                    break
+        except Exception as e:
+            self._olay("log", f"✖ uzun pencere son turu başarısız: {e!r}")
+        self._uzun_raporla(son=True)
+
+    def _uzun_kapat(self):
+        isci = self._uzun_isci
+        if isci is None:
+            return
+        self._uzun_dur.set()
+        try:
+            isci.join(timeout=UZUN_BITIS_SN + 10)
+        except RuntimeError:
+            pass
+        if isci.is_alive():
+            self._olay("log", f"! uzun pencere {UZUN_BITIS_SN} sn içinde bitmedi: kalan satırlar kısa metinle kalır")
 
     def durdur(self):
         for a in self.akislar:
@@ -1052,6 +1688,7 @@ class SesServisi:
             for no in sorted(self._hazir):
                 self._yay(self._hazir.pop(no))
             self._hazir_zaman.clear()
+        self._uzun_kapat()                     # kisa metinlerin hepsi geldi: kalan uzun pencereler cozulur
 
     def yeniden_kes(self, klip_no, an):
         """Klibi an (epoch) +- 1 sn icindeki en dusuk enerjili 100 ms blokta ikiye boler (halka tampon). Bir parca 1.0 sn'den
@@ -1131,6 +1768,8 @@ class SesServisi:
                     olcum.sonuc(p, ham, round(saat_mod.simdi() - t0, 2), tsler, seg_ozet, hata)
             finally:
                 p["ses"] = None                       # ses bellekten dusurulur
+                if self.uzun is not None and not any(isinstance(o, dict) and o.get("tur") == "klip" for o in olaylar):
+                    self._uzun_metin(p.get("klip_no"), "")    # satiri olmayacak klip: uzun pencere beklemez
                 self._sirali_yay(p.get("no"), olaylar)   # hata olsa da numara kapanir, sira takilmaz
 
     # --- klip olaylari ---
@@ -1368,9 +2007,13 @@ class SesServisi:
                     continue
                 self._son_kaydet(an, ev["akis"], c)
                 kalan.append(c)
+            if self.uzun is not None:
+                self._uzun_metin(ev.get("klip_no"), " ".join(kalan))    # satirin tasiyacagi (suzgecten gecmis) metin
             if not kalan and ev.get("akis") != "loopback":
                 return
             ev = dict(ev, text=" ".join(kalan))
+        elif ev.get("tur") == "klip" and self.uzun is not None:
+            self._uzun_metin(ev.get("klip_no"), ev.get("text") or "")
         self._olay_ver(ev)
 
     def _son_kaydet(self, an, kaynak, metin):
@@ -1485,6 +2128,7 @@ class SesServisi:
     def _tasma(self, p):
         """Akis ipi: kuyruk KUYRUK_TAVAN'i asti (STT fiilen yok). Klip diske yazilir/bosluk olur; sirasi kapatilir."""
         kaydedildi, olaylar = self._kesintiye_al(p, "kuyruk_tasti")
+        self._uzun_metin(p.get("klip_no"), "")
         self._sirali_yay(p.get("no"), olaylar)
         return kaydedildi
 
@@ -1495,6 +2139,39 @@ class SesServisi:
             self._bekci_var = True
             self._bekci = threading.Thread(target=self._bekci_dongusu, daemon=True)
             self._bekci.start()
+
+    def duraklat(self):
+        """Kesinti bekcisini (ve yakalamayi) durdurur: bekci bir sonraki turda cikar, kalan klipler diskte kalir."""
+        self._dur.set()
+
+    def kesinti_kalan(self):
+        """Diskte cozulmeyi bekleyen klip sayisi (kuyruk yoksa/kapaliysa 0)."""
+        kuyruk = self._kesinti_kuyrugu
+        return kuyruk.sayi() if kuyruk is not None and kuyruk.acik else 0
+
+    def kesinti_bosalt(self, duraklatildi=None, kesinti_bekle_sn=None, kesinti_asildi=None, duraklat_hatasi=RuntimeError):
+        """Diskteki kesinti kuyrugunu klip_no sirasiyla cozer; kuyruk bosalinca/duraklatilinca doner (bloklar).
+        duraklatildi: fn() -> True ise yeni klip cozulmez (duraklat_hatasi firlatilir: kesinti hatasi sayilir, klip diskte kalir).
+        kesinti_bekle_sn: STT bu kadar suredir yine kesikse duraklat() + kesinti_asildi() (bir kez). -> kalan klip sayisi."""
+        if duraklatildi is not None:
+            orijinal = self._coz
+
+            def coz(p):                                   # duraklatma: klip diskte kalir, sira korunur
+                if duraklatildi():
+                    raise duraklat_hatasi("kesinti kuyruğu duraklatıldı")
+                return orijinal(p)
+            self._coz = coz
+        self._bekci_baslat()
+        bekci = self._bekci
+        while bekci is not None and bekci.is_alive():
+            bekci.join(1.0)
+            bas = self._kesinti_bas
+            if (kesinti_bekle_sn is not None and bas is not None and saat_mod.simdi() - bas > kesinti_bekle_sn
+                    and not self._dur.is_set()):
+                self.duraklat()
+                if kesinti_asildi is not None:
+                    kesinti_asildi()
+        return self.kesinti_kalan()
 
     def _saglik(self):
         try:

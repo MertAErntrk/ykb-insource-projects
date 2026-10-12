@@ -22,8 +22,15 @@ benzeyen her kelimeyi oneririr; kapinin ne kadarini tuttugunu olcer, ag yok); --
 --terimler "A,B" ve/ya da --davet dosya (davet metni). Cikti olcum.json "duzeltme": duzeltilen / bozulan kelime (zemin gercegine
 gore; bozulan = dogru kelimenin yanlis olmasi, hedef 0), kabul, belirsiz; replay.duzelt: oneri / kabul / red nedenleri.
 
+Uzun pencere (Faz 3, --uzun, --stt gerekir): Faz1Hat gercek ses.UzunPencere ile kosar. Pencere sesi kayitli klip wav'larindan
+akisin ornek sayaci (ornek_bas) uzerinde yeniden kurulur (klipler arasi sessizlik sifir); pencere STT'ye gider, metin
+uzun.pencere_hizala ile kisa kliplere dagitilir (Motor ses_olayi 'uzun'). Cikti olcum.json "uzun": kisa ve uzun WER, goreli
+degisim (kapi: hedef -%25, alt sinir -%10; altinda uzun pencere kapali kalmali), pencere / STT istek sayisi ve saatlik GPU
+yuku (kisa + uzun). Kisa WER, uzun pencerenin degistirdigi satirlarin 'raw_kisa' (ozgun kisa metin) haliyle hesaplanir
+(--duzelt ile birlikte kisa taraf duzeltmesiz kalir: karsilastirma icin --duzelt'siz kosun).
+
 Kullanim:
-  python tools/replay.py toplantilar/<klasor> [--stt] [--cikti klasor] [--bas 0 --bit 10] [--hat modul:Sinif | --eski]
+  python tools/replay.py toplantilar/<klasor> [--stt [--uzun]] [--cikti klasor] [--bas 0 --bit 10] [--hat modul:Sinif | --eski]
                          [--ben ad] [--katilimcilar "Ad1,Ad2"] [--hoparlor]
                          [--duzelt [--llm] [--terimler "T1,T2"] [--davet dosya]]
 """
@@ -272,9 +279,20 @@ class Faz1Hat(Hat):
         else:
             self.motor._isle = lambda veri, duzelt: None           # LLM yok: duzeltme/ozet atlanir
         self.motor.yeniden_kes_fn = self._yeniden_kes
-        self.servis = ses_mod.SesServisi("", olay_fn=self.motor.ses_olayi)
+        self.servis = ses_mod.SesServisi("", olay_fn=self.motor.ses_olayi, uzun_pencere=False)
         if self.ayar.get("kulaklik") in (True, False):             # pasif tespit kaydedilmedi: elle (--hoparlor)
             self.motor.ses_olayi({"tur": "kulaklik", "durum": self.ayar["kulaklik"], "guven": 1.0})
+        self.uzun = None
+        if self.ayar.get("uzun"):                                  # Faz 3: gercek UzunPencere, ses kayitli wav'lardan
+            stt = self.ayar.get("stt")
+            if stt is None:
+                raise SystemExit("--uzun için --stt gerekir (pencereler kayıtlı wav'lardan yeniden çözülür)")
+            self.uzun = self.servis.uzun_ac()
+            self.uzun._coz_fn = lambda ses_, ipucu: stt.coz(ses_, ipucu=ipucu) if ipucu else stt.coz(ses_)
+            self.uzun._ses_fn = self._uzun_ses
+            self.uzun._saat = lambda: self.saat.t
+            self._wav_onbellek = {}
+            self._akis_wav = {}                                    # akis -> [(wav baslangici epoch, sure, yol)]
 
     def _isle_duzelt(self, veri, duzelt):
         """Motor._isle yerine: yalniz terim/ad duzeltmesi (kapali oneri LLM'i ya da --llm gercek); ozet yok."""
@@ -317,14 +335,81 @@ class Faz1Hat(Hat):
         self.saat.t = an
         no = kayit["no"]
         self._kayit[no] = kayit
+        if self.uzun is not None:
+            self._uzun_klip(no, kayit)
         ev = self._klip_olayi(no, kayit, segmentler, kayit.get("ust_klip"))
         if ev is not None:
             self.servis._sirali_yay(None, [ev])
+        elif self.uzun is not None:
+            self.servis._uzun_metin(no, "")
 
     def kontrol(self, an):
         self.saat.t = an
         self._cocuklari_yay()
+        if self.uzun is not None:
+            for akis in list(self._akis_wav):
+                self.uzun.ilerle(akis, an - self.UZUN_GECIKME_SN)
+            self.uzun.adim()                                       # STT burada (cevrimdisi: bloklar)
         self.motor.kontrol()
+
+    # --- Faz 3 uzun pencere (--uzun): sanal saat, pencere sesi kayitli wav'lardan ---
+    UZUN_GECIKME_SN = 15.0                     # kisa STT sonucu en gec bu kadar sonra gelir: ilerleme = an - bu
+    ONYUK_SN = 0.3                             # wav'in sesli araliktan once basladigi pay (ses.ONYUK_BLOK)
+
+    def _uzun_klip(self, no, kayit):
+        akis = kayit.get("akis") or "loopback"
+        self.uzun.klip_kaydet(akis, no, kayit["bas"], kayit.get("bit") or kayit["bas"], kayit.get("rms"),
+                              kayit.get("ust_klip"))
+        yol = os.path.join(self._klasor or "", "olcum", "klipler", f"{no:04d}.wav")
+        if not self._klasor or not os.path.exists(yol):
+            return
+        ob = kayit.get("ornek_bas")
+        capa = self._capa(akis, kayit)
+        bas = (capa + ob / 16000.0) if (ob is not None and capa is not None) else kayit["bas"] - self.ONYUK_SN
+        sure = kayit.get("sure") or max(0.0, (kayit.get("bit") or kayit["bas"]) - kayit["bas"]) + self.ONYUK_SN + 0.55
+        self._akis_wav.setdefault(akis, []).append((bas, float(sure), yol))
+
+    def _capa(self, akis, kayit):
+        """Akisin sifirinci orneginin epoch'u (kayitta yok): ilk kayitli klipten (bas - ornek_bas/16k - on-yuk)."""
+        c = getattr(self, "_capalar", None)
+        if c is None:
+            c = self._capalar = {}
+        if akis not in c and kayit.get("ornek_bas") is not None:
+            c[akis] = kayit["bas"] - kayit["ornek_bas"] / 16000.0 - self.ONYUK_SN
+        return c.get(akis)
+
+    def _uzun_ses(self, akis, bas, bit):
+        """Pencere sesi: akisin kayitli klip wav'lari zaman cizgisine yerlestirilir (aralar sessiz). Hic klip yoksa None."""
+        import numpy as np
+        n = int(round((bit - bas) * 16000))
+        if n <= 0:
+            return None
+        cikti = np.zeros(n, dtype="float32")
+        dolu = np.zeros(n, dtype=bool)                             # ortusen wav'larda (on-yuk) ilk yazilan kalir
+        var = False
+        for w_bas, sure, yol in self._akis_wav.get(akis, ()):
+            if w_bas >= bit or w_bas + sure <= bas:
+                continue
+            ses_ = self._wav_onbellek.get(yol)
+            if ses_ is None:
+                ses_ = self._wav_onbellek[yol] = wav_oku(yol)
+                while len(self._wav_onbellek) > 64:
+                    self._wav_onbellek.pop(next(iter(self._wav_onbellek)))
+            i0 = int(round((w_bas - bas) * 16000))
+            a, b = max(0, i0), min(n, i0 + len(ses_))
+            if b > a:
+                bos = ~dolu[a:b]
+                cikti[a:b][bos] = ses_[a - i0:b - i0][bos]
+                dolu[a:b] = True
+                var = True
+        return cikti if var else None
+
+    def uzun_bitir(self):
+        """Yakalama bitti: kalan pencereler cozulur (Motor.bitir'den once)."""
+        if self.uzun is None:
+            return
+        self.uzun.bitir_isaretle()
+        self.uzun.adim(zorla=True)
 
     def _cocuklari_yay(self):
         """Yeniden kesme parcalari. SesServisi._olay_yay parcayi (ust_klip) tekrar suzgecinden zaten muaf tutar;
@@ -366,12 +451,18 @@ class Faz1Hat(Hat):
             self._cocuk_no += 1
             self._cocuk[self._cocuk_no] = klip_no
             alt = dict(kayit, bas=bas, bit=bit, zarf=[])
+            if self.uzun is not None:
+                self.uzun.klip_kaydet(alt.get("akis") or "loopback", self._cocuk_no, bas, bit, alt.get("rms"), klip_no)
             ev = self._klip_olayi(self._cocuk_no, alt, seg, ust=klip_no)
             if ev is not None:
                 self._bekleyen.append(ev)
+            elif self.uzun is not None:
+                self.servis._uzun_metin(self._cocuk_no, "")
         return True
 
     def bitir(self):
+        self._cocuklari_yay()
+        self.uzun_bitir()
         self._cocuklari_yay()
         self.motor.bitir()
         cikti = []
@@ -524,25 +615,74 @@ def kos(klasor, hat_sinifi=None, stt=None, bas=None, bit=None, cikti=None, ayar=
     with open(os.path.join(cikti, "satirlar.jsonl"), "w", encoding="utf-8") as f:
         for s in satirlar:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
-    m = olcum.hesapla(klipler, olcum.gercek_oku(klasor), satirlar, ben=ben)
+    gercek = olcum.gercek_oku(klasor)
+    m = olcum.hesapla(klipler, gercek, satirlar, ben=ben)
     m["replay"] = {"okuma": len(okumalar), "klip": len(klipler), "stt": stt is not None,
                    "hat": type(hat).__name__}
     if duzelt_ozeti is not None:
         m["replay"]["duzelt"] = duzelt_ozeti
+    if getattr(hat, "uzun", None) is not None:
+        m["uzun"] = uzun_ozeti(klipler, gercek, satirlar, m, hat.uzun, ben=ben, kisa_istek=len(klipler) if stt else 0)
     with open(os.path.join(cikti, "olcum.json"), "w", encoding="utf-8") as f:
         json.dump(m, f, ensure_ascii=False, indent=1)
     yazdir(olcum.ozet_metin(m))
     if duzelt_ozeti is not None:
         yazdir(f"Düzeltme önerisi ({duzelt_ozeti['llm']} LLM): {duzelt_ozeti['oneri']} öneri, {duzelt_ozeti['kabul']} kabul; "
                f"red nedenleri: {duzelt_ozeti['red']}")
+    if m.get("uzun"):
+        yazdir(uzun_metin(m["uzun"]))
     yazdir(f"çıktı: {cikti}")
     return m, cikti
+
+
+UZUN_KAPI_HEDEF = -0.25                        # MIMARI_v3 §9 Faz 3: replay WER goreli degisimi hedefi
+UZUN_KAPI_ALT = -0.10                          # ... acik kalma sarti (bundan kotu ise uzun_pencere kapali kalir)
+
+
+def uzun_ozeti(klipler, gercek, satirlar, m_uzun, uzun, ben=None, kisa_istek=0):
+    """Kisa / uzun WER karsilastirmasi + GPU yuku. Kisa taraf: uzun pencerenin degistirdigi satirlarin raw_kisa'si."""
+    kisa = []
+    for s in satirlar:
+        d = dict(s)
+        if isinstance(s.get("raw_kisa"), str):
+            d["text"] = d["raw"] = s["raw_kisa"]
+        kisa.append(d)
+    m_kisa = olcum.hesapla(klipler, gercek, kisa, ben=ben)
+    w_k, w_u = m_kisa["wer"]["oran"], m_uzun["wer"]["oran"]
+    goreli = round((w_u - w_k) / w_k, 4) if isinstance(w_k, (int, float)) and isinstance(w_u, (int, float)) and w_k else None
+    bas = min((k.get("bas") or 0) for k in klipler.values()) if klipler else 0
+    bit = max((k.get("bit") or 0) for k in klipler.values()) if klipler else 0
+    sa = max(0.0, bit - bas) / 3600.0
+    ist = uzun.istatistik(kisa_istek=kisa_istek)
+    ist.update(sure_sa=round(sa, 3), saatlik_istek=round(ist["istek"] / sa, 1) if sa > 0 else None,
+               kisa_saatlik=round(kisa_istek / sa, 1) if sa > 0 else None)
+    return {"wer_kisa": w_k, "wer_uzun": w_u, "hata_kisa": m_kisa["wer"]["hata"], "hata_uzun": m_uzun["wer"]["hata"],
+            "referans_kelime": m_uzun["wer"]["referans_kelime"], "goreli": goreli,
+            "kapi_hedef": UZUN_KAPI_HEDEF, "kapi_alt": UZUN_KAPI_ALT,
+            "hedef_gecti": goreli is not None and goreli <= UZUN_KAPI_HEDEF,
+            "alt_gecti": goreli is not None and goreli <= UZUN_KAPI_ALT,
+            "degisen_satir": sum(1 for s in satirlar if isinstance(s.get("raw_kisa"), str)),
+            "belirsiz_kelime": sum(len(s.get("uzun_belirsiz") or []) for s in satirlar), "gpu": ist}
+
+
+def uzun_metin(u):
+    def y(x):
+        return "-" if x is None else f"%{100 * x:.1f}"
+    g = u["gpu"]
+    karar = ("hedef geçti" if u["hedef_gecti"] else ("alt sınır geçti" if u["alt_gecti"] else
+             "ALT SINIRIN ALTINDA: uzun_pencere kapalı kalmalı"))
+    goreli = "-" if u["goreli"] is None else f"{100 * u['goreli']:+.1f}%"
+    return (f"Uzun pencere: WER kısa {y(u['wer_kisa'])} -> uzun {y(u['wer_uzun'])} (göreli "
+            f"{goreli}; {karar}); {u['degisen_satir']} satır, "
+            f"{u['belirsiz_kelime']} belirsiz kelime; GPU: {g['pencere']} pencere, {g['istek']} uzun istek "
+            f"(saatte {g.get('saatlik_istek') or '-'}), kısa {g.get('kisa_istek', 0)} (saatte {g.get('kisa_saatlik') or '-'})")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Kaydı boru hattından çevrimdışı geçir (varsayılan: Faz 1 hattı)")
     ap.add_argument("klasor", help="toplantı klasörü (içinde olcum/ var)")
     ap.add_argument("--stt", action="store_true", help="wav'ları config.json'daki STT ile yeniden çöz (devirde yeniden kesme de)")
+    ap.add_argument("--uzun", action="store_true", help="Faz 3 uzun pencere (--stt ile): kısa / uzun WER ve STT yükü raporu")
     ap.add_argument("--cikti", help="çıktı klasörü (varsayılan: geçici klasör)")
     ap.add_argument("--bas", help="başlangıç: SS:DD[:SN] ya da ilk kayıttan dakika")
     ap.add_argument("--bit", help="bitiş: SS:DD[:SN] ya da ilk kayıttan dakika")
@@ -558,7 +698,11 @@ def main(argv=None):
     ap.add_argument("--terimler", help="--duzelt için virgülle ayrılmış terimler (Whisper'ın bozduğu doğru yazımlar)")
     ap.add_argument("--davet", help="--duzelt için davet metni dosyası (büyük harfli öbekler terim olur)")
     a = ap.parse_args(argv)
+    if a.uzun and not a.stt:
+        ap.error("--uzun için --stt gerekir (pencereler kayıtlı wav'lardan yeniden çözülür)")
     ayar = {"kulaklik": False} if a.hoparlor else {}
+    if a.uzun:
+        ayar["uzun"] = True
     if a.duzelt:
         ayar.update(duzelt=True, llm=a.llm)
         if a.terimler:

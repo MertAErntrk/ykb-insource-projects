@@ -154,7 +154,7 @@ class YakalamaIsi(QtCore.QThread):
                            self.ctx.get("gundem", ""), duzelt=self.duzelt, davet=self.ctx.get("davet"),
                            olay=lambda t, v: self.olay.emit(t, v),
                            kaynak="ses", ben=outlook.ben_adi(self.ayar),   # ayar bossa Outlook/Windows tam adi
-                           sablon=self.ayar.get("not_sablonu", "genel"),
+                           sablon=self.ayar.get("not_sablonu", "otomatik"),    # otomatik: davet konusu/metninden
                            esikler=self.ayar.get("esikler"),
                            altyazi_yedek=bool(self.ayar.get("altyazi_yedek", False)))
         self.olay.emit("log", f"Klasör: {klasor}")
@@ -169,7 +169,9 @@ class YakalamaIsi(QtCore.QThread):
                 self.ayar.get("stt_url", ""),
                 ipucu_fn=self._ipucu,                           # terim.prompt(seri, adlar): ad + <=20 ilgili terim
                 mod="otomatik",
-                mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: numara ya da ad; yoksa Windows varsayılanı
+                mik_cihaz=self.ayar.get("mikrofon_cihaz"),      # config.json: elle ayar (numara ya da ad); yoksa otomatik seçim
+                cihaz_otomatik=self.ayar.get("cihaz_otomatik", True),   # false: eski yol (Windows varsayılanları)
+                altyazi_fn=ses_mod.altyazi_son_fn(self.motor),  # altyazıda konuşma var ama loopback sessiz: uyarı
                 olay=lambda t, v: self.olay.emit(t, v),
                 olay_fn=self.motor.ses_olayi,                   # C1: klip / bosluk / kulaklik -> motor
                 model=self.ayar.get("stt_model", "whisper"), api_key=self.ayar.get("stt_key", ""),
@@ -185,6 +187,8 @@ class YakalamaIsi(QtCore.QThread):
             elif self.ayar.get("kesinti_kaydi", False):
                 self.ses_servisi.kesinti_kaydi_ac(klasor)     # STT yokken klipler diske, donunce cozulur
             self.motor.yeniden_kes_fn = self.ses_servisi.yeniden_kes
+            if self.ayar.get("ses_izi", False):               # Faz 6: altyazisiz '?' satirlara ses izi yardimi
+                self.motor.ses_izi_kur(self.ayar, self.ses_servisi.ses_al)
             if not self.ses_servisi.baslat():                 # STT yokken de True (kesinti durumu); False: yakalama yok
                 self.ses_servisi = None
                 self._stt_yok("ses yakalama açılamadı")
@@ -288,7 +292,7 @@ class YakalamaIsi(QtCore.QThread):
 
 
 class TamamlamaIsi(QtCore.QThread):
-    """Notu uretir (toplanti bitince kullanici onayi beklenmez)."""
+    """Notu uretir (toplanti bitince kullanici onayi beklenmez). Var olan not.md degisecekse once yedeklenir."""
     olay = QtCore.pyqtSignal(str, object)
     bitti = QtCore.pyqtSignal(str)
     hata = QtCore.pyqtSignal(str)
@@ -300,7 +304,7 @@ class TamamlamaIsi(QtCore.QThread):
     def run(self):
         self.m._olay = lambda t, v: self.olay.emit(t, v)
         try:
-            md = self.m.notu_uret()
+            md = self.m.notu_uret(yedekle=True)       # 'Notu yeniden üret' / sablon degisimi: onceki not.md yedeklenir
             self.m.kapat()
         except Exception as e:
             hata_logla(traceback.format_exc())
@@ -356,7 +360,8 @@ class YenidenOzetlemeIsi(QtCore.QThread):
     bitti = QtCore.pyqtSignal(str)
     hata = QtCore.pyqtSignal(str)
 
-    def __init__(self, klasor, terimler, duzelt=True, ben=None, sablon="genel"):
+    def __init__(self, klasor, terimler, duzelt=True, ben=None, sablon="otomatik"):
+        """sablon: ayardaki deger; toplantinin kayitli sablonu (meta.json) varsa o kullanilir (Motor.yukle)."""
         super().__init__()
         self.klasor, self.terimler = klasor, terimler
         self.duzelt, self.ben, self.sablon = duzelt, ben, sablon
@@ -518,7 +523,7 @@ class KesintiDevamIsi(QtCore.QThread):
         sv = self._servis
         if sv is not None:
             try:
-                sv._dur.set()                             # bekci dongusu bir sonraki turda cikar
+                sv.duraklat()                             # bekci dongusu bir sonraki turda cikar
             except Exception:
                 pass
 
@@ -558,7 +563,7 @@ class KesintiDevamIsi(QtCore.QThread):
     def _bir(self, klasor, n):
         ad = os.path.basename(klasor)
         m = Motor.yukle(klasor, self.terimler, olay=lambda t, v: self.olay.emit(t, v), duzelt=self.duzelt,
-                        ben=outlook.ben_adi(self.ayar), sablon=self.ayar.get("not_sablonu", "genel"))
+                        ben=outlook.ben_adi(self.ayar), sablon=self.ayar.get("not_sablonu", "otomatik"))
         try:
             servis = self._servis_kur(m, klasor)
             self._servis = servis
@@ -567,23 +572,10 @@ class KesintiDevamIsi(QtCore.QThread):
                           "sonraki açılışta yeniden denenecek")
                 return 0, n
             self._log(f"önceki oturumdan {n} ses klibi çözülüyor ({ad})…")
-            orijinal = servis._coz
-
-            def coz(p):                                   # duraklatma: klip diskte kalir, sira korunur
-                if self._dur:
-                    raise Duraklatildi("kesinti kuyruğu duraklatıldı")
-                return orijinal(p)
-            servis._coz = coz
-            servis._bekci_baslat()
-            bekci = getattr(servis, "_bekci", None)
-            while bekci is not None and bekci.is_alive():
-                bekci.join(1.0)
-                kesinti = getattr(servis, "_kesinti_bas", None)
-                if kesinti is not None and saat.simdi() - kesinti > self.KESINTI_BEKLE_SN and not self._dur:
-                    self._log("! STT kuyruk çözülürken yine kesildi; kalan klipler sonraki açılışa bırakıldı")
-                    self.durdur()
-            kuyruk = getattr(servis, "_kesinti_kuyrugu", None)
-            kalan = kuyruk.sayi() if kuyruk is not None else 0
+            kalan = servis.kesinti_bosalt(
+                duraklatildi=lambda: self._dur, kesinti_bekle_sn=self.KESINTI_BEKLE_SN, duraklat_hatasi=Duraklatildi,
+                kesinti_asildi=lambda: (self._log("! STT kuyruk çözülürken yine kesildi; kalan klipler sonraki açılışa "
+                                                  "bırakıldı"), self.durdur()))
             m.bitir()                                     # acik parca diske + ozet; durum 'bitti' (not yeniden uretilebilir)
             cozulen = max(0, n - kalan)
             if cozulen:

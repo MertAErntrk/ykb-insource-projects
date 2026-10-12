@@ -9,7 +9,6 @@ kesik cevapta LLM'siz yedege (bolum notlarinin kendisi) dusulur.
 import datetime as dt
 import difflib
 import json
-import os
 import re
 import ssl
 import threading
@@ -23,13 +22,17 @@ import ayar as ayar_mod
 from metin import ad_geciyor, cift_yonlu_benzerlik, tr_kucuk
 
 CONFIG = "config.json"
-_cfg = {}
-if os.path.exists(CONFIG):
+
+
+def _ilk_ayar():
+    """Acilis ayari: ayar.ham_oku ile (utf-8-sig: Not Defteri'nin BOM'lu config.json'u da okunur). Bozuksa {}."""
     try:
-        with open(CONFIG, encoding="utf-8") as _f:
-            _cfg = json.load(_f)
+        return ayar_mod.ham_oku(CONFIG)
     except Exception:
-        _cfg = {}
+        return {}
+
+
+_cfg = _ilk_ayar()
 
 MARJ = 350                                             # sablon + guvenlik payi
 VARSAYILAN_PENCERE = 16384                             # sunucu sorulamazsa ve config'te 'context' yoksa
@@ -507,6 +510,174 @@ GENEL_SISTEM = (
     + TURKCE_KURAL + " Yalnızca JSON döndür."
 )
 
+# ---------- not sablonlari: sablona ozel bolumler (map + liste + not) ----------
+# Sablon toplantiya baglidir (meta.json 'sablon'); ayar 'otomatik' ise davet konusu / metninden secilir (sablon_sec).
+# Ek alanlar yalniz o sablonun semasina ve prompt'una girer: 'genel' istekleri (prompt + sema) eskisiyle birebir ayni.
+# Ek bolumlerin maddeleri de dayanak / deger / sahip denetiminden gecer (motor); bos bolum notta yer almaz.
+
+SABLON_OTOMATIK = "otomatik"
+_METIN_LISTESI = {"type": "array", "items": {"type": "string"}}
+# sablon -> ((alan, not basligi, tur), ...); tur: metin (dizi) | secenek (nesne: secenek, artilar, eksiler, secildi) |
+# fikir (nesne: fikir, tema)
+SABLON_ALANLARI = {
+    "haftalik": (("ilerleme", "İlerleme", "metin"), ("engeller", "Engeller", "metin"),
+                 ("gelecek_donem", "Gelecek dönem", "metin")),
+    "karar": (("secenekler", "Seçenekler ve gerekçeler", "secenek"),),
+    "birebir": (("geri_bildirimler", "Geri bildirimler", "metin"), ("anlasilanlar", "Anlaşılanlar", "metin")),
+    "calistay": (("fikirler", "Fikirler", "fikir"),),
+}
+ALAN_TURU = {alan: tur for v in SABLON_ALANLARI.values() for alan, _, tur in v}
+SABLON_ALAN_ADLARI = tuple(ALAN_TURU)
+_SABLON_SEMA = {
+    "metin": _METIN_LISTESI,
+    "secenek": {"type": "array", "items": {"type": "object", "properties": {
+        "secenek": {"type": "string"}, "artilar": _METIN_LISTESI, "eksiler": _METIN_LISTESI,
+        "secildi": {"type": "boolean"}}, "required": ["secenek", "artilar", "eksiler", "secildi"]}},
+    "fikir": {"type": "array", "items": {"type": "object", "properties": {
+        "fikir": {"type": "string"}, "tema": {"type": "string"}}, "required": ["fikir", "tema"]}},
+}
+_MAP_EK = {
+    "haftalik": ("Bu bir HAFTALIK DURUM toplantısı; ek alanlar:\n"
+                 "- ilerleme: tamamlanan ya da ilerleyen işler (kim neyi bitirdi, iş ne durumda).\n"
+                 "- engeller: işi durduran ya da geciktiren sorunlar ve bağımlılıklar.\n"
+                 "- gelecek_donem: bir sonraki döneme planlanan işler (sahibi belli somut iş 'aksiyonlar'a da yazılır)."),
+    "karar": ("Bu bir KARAR toplantısı; ek alan:\n"
+              "- secenekler: karşılaştırılan her seçenek için 'secenek' (kısa ad), 'artilar' ve 'eksiler' (yalnız "
+              "toplantıda SÖYLENEN gerekçeler; kendin gerekçe ekleme), 'secildi' (yalnız açıkça seçildiyse true; seçilen "
+              "seçenek 'kararlar'a da yazılır)."),
+    "birebir": ("Bu bir BİREBİR (1:1) görüşme; ek alanlar:\n"
+                "- geri_bildirimler: verilen ya da istenen geri bildirimler (kim kime, olgusal; yorum katma).\n"
+                "- anlasilanlar: iki tarafın açıkça üzerinde anlaştığı noktalar."),
+    "calistay": ("Bu bir ÇALIŞTAY / BEYİN FIRTINASI; ek alan:\n"
+                 "- fikirler: ortaya atılan öneri ve fikirler; 'fikir' kısa, 'tema' fikirleri gruplayan 2-4 kelimelik "
+                 "başlık (benzer fikirlere aynı tema). Öneri ve fikirleri 'kararlar'a ya da 'acik_sorular'a YAZMA, buraya "
+                 "yaz. 'kararlar'a yalnız açık uzlaşma girer ('karar verdik', 'böyle yapıyoruz', 'anlaştık')."),
+}
+_EK_KURAL = ("Ek alanlarda da aynı kurallar geçerli: yalnız söyleneni yaz, ⟨⟩ içinden madde / sayı / tarih üretme, (?) "
+             "yazma; bölümde yoksa liste boş kalır.")
+_LISTE_EK = {
+    "secenekler": "Aynı seçeneği tek nesnede birleştir, artı ve eksileri birleştir; 'secildi' yalnız girdide 'evet' ise true.",
+    "fikirler": "Aynı fikri tek maddede birleştir, benzer temaları ortak adla yaz; fikri 'kararlar'a taşıma.",
+}
+# not satirinda madde metninden once gelen, kodun yazdigi onekler (dayanak / deger denetimi bunlari madde saymaz)
+SABLON_ONEKLERI = ("Seçilen (?): ", "Seçilen: ", "Artı: ", "Eksi: ")
+
+
+def sablon_adi(sablon):
+    """Gecerli sablon anahtari; bilinmeyen / 'otomatik' / bos -> 'genel'."""
+    return sablon if sablon in SABLONLAR else "genel"
+
+
+def sablon_alanlari(sablon):
+    return SABLON_ALANLARI.get(sablon_adi(sablon), ())
+
+
+def _sema_genislet(taban, sablon):
+    alanlar = sablon_alanlari(sablon)
+    if not alanlar:
+        return taban
+    return {"type": "object",
+            "properties": dict(taban["properties"], **{a: _SABLON_SEMA[t] for a, _, t in alanlar}),
+            "required": list(taban["required"]) + [a for a, _, _ in alanlar]}
+
+
+def bolum_semasi(sablon="genel"):
+    """Map (parca) semasi: 'genel' icin BOLUM_SEMASI'nin kendisi; diger sablonlarda ek alanlar zorunlu (sunucu uygular;
+    cevap ayristirilirken eksik ek alan bos liste sayilir: _sema_json)."""
+    return _sema_genislet(BOLUM_SEMASI, sablon)
+
+
+def liste_semasi(sablon="genel"):
+    return _sema_genislet(LISTE_SEMASI, sablon)
+
+
+def map_sistemi(sablon="genel"):
+    ek = _MAP_EK.get(sablon_adi(sablon))
+    return f"{MAP_SISTEM}\n{ek}\n{_EK_KURAL}" if ek else MAP_SISTEM
+
+
+def liste_sistemi(sablon="genel"):
+    alanlar = sablon_alanlari(sablon)
+    if not alanlar:
+        return LISTE_SISTEM
+    ek = [f"Ek listeler ({', '.join(a for a, _, _ in alanlar)}): aynı kurallarla birleştir (benzerleri tek maddede, yeni "
+          f"madde ekleme, [B..] etiketini yazma)."]
+    ek += [_LISTE_EK[a] for a, _, _ in alanlar if a in _LISTE_EK]
+    return LISTE_SISTEM + "\n" + " ".join(ek)
+
+
+_SABLON_BASLIK_KUCUK = {tr_kucuk(b) for v in SABLON_ALANLARI.values() for _, b, _ in v}
+
+
+def sablon_bolumu_mu(baslik):
+    """'## Fikirler' gibi bir not basligi (ya da duz baslik metni) sablona ozel bir bolum mu?"""
+    return tr_kucuk(str(baslik or "").lstrip("#").strip()) in _SABLON_BASLIK_KUCUK
+
+
+# Otomatik secim: davet konusu once, sonra davet metni; ayni metinde ozelden genele. Eslesme Turkce harf / buyuk-kucuk
+# duyarsiz (sade ASCII). Guclu ipuclari (birebir, calistay, cok kelimeli 'haftalik durum' ...) konu ve davet metninde
+# aranir; tek kelimelik 'durum', 'onay', 'karar', 'status' gibi zayif ipuclari yalniz konuda ve kelime sonu sinirli
+# ('durumu' evet; 'durumunda', 'durumsal', 'statusbar', 'kararlilik' hayir): davet metninde ('Katılamamanız durumunda',
+# 'onayınızı rica ederim', 'karar verilmeyecek') neredeyse her davette gecerler.
+_K = r"(?![a-z0-9])"                                # kelime sonu
+SABLON_GUCLU = (
+    ("birebir", (("birebir", r"birebir"), ("bire bir", r"bire bir" + _K), ("one on one", r"one[ -]on[ -]one" + _K),
+                 ("one-to-one", r"one[ -]to[ -]one" + _K), ("1on1", r"1[ -]?on[ -]?1"),
+                 ("1:1", r"1:1"), ("1-1", r"1-1"))),
+    ("calistay", (("calistay", r"calistay"), ("workshop", r"workshop"), ("beyin firtinasi", r"beyin firtinasi"),
+                  ("brainstorm", r"brainstorm"))),
+    ("karar", (("karar toplantisi", r"karar toplantisi"), ("decision meeting", r"decision meeting"))),
+    ("haftalik", (("haftalik durum", r"haftalik durum"), ("weekly status", r"weekly (?:status|sync)" + _K),
+                  ("durum toplantisi", r"durum toplantisi"), ("status meeting", r"status meeting"))),
+)
+# yalniz konuda, guclulerden sonra; 'Haftalık karar': karar (toplanti turu) > haftalik (siklik)
+SABLON_ZAYIF = (
+    ("karar", (("karar", r"karar(?:i|in|lar|lari|larin)?" + _K), ("degerlendirme", r"degerlendirme(?:si|leri)?" + _K),
+               ("onay", r"onay(?:i|lar|lari)?" + _K), ("decision", r"decisions?" + _K))),
+    ("haftalik", (("haftalik", r"haftalik"), ("weekly", r"weekly" + _K), ("durum", r"durum(?:u|un|lar|lari)?" + _K),
+                  ("status", r"status" + _K))),
+)
+
+
+def _sablon_sade(s):
+    m = tr_kucuk(s)
+    for a, b in zip("çğıöşüâî", "cgiosuai"):
+        m = m.replace(a, b)
+    return re.sub(r"\s+", " ", m)
+
+
+def _anahtar_gecer(desen, metin):
+    """Kelime basinda; rakamla baslayan ('1:1', '1-1', '1on1') rakama / tarihe / ondaliga bitisik degil ('11-12',
+    '2026-11-01', '1-1,5 saat' degil; 'RE:1:1' evet)."""
+    if desen[0].isdigit():
+        return re.search(r"(?<![\d/.-])(?<!\d:)" + desen + r"(?![\d:/-])(?![.,]\d)", metin) is not None
+    return re.search(r"(?<![a-z0-9])" + desen, metin) is not None
+
+
+def sablon_tespit(konu, govde=""):
+    """Davet konusu / metninden sablon -> (sablon, neden). Bulunamazsa ('genel', neden)."""
+    for yer, metin, gruplar in (("davet konusunda", konu, SABLON_GUCLU + SABLON_ZAYIF),
+                                ("davet metninde", govde, SABLON_GUCLU)):
+        sade = _sablon_sade(metin or "")
+        if not sade.strip():
+            continue
+        for sablon, anahtarlar in gruplar:
+            for ad, desen in anahtarlar:
+                if _anahtar_gecer(desen, sade):
+                    return sablon, f"otomatik: {yer} '{ad}' geçiyor"
+    return "genel", "otomatik: davette şablon ipucu yok"
+
+
+def sablon_sec(ayar_degeri, konu="", govde=""):
+    """Ayar degeri sabit bir sablonsa o (zorunlu), 'otomatik' / bos / bilinmeyense davetten tespit -> (sablon, neden)."""
+    if ayar_degeri in SABLONLAR:
+        return ayar_degeri, "ayarda sabit şablon"
+    return sablon_tespit(konu, govde)
+
+
+def sablon_etiketi(sablon):
+    return SABLONLAR.get(sablon_adi(sablon), SABLONLAR["genel"])[0]
+
 
 # ---------- yardimcilar ----------
 
@@ -866,7 +1037,8 @@ def _sor(mesajlar, max_tokens, sema, effort, temperature, dusunme):
 def _sema_json(metin, sema):
     """JSON'u ayiklar ve semanin zorunlu anahtarlarini tasiyip tasimadigini dogrular; degilse ValueError."""
     v = json_ayikla(metin)
-    eksik = [k for k in (sema or {}).get("required", []) if k not in v]
+    # sablon ek alanlari zorunlu gonderilir (sunucu uygular) ama eksikse cevap reddedilmez: liste bos sayilir
+    eksik = [k for k in (sema or {}).get("required", []) if k not in v and k not in ALAN_TURU]
     if eksik:
         raise ValueError(f"eksik alanlar: {eksik}")
     return v
@@ -929,6 +1101,61 @@ def baglam_metni(baslik, tarih, konusmacilar, terim_metni, gundem=""):
 
 # ---------- ozet ----------
 
+def _isaretsiz(x):
+    """Sablon alanlarinda (?) isaretini model yazmaz: kod koyar (dayanak / deger denetimi); modelinki atilir."""
+    return normalize_bosluk(re.sub(r"\(\?\)", " ", _metin(x)))
+
+
+def _evet(x):
+    return x is True or (isinstance(x, str) and tr_kucuk(x.strip()) in ("true", "evet", "yes", "1"))
+
+
+def _secenek_satiri(metin):
+    """Duz metin donen secenek ('X | artı: a; b | eksi: c | seçildi: evet', liste girdisinin bicimi) -> nesne."""
+    parcalar = [p.strip() for p in metin.split("|")]
+    d = {"secenek": parcalar[0], "artilar": [], "eksiler": [], "secildi": False}
+    for p in parcalar[1:]:
+        ad, _, deger = p.partition(":")
+        ad = _sade(ad)
+        if ad in ("arti", "eksi"):
+            d["artilar" if ad == "arti" else "eksiler"] = [x.strip() for x in deger.split(";") if x.strip(" -")]
+        elif ad == "secildi":
+            d["secildi"] = _evet(deger.strip())
+    return d
+
+
+def sablon_alani_normalize(v, tur):
+    """Sablon ek alani -> temiz liste. metin: [str]; secenek: [{secenek, artilar, eksiler, secildi}]; fikir: [{fikir, tema}].
+    Bos madde atilir; duz metin gelen secenek / fikir nesneye cevrilir."""
+    if not isinstance(v, list):
+        v = [v] if v else []
+    sonuc = []
+    for x in v:
+        if tur == "metin":
+            m = _isaretsiz(x.get("madde") if isinstance(x, dict) else x)
+            if madde_dolu(m):
+                sonuc.append(m)
+        elif tur == "secenek":
+            d = x if isinstance(x, dict) else _secenek_satiri(_metin(x))
+            ad = _isaretsiz(d.get("secenek") or d.get("ad"))
+            if not madde_dolu(ad):
+                continue
+            artilar, eksiler = d.get("artilar") or [], d.get("eksiler") or []
+            sonuc.append({"secenek": ad,
+                          "artilar": [_isaretsiz(a) for a in (artilar if isinstance(artilar, list) else [artilar])
+                                      if madde_dolu(_isaretsiz(a))],
+                          "eksiler": [_isaretsiz(a) for a in (eksiler if isinstance(eksiler, list) else [eksiler])
+                                      if madde_dolu(_isaretsiz(a))],
+                          "secildi": _evet(d.get("secildi"))})
+        else:
+            m = None if isinstance(x, dict) else re.match(r"^(.*?)\s*\(tema:\s*([^()]*)\)\s*$", _metin(x))
+            d = x if isinstance(x, dict) else ({"fikir": m.group(1), "tema": m.group(2)} if m else {"fikir": x})
+            fikir = _isaretsiz(d.get("fikir") or d.get("madde"))
+            if madde_dolu(fikir):
+                sonuc.append({"fikir": fikir, "tema": _isaretsiz(d.get("tema")) or "Diğer"})
+    return sonuc
+
+
 def normalize_ozet(o):
     if not isinstance(o, dict):
         return None
@@ -952,7 +1179,23 @@ def normalize_ozet(o):
                                         "tarih": _metin(a.get("tarih") or "-") or "-"})
         elif madde_dolu(_metin(a)):
             temiz["aksiyonlar"].append({"madde": _metin(a).strip(), "sorumlu": "belirsiz", "tarih": "-"})
+    for alan, tur in ALAN_TURU.items():             # sablon ek alanlari yalniz cevapta varsa (genel: hic yok)
+        if alan in o:
+            temiz[alan] = sablon_alani_normalize(o.get(alan), tur)
     return temiz
+
+
+def alan_metni(oge, tur):
+    """Sablon alani ogesinin karsilastirilan / denetlenen metni."""
+    if tur == "secenek":
+        return oge.get("secenek", "")
+    if tur == "fikir":
+        return oge.get("fikir", "")
+    return str(oge)
+
+
+def _sablon_metinleri(o):
+    return [alan_metni(x, ALAN_TURU[a]) for a in ALAN_TURU for x in o.get(a) or []]
 
 
 def madde_dolu(madde):
@@ -961,7 +1204,8 @@ def madde_dolu(madde):
 
 
 def _ozet_dili(o):
-    return " ".join([o["ozet"]] + o["kararlar"] + o["acik_sorular"] + [a["madde"] for a in o["aksiyonlar"]])
+    return " ".join([o["ozet"]] + o["kararlar"] + o["acik_sorular"] + [a["madde"] for a in o["aksiyonlar"]]
+                    + _sablon_metinleri(o))
 
 
 ONCEKI_BAGLAM_TOKEN = 400         # parca ortusmesi: onceki parcanin son satirlari + acik maddeler (MIMARI_v3 §6)
@@ -985,10 +1229,12 @@ def onceki_baglam_hazirla(konular=None, satirlar=None, acik=None, tavan=ONCEKI_B
     return {"konular": konular, "satirlar": "\n".join(reversed(secilen)), "acik": acik}
 
 
-def bolum_ozetle(blok, sira, baglam, onceki_konular=None):
+def bolum_ozetle(blok, sira, baglam, onceki_konular=None, sablon="genel"):
     """onceki_konular: onceki bolumun konu listesi (eski bicim) ya da onceki_baglam_hazirla() sozlugu
     (konular + son satirlar + acik maddeler). Satirlar YALNIZ baglamdir: bolumun ilk satirlari onlara cevap
-    olabilir; madde bunlardan uretilmez."""
+    olabilir; madde bunlardan uretilmez. sablon: map prompt'u ve semasi sablonun ek alanlarini da ister
+    (map_sistemi / bolum_semasi; 'genel' eskisiyle ayni)."""
+    sistem, sema = map_sistemi(sablon), bolum_semasi(sablon)
     if isinstance(onceki_konular, dict):
         bag = onceki_konular
         onceki, son_satirlar, acik = bag.get("konular") or [], str(bag.get("satirlar") or "").strip(), bag.get("acik") or []
@@ -1002,23 +1248,28 @@ def bolum_ozetle(blok, sira, baglam, onceki_konular=None):
         devam += ("\nÖnceki bölümün son satırları (YALNIZ bağlam; bunlardan madde ya da özet üretme, yalnızca bu bölümün "
                   "ilk satırlarını anlamak için kullan):\n" + son_satirlar)
     kullanici = {"role": "user", "content": f"{baglam}{devam}\n\nToplantının {sira}. bölümü:\n\n{blok}"}
-    mesajlar = [{"role": "system", "content": MAP_SISTEM}, kullanici]
+    mesajlar = [{"role": "system", "content": sistem}, kullanici]
     # JSON cikarimi derin dusunme istemez: "low" ile dusunme tokenleri kisa kalir, cevap kesilmez
-    o = normalize_ozet(_json_sor(mesajlar, butce("bolum"), BOLUM_SEMASI, effort="low", temperature=0.3))
+    o = normalize_ozet(_json_sor(mesajlar, butce("bolum"), sema, effort="low", temperature=0.3))
     if o and ingilizce_mi(_ozet_dili(o)):
         # Model (cogunlukla dusunme dilinin etkisiyle) Ingilizce yazdi: dusunmesiz, dil kurali vurgulu tekrar
-        tekrar = [{"role": "system", "content": MAP_SISTEM + "\n" + TURKCE_KURAL}, kullanici]
-        o2 = normalize_ozet(_json_sor(tekrar, butce("bolum"), BOLUM_SEMASI, temperature=0.2, dusunme=False))
+        tekrar = [{"role": "system", "content": sistem + "\n" + TURKCE_KURAL}, kullanici]
+        o2 = normalize_ozet(_json_sor(tekrar, butce("bolum"), sema, temperature=0.2, dusunme=False))
         if o2 and not ingilizce_mi(_ozet_dili(o2)):
             o = o2
     if o and not o["ozet"].strip(" -.") and len(blok) > 200:
         # listeler dolu ama ozet alani bos: tam notun ozet paragrafi bu alanlardan kurulur, bos birakilmaz
-        tekrar = [{"role": "system", "content": MAP_SISTEM + "\n'ozet' alanını ASLA boş bırakma."}, kullanici]
-        o2 = normalize_ozet(_json_sor(tekrar, butce("bolum"), BOLUM_SEMASI, temperature=0.2, dusunme=False))
+        tekrar = [{"role": "system", "content": sistem + "\n'ozet' alanını ASLA boş bırakma."}, kullanici]
+        o2 = normalize_ozet(_json_sor(tekrar, butce("bolum"), sema, temperature=0.2, dusunme=False))
         if o2 and o2["ozet"].strip(" -.") and not ingilizce_mi(_ozet_dili(o2)):
             o = o2
         elif o["konular"]:
             o["ozet"] = "Bu bölümde " + ", ".join(o["konular"]) + " konuşuldu."
+    if o:
+        for alan, _, _ in sablon_alanlari(sablon):
+            o.setdefault(alan, [])                   # sablonun alani hep var: birlestirme ve not ayni anahtarlari gorur
+        if sablon_adi(sablon) != "genel":
+            o["sablon"] = sablon_adi(sablon)         # parca hangi sablonla ozetlendi (sablon degisirse yeniden ozet)
     return o
 
 
@@ -1090,6 +1341,8 @@ def listeleri_tekille(bolumler):
                 return
         liste.append(oge)
 
+    for alan in _sablon_alanlari_var(bolumler):
+        sonuc[alan] = []
     for b in bolumler:
         for k in b.get("kararlar") or []:
             ekle(sonuc["kararlar"], k, str)
@@ -1098,7 +1351,52 @@ def listeleri_tekille(bolumler):
                 ekle(sonuc["aksiyonlar"], a, lambda x: x.get("madde", ""), _aksiyon_birlestir, _ayni_aksiyon)
         for q in b.get("acik_sorular") or []:
             ekle(sonuc["acik_sorular"], q, str)
+        for alan in _sablon_alanlari_var([b]):
+            tur = ALAN_TURU[alan]
+            for x in sablon_alani_normalize(b.get(alan), tur):
+                ekle(sonuc[alan], x, lambda o, t=tur: alan_metni(o, t), _SABLON_BIRLESTIR.get(tur))
     return sonuc
+
+
+def _sablon_alanlari_var(bolumler):
+    """Bolumlerde gecen sablon ek alanlari (sirali; 'genel' bolumlerde hic yok)."""
+    return [a for a in ALAN_TURU if any(a in (b or {}) for b in bolumler)]
+
+
+def _metin_birlesimi(eski, yeni):
+    sonuc = list(eski or [])
+    for x in yeni or []:
+        if not any(_benzer(x, y) for y in sonuc):
+            sonuc.append(x)
+    return sonuc
+
+
+def _secenek_birlestir(eski, yeni):
+    """Ayni secenek iki bolumde: artilar / eksiler birlesir, 'secildi' herhangi birinde secildiyse."""
+    return {"secenek": yeni["secenek"], "artilar": _metin_birlesimi(eski.get("artilar"), yeni.get("artilar")),
+            "eksiler": _metin_birlesimi(eski.get("eksiler"), yeni.get("eksiler")),
+            "secildi": bool(eski.get("secildi") or yeni.get("secildi"))}
+
+
+def _fikir_birlestir(eski, yeni):
+    return {"fikir": yeni["fikir"], "tema": yeni.get("tema") if yeni.get("tema") not in ("", "Diğer") else
+            eski.get("tema") or "Diğer"}
+
+
+_SABLON_BIRLESTIR = {"secenek": _secenek_birlestir, "fikir": _fikir_birlestir}
+
+
+_ALAN_BASLIGI = {alan: baslik for v in SABLON_ALANLARI.values() for alan, baslik, _ in v}
+
+
+def _girdi_satiri(x, tur):
+    """Liste birlestirme girdisinde sablon ogesinin satiri ('[Bn]' oneki cagiranda)."""
+    if tur == "secenek":
+        return (f"{x.get('secenek', '')} | artı: {'; '.join(x.get('artilar') or []) or '-'} | eksi: "
+                f"{'; '.join(x.get('eksiler') or []) or '-'} | seçildi: {'evet' if x.get('secildi') else 'hayır'}")
+    if tur == "fikir":
+        return f"{x.get('fikir', '')} (tema: {x.get('tema') or 'Diğer'})"
+    return str(x)
 
 
 def _liste_girdisi(bolumler, ilk_no=1):
@@ -1113,11 +1411,17 @@ def _liste_girdisi(bolumler, ilk_no=1):
                     ogeler.append(f"- [B{i}] {x}")
         adet += len(ogeler)
         bloklar.append(f"{baslik}:\n" + ("\n".join(ogeler) or "-"))
+    for alan in _sablon_alanlari_var(bolumler):      # sablon ek listeleri: yalniz dolu olanlar (genel girdisi ayni kalir)
+        ogeler = [f"- [B{i}] {_girdi_satiri(x, ALAN_TURU[alan])}" for i, b in enumerate(bolumler, ilk_no)
+                  for x in b.get(alan) or []]
+        if ogeler:
+            adet += len(ogeler)
+            bloklar.append(f"{_ALAN_BASLIGI[alan]} ({alan}):\n" + "\n".join(ogeler))
     return "\n\n".join(bloklar), adet
 
 
 def _liste_dili(v):
-    return " ".join(v["kararlar"] + v["acik_sorular"] + [a["madde"] for a in v["aksiyonlar"]])
+    return " ".join(v["kararlar"] + v["acik_sorular"] + [a["madde"] for a in v["aksiyonlar"]] + _sablon_metinleri(v))
 
 
 LISTE_GRUP_MADDE = 70          # ilk kademede bir LLM isteginin birlestirdigi en fazla madde (daha fazlasi gruplanir)
@@ -1130,16 +1434,22 @@ def _liste_yedege_dus(ilerleme, mesaj, **ek):
     _gunluge_yaz(olay="liste_yedek", zaman=dt.datetime.now().strftime("%H:%M:%S"), neden=_kisalt(mesaj, 200), **ek)
 
 
-def _liste_girdi_ust(baglam):
+def _alan_sablonu(bolumler):
+    """Bolumlerdeki sablon ek alanlarindan sablon adi (liste prompt'u / semasi icin); ek alan yoksa 'genel'."""
+    alanlar = set(_sablon_alanlari_var(bolumler))
+    return next((ad for ad, v in SABLON_ALANLARI.items() if alanlar & {a for a, _, _ in v}), "genel")
+
+
+def _liste_girdi_ust(baglam, sablon="genel"):
     """Bir birlestirme isteginin girdi token ust siniri: cevap (girdi x ~1.3) butce('liste')'e ve girdi + cevap +
     sablon pencereye sigmali."""
-    sistem = token_say(LISTE_SISTEM + baglam) + 150
+    sistem = token_say(liste_sistemi(sablon) + baglam) + 150
     return max(300, min(int(butce("liste") / 1.3), int((BAGLAM_PENCERESI - MARJ - sistem) / 2.3)))
 
 
 def _liste_gruplari(bolumler, baglam, madde_tavani=0):
     """Ardisik bolumleri bir istege sigacak gruplara boler -> [[(indeks, bolum), ...], ...] (kronoloji korunur)."""
-    ust = _liste_girdi_ust(baglam)
+    ust = _liste_girdi_ust(baglam, _alan_sablonu(bolumler))
     gruplar, mevcut, tok, adet = [], [], 0, 0
     for i, b in enumerate(bolumler):
         girdi, n = _liste_girdisi([b])
@@ -1169,7 +1479,7 @@ def _karsilanmayanlar(girdi, cikti):
     hedef = [(m, _sayilar(m), _kok_kumesi(m)) for m in
              list(cikti.get("kararlar") or []) + [a.get("madde", "") for a in cikti.get("aksiyonlar") or []]]
 
-    def karsilandi(x):
+    def karsilandi(x, hedef=hedef):
         sx, kx = _sayilar(x), _kok_kumesi(x)
         for m, sm, km in hedef:
             if not sx <= sm:
@@ -1179,12 +1489,29 @@ def _karsilanmayanlar(girdi, cikti):
             if cift_yonlu_benzerlik(x, m) >= LISTE_KAPSAMA_ESIK:
                 return True
         return False
-    return {"kararlar": [k for k in girdi.get("kararlar") or [] if not karsilandi(k)],
-            "aksiyonlar": [a for a in girdi.get("aksiyonlar") or [] if not karsilandi(a.get("madde", ""))]}
+    sonuc = {"kararlar": [k for k in girdi.get("kararlar") or [] if not karsilandi(k)],
+             "aksiyonlar": [a for a in girdi.get("aksiyonlar") or [] if not karsilandi(a.get("madde", ""))]}
+    for alan in _sablon_alanlari_var([girdi]):       # sablon listeleri: karsilik yalniz kendi listesinde aranir
+        tur = ALAN_TURU[alan]
+        kendi = [(m, _sayilar(m), _kok_kumesi(m)) for m in (alan_metni(x, tur) for x in cikti.get(alan) or [])]
+        sonuc[alan] = [x for x in girdi.get(alan) or [] if not karsilandi(alan_metni(x, tur), kendi)]
+    return sonuc
 
 
 def _liste_sayisi(v):
     return len(v.get("kararlar") or []) + len(v.get("aksiyonlar") or [])
+
+
+def _sablon_sayisi(v):
+    return sum(len(v.get(a) or []) for a in ALAN_TURU)
+
+
+def _etiket_sil(x, tur):
+    """LLM cevabindaki '[B3]' onekini atar (sablon ogesinde metin alanindan)."""
+    if tur == "metin":
+        return re.sub(r"^\[B\d+\]\s*", "", x)
+    anahtar = "secenek" if tur == "secenek" else "fikir"
+    return dict(x, **{anahtar: re.sub(r"^\[B\d+\]\s*", "", x.get(anahtar, ""))})
 
 
 def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
@@ -1194,14 +1521,15 @@ def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
     girdi, adet = _liste_girdisi(bolumler, ilk_no)
     if adet <= 3:                                      # birlestirecek bir sey yok
         return yedek
-    mesajlar = [{"role": "system", "content": LISTE_SISTEM},
+    sablon = _alan_sablonu(bolumler)
+    mesajlar = [{"role": "system", "content": liste_sistemi(sablon)},
                 {"role": "user", "content": f"{baglam}\n\nBölümlerden gelen maddeler:\n\n{girdi}"}]
     cikti = min(butce("liste"), max(1000, int(token_say(girdi) * 1.3)))
     if _giris_token(mesajlar) + cikti + MARJ > BAGLAM_PENCERESI:
         _liste_yedege_dus(ilerleme, "  madde listesi bağlama sığmıyor, yerel birleştirme kullanıldı", madde=adet)
         return yedek
     try:
-        v = _json_tam(mesajlar, cikti, LISTE_SEMASI)
+        v = _json_tam(mesajlar, cikti, liste_semasi(sablon))
     except Exception as e:
         _liste_yedege_dus(ilerleme, f"  ! liste birleştirme hatası, yerel birleştirme kullanıldı: {hata_metni(e)}",
                           madde=adet)
@@ -1221,6 +1549,10 @@ def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
         sonuc[alan] = [re.sub(r"^\[B\d+\]\s*", "", x) for x in sonuc[alan]]
     for a in sonuc["aksiyonlar"]:
         a["madde"] = re.sub(r"^\[B\d+\]\s*", "", a["madde"])
+    for alan in _sablon_alanlari_var([yedek]):
+        # cevapta olmayan sablon listesi yerel birlestirmeden alinir (bos donen liste kapsama denetiminde geri eklenir)
+        sonuc[alan] = (listeleri_tekille([{alan: [_etiket_sil(x, ALAN_TURU[alan]) for x in n[alan]]}])[alan]
+                       if alan in n else [dict(x) if isinstance(x, dict) else x for x in yedek[alan]])
     # karar->aksiyon tasimasi olabilecegi icin kayip iki listenin TOPLAMINDAN olculur; yalniz DOLU maddeler
     # sayilir (bos maddeli aksiyonlar normalize_ozet'te atildi, eskiden 'var' sayilip yedege dusulmuyordu)
     kayip = (len(sonuc["kararlar"]) + len(sonuc["aksiyonlar"])
@@ -1232,10 +1564,12 @@ def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
     # kapsama: esigin altindaki kayip da kademeler boyunca birikir (her grupta %40 -> iki turda %64): girdideki her madde
     # ciktida karsilanmali; karsilanmayan yerel haliyle geri eklenir (loglu)
     eksik = _karsilanmayanlar(yedek, sonuc)
-    n_eksik = _liste_sayisi(eksik)
+    n_eksik = _liste_sayisi(eksik) + _sablon_sayisi(eksik)
     if n_eksik:
         sonuc["kararlar"] += eksik["kararlar"]
         sonuc["aksiyonlar"] += [dict(a) for a in eksik["aksiyonlar"]]
+        for alan in _sablon_alanlari_var([eksik]):
+            sonuc[alan] += [dict(x) if isinstance(x, dict) else x for x in eksik[alan]]
         ilerleme(f"  ! liste birleştirmesi {n_eksik} maddeyi düşürdü; maddeler geri eklendi")
         _gunluge_yaz(olay="liste_geri_ekle", zaman=dt.datetime.now().strftime("%H:%M:%S"), madde=adet, eksik=n_eksik,
                      ornek=[_kisalt(x, 80) for x in (eksik["kararlar"] + [a.get("madde", "") for a in eksik["aksiyonlar"]])[:3]])
@@ -1249,11 +1583,61 @@ def _liste_grup_birlestir(bolumler, baglam, ilerleme, ilk_no=1):
     return sonuc
 
 
+def _liste_bos(alanlar=()):
+    return dict({"kararlar": [], "aksiyonlar": [], "acik_sorular": []}, **{a: [] for a in alanlar})
+
+
+def _liste_ekle(hedef, v):
+    for alan in ("kararlar", "aksiyonlar", "acik_sorular") + tuple(_sablon_alanlari_var([v])):
+        hedef.setdefault(alan, [])
+        hedef[alan] += list(v.get(alan) or [])
+
+
+def _liste_kuyruk_ayir(v, tavan):
+    """Birlesmis listeyi (sabit, kuyruk) ikiye boler: kuyruk her alanin SON maddeleri (kronoloji korunur), girdi tokeni
+    tavan'i asmaz. Sigan kuyruk yoksa (sabit=v, kuyruk=None)."""
+    toplam = token_say(_liste_girdisi([v])[0])
+    oran = min(1.0, tavan / toplam) if toplam else 0.0
+    ek = tuple(_sablon_alanlari_var([v]))
+    while oran > 0.02:
+        kuyruk, sabit = _liste_bos(ek), _liste_bos(ek)
+        for alan in ("kararlar", "aksiyonlar", "acik_sorular") + ek:
+            x = list(v.get(alan) or [])
+            k = len(x) - int(len(x) * (1 - oran))          # en az bir madde (liste bos degilse)
+            sabit[alan], kuyruk[alan] = x[:len(x) - k], x[len(x) - k:]
+        if (_liste_sayisi(kuyruk) or _sablon_sayisi(kuyruk)) and token_say(_liste_girdisi([kuyruk])[0]) <= tavan:
+            return sabit, kuyruk
+        oran *= 0.8
+    return v, None
+
+
+def _liste_sinir_birlestir(seviye, baglam, ilerleme):
+    """Grup sonuclari ikiser bile tek istege sigmiyor (toplam madde tek istek kapasitesini asiyor, model maddeleri
+    azaltamiyor): her sonraki grup, oncekinin KUYRUGUYLA (kronolojik sinir: bitisik bolumlerin tekrarlari burada olur)
+    birlikte LLM'e verilir; kuyrugun oncesi oldugu gibi kalir. Kucuk kalan grup yerel birlestirmeye dusmez, sinirdaki
+    tekrarlar yine LLM ile birlesir (MIMARI_v3 §6 kademeli birlestirme). Dondurur: birlesik liste."""
+    ust = _liste_girdi_ust(baglam, _alan_sablonu(seviye))
+    sonuc, tasinan = _liste_bos(_sablon_alanlari_var(seviye)), seviye[0]
+    _gunluge_yaz(olay="liste_sinir", zaman=dt.datetime.now().strftime("%H:%M:%S"), grup=len(seviye),
+                 madde=_liste_girdisi(seviye)[1])
+    for v in seviye[1:]:
+        yer = min(ust - token_say(_liste_girdisi([v])[0]), ust // 2)
+        sabit, kuyruk = _liste_kuyruk_ayir(tasinan, yer) if yer > 0 else (tasinan, None)
+        _liste_ekle(sonuc, sabit)
+        if kuyruk is None:                              # sonraki grup tek basina dolu: sinir birlestirmesi yok
+            tasinan = v
+            continue
+        tasinan = _liste_grup_birlestir([kuyruk, v], baglam, ilerleme)
+    _liste_ekle(sonuc, tasinan)
+    return sonuc
+
+
 def _listeleri_birlestir(bolumler, baglam, ilerleme=print):
     """Karar/aksiyon/acik soru listelerini tekillestirir. Liste tek istege sigiyorsa tek LLM cagrisi; uzun toplantida
     (170+ madde) bolumler sigan gruplara bolunur, her grup ayri birlestirilir, ardindan grup sonuclari yeniden
-    birlestirilir (en cok LISTE_KADEME tur). LLM'siz yedege dusus YALNIZ sorunlu grup / son basamak icin olur ve
-    her zaman loglanir (eskiden 170+ maddede tum liste sessizce yerel yedege dusuyordu)."""
+    birlestirilir (en cok LISTE_KADEME tur; ust turlarda tek basina kalan grup sonucu yeniden istenmez). Toplam tek istek
+    kapasitesini asiyorsa (gruplar kuculmuyor) son basamak sinir birlestirmesidir (_liste_sinir_birlestir). LLM'siz
+    yedege dusus YALNIZ sorunlu grup ya da tek bolumu bile sigmayan liste icin olur ve her zaman loglanir."""
     _, adet = _liste_girdisi(bolumler)
     if adet <= 3:                                      # birlestirecek bir sey yok
         return listeleri_tekille(bolumler)
@@ -1262,11 +1646,22 @@ def _listeleri_birlestir(bolumler, baglam, ilerleme=print):
         gruplar = _liste_gruplari(seviye, baglam, LISTE_GRUP_MADDE if tur == 0 else 0)
         if len(gruplar) == 1:
             return _liste_grup_birlestir(seviye, baglam, ilerleme)
-        if len(gruplar) >= len(seviye):                # her bolum tek basina bir grup: gruplamak ilerleme saglamaz
+        if len(gruplar) >= len(seviye):                # her eleman tek basina bir grup: gruplamak ilerleme saglamaz
+            if tur:
+                ilerleme(f"  {_liste_girdisi(seviye)[1]} madde tek istekte sığmıyor: {len(seviye)} grup sonucu "
+                         f"sınırlarından birleştiriliyor...")
+                return _liste_sinir_birlestir(seviye, baglam, ilerleme)
             break
         ilerleme(f"  {_liste_girdisi(seviye)[1]} madde tek istekte sığmıyor: {len(gruplar)} grupta birleştiriliyor"
                  f"{f' (tur {tur + 1})' if tur else ''}...")
-        seviye = [_liste_grup_birlestir([b for _, b in g], baglam, ilerleme, g[0][0] + 1) for g in gruplar]
+        # ust turda tek elemanli grup zaten birlesmis bir grup sonucudur: ayni listeyi yeniden istemek bosa cagri
+        seviye = [g[0][1] if tur and len(g) == 1 else _liste_grup_birlestir([b for _, b in g], baglam, ilerleme,
+                                                                              g[0][0] + 1)
+                  for g in gruplar]
+    else:
+        ilerleme(f"  {_liste_girdisi(seviye)[1]} madde {LISTE_KADEME} turda tek isteğe inmedi: {len(seviye)} grup "
+                 f"sonucu sınırlarından birleştiriliyor...")
+        return _liste_sinir_birlestir(seviye, baglam, ilerleme)
     _liste_yedege_dus(ilerleme, "  ! madde listesi kademeli birleştirmeye de sığmadı, yerel birleştirme kullanıldı",
                       madde=_liste_girdisi(seviye)[1])
     return listeleri_tekille(seviye)
@@ -1285,6 +1680,9 @@ def listeleri_birlestir(bolumler, baglam, ilerleme=print):
                                     f"{_liste_sayisi(taban)}), yerel birleştirme kullanıldı",
                           madde=_liste_girdisi(bolumler)[1])
         return taban
+    for alan in _sablon_alanlari_var([taban]):
+        if alan not in sonuc:                          # sablon listesi bir basamakta kaybolduysa yerel liste
+            sonuc = dict(sonuc, **{alan: list(taban[alan])})
     if taban["acik_sorular"] and not sonuc["acik_sorular"]:
         sonuc = dict(sonuc, acik_sorular=list(taban["acik_sorular"]))
         ilerleme(f"  ! birleştirmede {len(taban['acik_sorular'])} açık sorunun tümü düştü; yerel liste kullanıldı")
@@ -1330,7 +1728,8 @@ def genel_ozet(bolumler, listeler, baglam, ilerleme=print):
         ilerleme("  ! bölüm özetleri boş; özet konu ve kararlardan kuruldu")
         return yedek
     liste_metni = "\n".join([f"- Karar: {k}" for k in listeler["kararlar"]]
-                            + [f"- Aksiyon: {a['madde']} ({a['sorumlu']}, {a['tarih']})" for a in listeler["aksiyonlar"]])
+                            + [f"- Aksiyon: {a['madde']} ({a['sorumlu']}, {a['tarih']})" for a in listeler["aksiyonlar"]]
+                            + _sablon_liste_metni(listeler))
     cikti = butce("genel")
     sigan = BAGLAM_PENCERESI - MARJ - cikti - token_say(GENEL_SISTEM + TURKCE_KURAL + baglam + liste_metni) - 200
     for tur in range(3):
@@ -1358,6 +1757,24 @@ def genel_ozet(bolumler, listeler, baglam, ilerleme=print):
         ilerleme("  ! özet paragrafı kesildi ya da Türkçe değildi; bölüm özetleri sırayla kullanıldı")
         return yedek
     return v
+
+
+SABLON_OZET_TAVAN = 24          # ozet istegine giden sablon maddesi (girdi butcesi; tumu notta ayrica listelenir)
+
+
+def _sablon_liste_metni(listeler):
+    """Ozet paragrafi girdisi: sablon listeleri kisa satirlar ('- Fikir: ...'); yalniz bilgi, sonraki adima kaynak degil."""
+    satirlar = []
+    for alan, baslik, tur in _TUM_ALANLAR:
+        for x in listeler.get(alan) or []:
+            if tur == "secenek":
+                durum = {True: " (seçildi)", "belirsiz": " (seçildiği kesin değil)"}.get(x.get("secildi"), "")
+                satirlar.append(f"- Seçenek: {x.get('secenek', '')}{durum}")
+            elif tur == "fikir":
+                satirlar.append(f"- Fikir ({x.get('tema') or 'Diğer'}): {x.get('fikir', '')}")
+            else:
+                satirlar.append(f"- {baslik}: {x}")
+    return satirlar[:SABLON_OZET_TAVAN]
 
 
 def yedek_ozet(bolumler, listeler):
@@ -1435,9 +1852,92 @@ def kisi_bazli(aksiyonlar):
     return sorted(gruplar.items(), key=lambda kv: (kv[0] == "belirsiz", -len(kv[1]), kv[0]))
 
 
+KISIYE_BASLIK = "## Kişiye göre iş listesi"
+
+
+def kisiye_gore_satirlari(aksiyonlar):
+    """'Kişiye göre iş listesi' bolumunun madde satirlari (kisi_bazli): en az 4 aksiyon ve 2 grup yoksa []."""
+    gruplar = kisi_bazli(aksiyonlar)
+    if len(aksiyonlar) < 4 or len(gruplar) < 2:
+        return []
+    return [f"- {ad} ({len(isler)}): " + "; ".join(normalize_bosluk(x).rstrip(".") for x in isler)
+            for ad, isler in gruplar]
+
+
+_TUM_ALANLAR = tuple((a, b, t) for v in SABLON_ALANLARI.values() for a, b, t in v)
+
+
+def sablon_bolumleri_md(listeler, kaynak=None):
+    """Sablon ek bolumlerinin Markdown satirlari (yalniz dolu olanlar: bos bolum yazilmaz). kaynak(metin) -> '⏱..' | ''.
+    Secenek: '- Seçilen: X' (dogrulanmis), '- Seçilen (?): X' (model secildi dedi, kararlarda karsiligi yok), '- X'; artı /
+    eksi alt maddeler. Fikirler temaya gore gruplanir ('Tema:' satiri + maddeler)."""
+    kaynak = kaynak or (lambda m: "")
+
+    def madde(x, on="- "):
+        return f"{on}{normalize_bosluk(x)}" + (f" {kaynak(x)}".rstrip())
+    parcalar = []
+    for alan, baslik, tur in _TUM_ALANLAR:
+        ogeler = listeler.get(alan) or []
+        if not ogeler:
+            continue
+        satirlar = []
+        if tur == "metin":
+            satirlar = [madde(x) for x in ogeler]
+        elif tur == "secenek":
+            for x in ogeler:
+                on = {True: "Seçilen: ", "belirsiz": "Seçilen (?): "}.get(x.get("secildi"), "")
+                satirlar.append(f"- {on}{normalize_bosluk(x['secenek'])}" + f" {kaynak(x['secenek'])}".rstrip())
+                satirlar += [madde(a, "  - Artı: ") for a in x.get("artilar") or []]
+                satirlar += [madde(e, "  - Eksi: ") for e in x.get("eksiler") or []]
+        else:
+            temalar = {}
+            for x in ogeler:
+                temalar.setdefault(normalize_bosluk(x.get("tema")) or "Diğer", []).append(x["fikir"])
+            for tema, fikirler in temalar.items():
+                satirlar.append(f"{tema}:")
+                satirlar += [madde(f) for f in fikirler]
+        parcalar += [f"## {baslik}"] + satirlar + [""]
+    return parcalar
+
+
+def sablon_bolumlerini_temizle(not_md):
+    """Denetimlerden (dayanak / son denetim) SONRA: maddesi kalmamis sablon bolumu ve maddesiz tema satiri notta yer almaz.
+    Ortak bolumlere (Kararlar '-' vb.) dokunulmaz."""
+    satirlar = not_md.split("\n")
+    cikti, i = [], 0
+    while i < len(satirlar):
+        s = satirlar[i].strip()
+        if not (s.startswith("## ") and sablon_bolumu_mu(s)):
+            cikti.append(satirlar[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < len(satirlar) and not satirlar[j].strip().startswith("#"):
+            j += 1
+        govde = satirlar[i + 1:j]
+        tutulan = []
+        for k, x in enumerate(govde):
+            xs = x.strip()
+            if xs and not xs.startswith(("-", "*")):           # tema satiri: altinda madde yoksa duser
+                sonraki = next((y.strip() for y in govde[k + 1:] if y.strip()), "")
+                if not sonraki.startswith(("-", "*")):
+                    continue
+            tutulan.append(x)
+        if any(x.strip().startswith(("-", "*")) and x.strip().strip("-* ") for x in tutulan):
+            cikti += [satirlar[i]] + tutulan
+        else:                                                   # bolum bos: basligiyla birlikte (onceki bos satir dahil)
+            while cikti and not cikti[-1].strip():
+                cikti.pop()
+            if j < len(satirlar) and cikti:
+                cikti.append("")
+        i = j
+    return "\n".join(cikti)
+
+
 def not_markdown(genel, listeler, kaynak_fn=None):
     """Notun Markdown'u kodda kurulur: basliklar sabit ve Turkce, tablo hic yarim kalmaz.
-    kaynak_fn(metin, sorumlu) -> 'HH:MM:SS' | None: maddenin transkriptte gectigi an."""
+    kaynak_fn(metin, sorumlu) -> 'HH:MM:SS' | None: maddenin transkriptte gectigi an. Sablon ek bolumleri (listelerde
+    varsa ve doluysa) konu akisindan sonra, kararlardan once."""
     def kaynak(metin, sorumlu=None):
         ts = kaynak_fn(metin, sorumlu) if kaynak_fn else None
         return f"{KAYNAK_ISARETI}{ts}" if ts else ""
@@ -1448,6 +1948,7 @@ def not_markdown(genel, listeler, kaynak_fn=None):
     parcalar = ["## Özet", genel["ozet"] or "-", ""]
     if genel.get("konu_akisi"):
         parcalar += ["## Konu akışı", genel["konu_akisi"], ""]
+    parcalar += sablon_bolumleri_md(listeler, kaynak)
     parcalar += ["## Kararlar", maddeler(listeler["kararlar"], isaret=True), "", "## Aksiyonlar"]
     if listeler["aksiyonlar"]:
         basliklar = "| # | Madde | Sorumlu | Tarih |" + (" Kaynak |" if kaynak_fn else "")
@@ -1457,12 +1958,11 @@ def not_markdown(genel, listeler, kaynak_fn=None):
             if kaynak_fn:
                 satir += f" {kaynak(a['madde'], a['sorumlu']) or '-'} |"
             parcalar.append(satir)
-        gruplar = kisi_bazli(listeler["aksiyonlar"])
-        if len(listeler["aksiyonlar"]) >= 4 and len(gruplar) >= 2:
-            # 'aksiyon/karar/soru' kelimesi gecmeyen baslik: dayanak kontrolu bu ozet satirlarini denetlemez
-            parcalar += ["", "## Kişiye göre iş listesi"]
-            parcalar += [f"- {ad} ({len(isler)}): " + "; ".join(normalize_bosluk(x).rstrip(".") for x in isler)
-                         for ad, isler in gruplar]
+        kisiye = kisiye_gore_satirlari(listeler["aksiyonlar"])
+        if kisiye:
+            # 'aksiyon/karar/soru' kelimesi gecmeyen baslik: dayanak kontrolu bu satirlari denetlemez; motor dayanak
+            # kontrolunden SONRA bolumu son aksiyon tablosundan yeniden kurar (not_araclari.kisiye_gore_yenile)
+            parcalar += ["", KISIYE_BASLIK] + kisiye
     else:
         parcalar.append("-")
     parcalar += ["", "## Açık sorular", maddeler(listeler["acik_sorular"]), "",
@@ -1579,22 +2079,54 @@ def listeleri_temizle(listeler, katilimcilar=None, kaynak_fn=None):
     return v
 
 
+def secenekleri_dogrula(listeler):
+    """Karar sablonu: model 'secildi' dediyse secim KODDA dogrulanir -- kararlar listesinde secenegin karsiligi (kok
+    ortusmesi >= 0.6 ya da cift yonlu benzerlik >= 0.5) varsa secildi=True, yoksa 'belirsiz' (notta 'Seçilen (?)').
+    Secilmedi denen secenek icin notta durum yazilmaz (secilmedigi de kesin degil)."""
+    if not listeler.get("secenekler"):
+        return listeler
+    kararlar = [k for k in listeler.get("kararlar") or [] if k]
+    yeni = []
+    for x in listeler["secenekler"]:
+        x = dict(x)
+        if x.get("secildi"):
+            sk = _kok_kumesi(x.get("secenek", "")) - {"ve", "ile", "icin"}
+            karsilik = any((sk and len(sk & _kok_kumesi(k)) / len(sk) >= 0.6)
+                           or cift_yonlu_benzerlik(x.get("secenek", ""), k) >= 0.5 for k in kararlar)
+            x["secildi"] = True if karsilik else "belirsiz"
+        else:
+            x["secildi"] = False
+        yeni.append(x)
+    return dict(listeler, secenekler=yeni)
+
+
 def birlestir(bolumler, baglam, ilerleme=print, kaynak_fn=None, sablon="genel", katilimcilar=None,
-              aksiyon_fn=None, adim_fn=None):
+              aksiyon_fn=None, adim_fn=None, liste_fn=None):
     """aksiyon_fn(aksiyonlar) -> aksiyonlar: cagiranin son islemi (motor: sorumlu dogrulama).
-    adim_fn(metin): arayuzdeki ilerleme seridi icin asama bildirimi."""
+    liste_fn(listeler) -> listeler: sablona bagli son islem (motor: calistay karar / fikir ayrimi, kaynak satirina bakar).
+    adim_fn(metin): arayuzdeki ilerleme seridi icin asama bildirimi. sablon: ozet talimati + ek bolumler (yalniz bu
+    sablonun alanlari notta yer alir)."""
     adim = adim_fn or (lambda m: None)
     bolumler = [b for b in bolumler if b]
     if not bolumler:
         return "_(özetlenebilen bölüm yok)_"
-    talimat = SABLONLAR.get(sablon, SABLONLAR["genel"])[1]
+    sablon = sablon_adi(sablon)
+    talimat = SABLONLAR[sablon][1]
     if talimat:
         baglam = f"{baglam}\nNot şablonu: {talimat}"
     adim("Kararlar ve aksiyonlar birleştiriliyor")
     ilerleme("  kararlar, aksiyonlar ve açık sorular birleştiriliyor...")
+    benim = {a for a, _, _ in sablon_alanlari(sablon)}
+    # baska sablonla ozetlenmis parcanin ek alanlari bu notta yer almaz
+    bolumler = [{k: v for k, v in b.items() if k not in ALAN_TURU or k in benim} for b in bolumler]
     listeler = listeleri_temizle(listeleri_birlestir(bolumler, baglam, ilerleme), katilimcilar, kaynak_fn)
+    for alan in benim:
+        listeler.setdefault(alan, [])
     if aksiyon_fn:
         listeler["aksiyonlar"] = aksiyon_fn(listeler["aksiyonlar"])
+    if liste_fn:
+        listeler = liste_fn(listeler)
+    listeler = secenekleri_dogrula(listeler)
     adim("Özet paragrafı yazılıyor")
     ilerleme("  özet paragrafı yazılıyor...")
     genel = genel_ozet(bolumler, listeler, baglam, ilerleme)
@@ -1623,11 +2155,16 @@ SORU_SISTEM = (
 )
 
 
+KESIK_CEVAP_UYARISI = ("(Uyarı: cevap uzunluk sınırında kesildi, eksik olabilir. Soruyu daraltarak ya da parçalara "
+                       "bölerek yeniden sorun.)")
+
+
 def toplantiya_sor(soru, bolumler, baglam, cikti=None, sira=None):
     """bolumler: [(aralik, '[ts] Kim: metin' satirlari)], kronolojik. Soruyla en ilgili bolumler baglama
     sigdigi kadar secilir (sira verilmezse kelime koku ortakligina gore; rag.hibrit_sirala sirayi verir),
     kronolojik sirayla verilir. Girdi butcesinden ilk cagrinin GERCEK max_tokens'i (cevap + dusunme payi)
-    dusulur."""
+    dusulur. Dusunmesiz tekrar da 'length' ile biterse cevabin sonuna KESIK_CEVAP_UYARISI eklenir (kesik cevap tam
+    cevap gibi gosterilmez)."""
     cikti = cikti or butce("soru")
     pay = butce("soru_dusunme")
     def kokler(m):
@@ -1660,6 +2197,9 @@ def toplantiya_sor(soru, bolumler, baglam, cikti=None, sira=None):
         metin, neden = "", "atlandi"                  # dar pencere: dusunmeye yer yok
     if neden in ("length", "atlandi") or not metin.strip() or ingilizce_mi(metin):
         metin, neden = sor(mesajlar, cikti, temperature=0.3, dusunme=False)
+    if neden == "length":
+        # dusunmesiz tekrar da uzunluk sinirina takildi: kesik cevap tam cevap gibi gosterilmez
+        metin = (metin.rstrip() + "\n\n" if metin.strip() else "") + KESIK_CEVAP_UYARISI
     if len(secilen) < len(bolumler):
         metin += f"\n\n(Not: {len(bolumler)} bölümden soruyla en ilgili {len(secilen)} tanesine bakıldı.)"
     return metin

@@ -235,9 +235,9 @@ def hibrit_sirala(soru, metinler, klasor=None, olay=None):
 
 
 def _ilk_ayar():
+    """Acilis ayari: ayar.ham_oku ile (utf-8-sig: BOM'lu config.json da okunur). Yok ya da bozuksa {}."""
     try:
-        with open(ayar_mod.AYAR_DOSYA, encoding="utf-8") as f:
-            return json.load(f)
+        return ayar_mod.ham_oku()
     except Exception:
         return {}
 

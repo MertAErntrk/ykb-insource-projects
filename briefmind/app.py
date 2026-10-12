@@ -149,11 +149,14 @@ class Pencere(QtWidgets.QMainWindow):
         self.zamanlayici.timeout.connect(self._sayac_guncelle)
         self._takvim_zamanlayici = QtCore.QTimer(self)                 # bostayken takvim listesi tazelenir
         self._takvim_zamanlayici.timeout.connect(lambda: self.toplantilari_yenile(False))
+        self._saklama_zamanlayici = QtCore.QTimer(self)                # KVKK: saklama suresi her saat yeniden uygulanir
+        self._saklama_zamanlayici.timeout.connect(lambda: self.saklama_uygula())
         self._kesinti_deneme = 0
         self._durum_uygula()
         if self.duman:
             return
         self._takvim_zamanlayici.start(60000)
+        self._saklama_zamanlayici.start(self.SAKLAMA_ARALIK_MS)
         self._tek_atim(800, lambda: self.toplantilari_yenile(False))
         self.zamanlayici.start(1000)
         self._tek_atim(1500, self.saklama_uygula)
@@ -275,12 +278,26 @@ class Pencere(QtWidgets.QMainWindow):
         self.k_belirsiz = kart("Belirsiz", "0")
         self.k_katilimci = kart("Konuşan", "0")
         self.k_kaynak = kart("Kaynak", "—")
-        for k in (self.k_durum, self.k_parca, self.k_belirsiz, self.k_katilimci, self.k_kaynak):
+        self.k_sablon = kart("Şablon", "—")              # toplantinin not sablonu (davetten otomatik ya da elle)
+        for k in (self.k_durum, self.k_parca, self.k_belirsiz, self.k_katilimci, self.k_kaynak, self.k_sablon):
             kartlar.addWidget(k)
         v.addLayout(kartlar)
         h = QtWidgets.QHBoxLayout()
         sol = QtWidgets.QVBoxLayout()
-        sol.addWidget(QtWidgets.QLabel("Konuşmalar"))
+        baslik = QtWidgets.QHBoxLayout()
+        baslik.addWidget(QtWidgets.QLabel("Konuşmalar"))
+        baslik.addStretch(1)
+        # aktif mikrofon (cihaz.py otomatik secer; SesServisi 'mikrofon' olayi)
+        self.mik_etiket = QtWidgets.QLabel("", objectName="alt_bilgi")
+        self.mik_etiket.hide()
+        baslik.addWidget(self.mik_etiket)
+        sol.addLayout(baslik)
+        # ses uyarisi: tum mikrofonlar tam sessiz / altyazida konusma var ama hoparlor sesi yok ('ses_uyari' olayi)
+        self.ses_serit = QtWidgets.QLabel("", objectName="uyari")
+        self.ses_serit.setWordWrap(True)
+        self.ses_serit.hide()
+        sol.addWidget(self.ses_serit)
+        self._ses_uyarilari = {}
         # durum seritleri: STT kesintisi (transkript eksik) ve konusmaci bilgisi yok (altyazi okunamiyor)
         self.stt_serit = QtWidgets.QLabel("", objectName="uyari")
         self.stt_serit.setWordWrap(True)
@@ -335,7 +352,17 @@ class Pencere(QtWidgets.QMainWindow):
         self.not_serit.hide()
         v.addWidget(self.not_serit)
         self.not_bilgi = QtWidgets.QLabel("Not henüz üretilmedi.", objectName="alt_bilgi")
-        v.addWidget(self.not_bilgi)
+        hb = QtWidgets.QHBoxLayout()
+        hb.addWidget(self.not_bilgi, 1)
+        # toplantinin sablonu: davetten otomatik secilir; degistirmek istege bagli (hicbir adim bunu beklemez)
+        hb.addWidget(QtWidgets.QLabel("Şablon:", objectName="alt_bilgi"))
+        self.not_sablon = QtWidgets.QComboBox()
+        for anahtar, (etiket, _) in llm.SABLONLAR.items():
+            self.not_sablon.addItem(etiket, anahtar)
+        self.not_sablon.setEnabled(False)
+        self.not_sablon.activated.connect(self._sablon_secildi)          # yalniz kullanici secimi (programatik degil)
+        hb.addWidget(self.not_sablon)
+        v.addLayout(hb)
         self.not_goster = QtWidgets.QTextBrowser()
         self.not_goster.document().setDocumentMargin(16)
         self.not_goster.setOpenLinks(False)
@@ -377,8 +404,8 @@ class Pencere(QtWidgets.QMainWindow):
         h = QtWidgets.QHBoxLayout()
         self.b_outlook = QtWidgets.QPushButton("Outlook'ta taslak aç", objectName="birincil")
         self.b_outlook.clicked.connect(self.outlook_ac)
-        b_kisi = QtWidgets.QPushButton("Kişiye özel e-postalar")
-        b_kisi.setToolTip("Sorumlusu belli her kişi için yalnızca kendi işlerini içeren bir Outlook taslağı açar")
+        b_kisi = self.b_kisi = QtWidgets.QPushButton("Kişiye özel e-postalar")
+        b_kisi.setToolTip(self.KISI_IPUCU)
         b_kisi.clicked.connect(self.kisiye_ozel_eposta)
         b2 = QtWidgets.QPushButton("Panoya kopyala")
         b2.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(self.not_md))
@@ -388,8 +415,8 @@ class Pencere(QtWidgets.QMainWindow):
         b_word.clicked.connect(lambda: self.not_disa_aktar("docx"))
         b_pdf = QtWidgets.QPushButton("PDF")
         b_pdf.clicked.connect(lambda: self.not_disa_aktar("pdf"))
-        b_jira = QtWidgets.QPushButton("Jira/Planner CSV")
-        b_jira.setToolTip("Aksiyonları Jira 'Import from CSV' / Planner içe aktarma için CSV olarak kaydeder")
+        b_jira = self.b_jira = QtWidgets.QPushButton("Jira/Planner CSV")
+        b_jira.setToolTip(self.JIRA_IPUCU)
         b_jira.clicked.connect(self.jira_disa_aktar)
         b3 = QtWidgets.QPushButton("Klasörü aç")
         b3.clicked.connect(self.klasor_ac)
@@ -402,6 +429,62 @@ class Pencere(QtWidgets.QMainWindow):
         h.addStretch(1)
         v.addLayout(h)
         return w
+
+    KISI_IPUCU = "Sorumlusu belli her kişi için yalnızca kendi işlerini içeren bir Outlook taslağı açar"
+    JIRA_IPUCU = "Aksiyonları Jira 'Import from CSV' / Planner içe aktarma için CSV olarak kaydeder"
+
+    def _sablon_goster(self):
+        """Canli kart + Not sayfasi secicisi: acik motorun (toplantinin) sablonu ve nedeni; birebir'de kisiye ozel e-posta /
+        Jira dugmeleri kisa aciklamayla kapali (not_araclari.taslak_izni)."""
+        m = self.motor
+        sablon = getattr(m, "sablon", None) if m else None
+        neden = getattr(m, "sablon_neden", "") if m else ""
+        if sablon:
+            self.k_sablon.deger.setText(llm.sablon_etiketi(sablon))
+            self.k_sablon.setToolTip(neden)
+            self.not_sablon.setCurrentIndex(max(0, self.not_sablon.findData(sablon)))
+            self.not_sablon.setToolTip(f"{neden}. İstersen değiştir: not yeni şablonla yeniden üretilir.")
+        else:
+            self.k_sablon.deger.setText("—")
+        self._sablon_secici_uygula()
+        izin, aciklama = not_araclari.taslak_izni(sablon, self.ayar)
+        for b, ipucu in ((self.b_kisi, self.KISI_IPUCU), (self.b_jira, self.JIRA_IPUCU)):
+            b.setEnabled(izin)
+            b.setToolTip(ipucu if izin else aciklama)
+
+    def _sablon_secilebilir(self, durum=None):
+        """Not sayfasi secicisi yalniz 'bos' durumda (calisan yakalama / not uretimi / yeniden ozetleme ortasinda sablon
+        degisirse ayni notta iki sablon karisir) ve konusma verisi silinmemis toplantida acik."""
+        m = self.motor
+        if not m or not getattr(m, "sablon", None) or (durum or self._durum()) != "bos":
+            return False
+        silindi = getattr(m, "transkript_silindi", None)
+        return not (callable(silindi) and silindi())
+
+    def _sablon_secici_uygula(self, durum=None):
+        acik = self._sablon_secilebilir(durum)
+        if self.not_sablon.isEnabled() != acik:
+            self.not_sablon.setEnabled(acik)
+
+    def _sablon_secildi(self, i):
+        """Kullanici sablonu elle degistirdi (istege bagli): meta.json'a yazilir; not hemen yeni sablonla uretilir (baska
+        sablonla ozetlenmis parcalar yeniden ozetlenir). Yalniz 'bos' durumda: bir is suruyorsa secim geri alinir."""
+        if not self.motor:
+            return
+        sablon = self.not_sablon.itemData(i)
+        if not self._sablon_secilebilir():
+            d = self._durum()
+            self.log("Not şablonu değiştirilmedi: " + (f"başka bir iş sürüyor ({d}); bitince tekrar dene" if d != "bos"
+                                                       else "konuşma verisi saklama süresiyle silinmiş"))
+            self._sablon_goster()                   # secici toplantinin gercek sablonuna doner
+            return
+        if not self.motor.sablon_degistir(sablon):
+            self._sablon_goster()
+            return
+        self.log(f"Not şablonu: {llm.sablon_etiketi(sablon)} (elle seçildi)")
+        self._sablon_goster()
+        if self.not_md and self._durum() == "bos":
+            self._not_uret()
 
     def _gecmis(self):
         w, v = self._sayfa()
@@ -517,15 +600,22 @@ class Pencere(QtWidgets.QMainWindow):
         self.a_olcum = QtWidgets.QCheckBox("Ölçüm kaydı (PoC): klipleri ve altyazı okumalarını yerel klasöre kaydet")
         self.a_olcum.setChecked(bool(self.ayar.get("olcum_kaydi", False)))
         self.a_sablon = QtWidgets.QComboBox()
+        self.a_sablon.addItem("Otomatik (toplantı davetinden)", llm.SABLON_OTOMATIK)
         for anahtar, (etiket, _) in llm.SABLONLAR.items():
-            self.a_sablon.addItem(etiket, anahtar)
-        self.a_sablon.setCurrentIndex(max(0, self.a_sablon.findData(self.ayar.get("not_sablonu", "genel"))))
+            self.a_sablon.addItem(f"Her zaman: {etiket}", anahtar)
+        self.a_sablon.setCurrentIndex(max(0, self.a_sablon.findData(self.ayar.get("not_sablonu", llm.SABLON_OTOMATIK))))
+        self.a_sablon.setToolTip("Otomatik: davet konusu / metnindeki ipuçlarından (haftalık, karar, 1:1, çalıştay ...) "
+                                 "seçilir ve Olaylar'a nedeniyle yazılır. Sabit seçim her toplantıda o şablonu kullanır.")
+        self.a_birebir_taslak = QtWidgets.QCheckBox("Birebir toplantıda da taslak (kişiye özel e-posta, Jira CSV)")
+        self.a_birebir_taslak.setChecked(bool(self.ayar.get("birebir_taslak", False)))
         self.a_saklama = QtWidgets.QSpinBox()
         self.a_saklama.setRange(0, 3650)
         self.a_saklama.setSuffix(" gün")
         self.a_saklama.setSpecialValueText("süresiz (kapalı)")
         self.a_saklama.setValue(int(self.ayar.get("saklama_gun", 0) or 0))
-        self.a_saklama.setToolTip("Notu üretilmiş toplantıların transkripti bu süreden sonra silinir; not.md kalır.")
+        self.a_saklama.setToolTip("Bu süreden eski toplantılarda konuşma içeren her veri silinir: transkript, ses klipleri, "
+                                  "ölçüm kaydı, arama dizini, yedekler (notu üretilmemiş toplantılar da, tarihe göre). "
+                                  "not.md ve parça özetleri kalır. Açılışta, her saat ve ayar kaydedilince uygulanır.")
         b_test = self.b_stt_test = QtWidgets.QPushButton("STT servisini test et")
         b_test.clicked.connect(self.stt_test)
         f.addRow("Kaynak", self.a_kaynak)
@@ -556,6 +646,7 @@ class Pencere(QtWidgets.QMainWindow):
         f.addRow(QtWidgets.QLabel("— Not —", objectName="alt_bilgi"))
         f.addRow(self.a_stt_ipucu)
         f.addRow("Not şablonu", self.a_sablon)
+        f.addRow(self.a_birebir_taslak)
         f.addRow("Transkript saklama süresi", self.a_saklama)
         b = self.b_kaydet = QtWidgets.QPushButton("Kaydet", objectName="birincil")
         b.clicked.connect(self.ayar_kaydet)
@@ -647,6 +738,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.b_g_sil.setEnabled(silinebilir)
         self.b_g_bos.setEnabled(silinebilir)
         self.b_not_uret.setEnabled(iz["uygula"] and self._not_uret_aday and self.motor is not None)
+        self._sablon_secici_uygula(d)
         self.b_sor.setEnabled(iz["sor"])
         self.soru.setEnabled(iz["sor"])
         self.b_kaydet.setEnabled(iz["kaydet"])
@@ -945,6 +1037,9 @@ class Pencere(QtWidgets.QMainWindow):
         self._akis_satirlari = []
         self.stt_serit.hide()
         self.kapsama_serit.hide()
+        self.ses_serit.hide()
+        self._ses_uyarilari = {}
+        self.mik_etiket.hide()
         self.canli_not.clear()
         self._canli_sifirla()
         self.renkler = {}
@@ -968,6 +1063,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.bitis = None
         self.sayac.setText("00:00")
         self.motor = None                # onceki toplantinin motoru yeni yakalamaya karismasin
+        self._sablon_goster()            # sablon motor baglaninca (davetten) gelir
         isi = YakalamaIsi(baslik, ctx, self.terimler, self.a_duzelt.isChecked(),
                           self.a_otobitir.value(), self.ayar)
         self.is_ = isi
@@ -987,6 +1083,7 @@ class Pencere(QtWidgets.QMainWindow):
     def _motoru_bagla(self, isi):
         if isi is self.is_ and getattr(isi, "motor", None) is not None:
             self.motor = isi.motor
+            self._sablon_goster()
 
     def bitir(self):
         if self._yakalama_suruyor() and not self._bitiriliyor:
@@ -1081,6 +1178,21 @@ class Pencere(QtWidgets.QMainWindow):
             self._akis_ciz()
         elif tip == "stt_durum":
             self._stt_serit_guncelle(v)
+        elif tip == "mikrofon":                       # otomatik secilen (ya da elle ayarli) mikrofon
+            if isinstance(v, dict) and v.get("ad"):
+                self.mik_etiket.setText(f"Mikrofon: {v['ad']} ({'otomatik' if v.get('otomatik', True) else 'elle ayarlı'})"
+                                        + (" — sessizde" if v.get("sessizde") else ""))
+                self.mik_etiket.setToolTip(v.get("neden") or "")
+                self.mik_etiket.show()
+        elif tip == "ses_uyari":                      # bir kez gelir; ses donunce var=False ile kalkar
+            if isinstance(v, dict):
+                if v.get("var"):
+                    self._ses_uyarilari[v.get("tur")] = v.get("metin") or ""
+                else:
+                    self._ses_uyarilari.pop(v.get("tur"), None)
+                metin = "\n".join(m for m in self._ses_uyarilari.values() if m)
+                self.ses_serit.setText(metin)
+                self.ses_serit.setVisible(bool(metin))
         elif tip == "kapsama":                        # konusmaci bilgisi 60 sn'den uzun yok / geri geldi
             self.kapsama_serit.setVisible(not (v or {}).get("var", True))
         elif tip == "log":
@@ -1103,6 +1215,8 @@ class Pencere(QtWidgets.QMainWindow):
                     self.canli_not.addItem(f"Karar: {k}")
                 for a in o["aksiyonlar"]:
                     self.canli_not.addItem(f"Aksiyon: {a['madde']}  — {a['sorumlu']}, {a['tarih']}")
+                for etiket, metin in not_araclari.sablon_canli_satirlari(o):
+                    self.canli_not.addItem(f"{etiket}: {metin}")
                 self.canli_not.scrollToBottom()
             else:
                 self.log(f"✖ parça {v['sira']} özetlenemedi (bitişte tekrar denenecek)")
@@ -1215,7 +1329,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.not_bilgi.setText("Not üretiliyor — parçalar birleştiriliyor…")
         self._serit_baslat("Not üretiliyor")
         self.nav.setCurrentRow(self.SAYFA_NOT)
-        self.motor.sablon = self.ayar.get("not_sablonu", "genel")
+        # sablon toplantiya baglidir (Motor: davetten / kayittan); genel ayar burada uygulanmaz
         if not self.motor.ben:
             self.motor.ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
         self._not_kilit = True                        # TamamlamaIsi.finished'e kadar Baslat/Yeniden ozetle/Sor kapali
@@ -1261,6 +1375,7 @@ class Pencere(QtWidgets.QMainWindow):
     def not_hazir(self, md):
         self._not_sonuc_geldi = True
         self.not_md = md
+        self._sablon_goster()
         self.not_goster.setHtml(md_to_html(md))
         self._not_gorunumu()
         self.ilerleme.hide()
@@ -1385,7 +1500,8 @@ class Pencere(QtWidgets.QMainWindow):
         except Exception:
             return
         bilgi = (f"{m['baslik']} — {m['tarih']} · durum: {m['durum']} · {m['parca']} parça · "
-                 f"katılımcı: {len(m.get('katilimcilar', []))}")
+                 f"katılımcı: {len(m.get('katilimcilar', []))}"
+                 + (f" · şablon: {llm.sablon_etiketi(m['sablon'])}" if m.get("sablon") in llm.SABLONLAR else ""))
         pay = not_araclari.konusma_payi_metni(m.get("konusma_paylari") or [])
         tasma = self._tasma_bilgisi(k)
         self.g_bilgi.setText(bilgi + ("\n" + pay if pay else "") + ("\n" + tasma if tasma else ""))
@@ -1437,6 +1553,8 @@ class Pencere(QtWidgets.QMainWindow):
             if o.get("belirsiz_terimler"):
                 md.append("## Belirsiz terimler")
                 md += [f"- {x}" for x in o["belirsiz_terimler"]]
+            # parca hangi sablonla ozetlendiyse onun ek bolumleri; secim yalniz parcanin kararlarinda karsiligi varsa kesin
+            md += llm.sablon_bolumleri_md(llm.secenekleri_dogrula(o))
         else:
             md.append("## Özet yok")
             md.append("Bu parça özetlenmemiş. 'Seçili parçayı yeniden özetle' ile işleyebilirsin.")
@@ -1470,7 +1588,8 @@ class Pencere(QtWidgets.QMainWindow):
         if yol and os.path.exists(yol):
             with open(yol, encoding="utf-8") as f:
                 self.not_md = f.read()
-            self.motor = Motor.yukle(k, self.terimler)
+            self.motor = Motor.yukle(k, self.terimler, sablon=self.ayar.get("not_sablonu", llm.SABLON_OTOMATIK))
+            self._sablon_goster()
             self.not_goster.setHtml(md_to_html(self.not_md))
             self._not_gorunumu()
             self.not_bilgi.setText(f"Kaydedildi: {yol}")
@@ -1509,7 +1628,7 @@ class Pencere(QtWidgets.QMainWindow):
             self.baslik.setText(os.path.basename(k))
         ben = self.a_ben.text().strip() or self.ayar.get("ben") or None
         self.yeniden = YenidenOzetlemeIsi(k, self.terimler, self.a_duzelt.isChecked(), ben,
-                                          self.ayar.get("not_sablonu", "genel"))
+                                          self.ayar.get("not_sablonu", llm.SABLON_OTOMATIK))   # kayitli sablon once
         self._yeniden_kilit, self._yeniden_sonuc_geldi = True, False   # YenidenOzetlemeIsi.finished'e kadar Baslat kapali
         self.yeniden.olay.connect(self.olay)
         self.yeniden.durum.connect(lambda m: self._durum_ayarla(m, "#EA580C"))
@@ -1640,7 +1759,8 @@ class Pencere(QtWidgets.QMainWindow):
                           "olcum_kaydi": self.a_olcum.isChecked(),
                           "altyazi_yedek": self.a_altyazi_yedek.isChecked(),
                           "altyazi_goster": self.a_altyazi_goster.isChecked(),
-                          "not_sablonu": self.a_sablon.currentData(), "saklama_gun": self.a_saklama.value(),
+                          "not_sablonu": self.a_sablon.currentData(), "not_sablonu_surum": ayar_mod.SABLON_SURUM,
+                          "birebir_taslak": self.a_birebir_taslak.isChecked(), "saklama_gun": self.a_saklama.value(),
                           "stt_ipucu": self.a_stt_ipucu.isChecked()})
         try:
             ayar_yaz(self.ayar)                # atomik: yarim config.json kalmaz
@@ -1651,6 +1771,7 @@ class Pencere(QtWidgets.QMainWindow):
         llm.ayarla(self.ayar)                  # LLM adresi/modeli hemen gecerli: yeniden baslatma gerekmez
         rag.ayarla(self.ayar)
         self.durum.setText("Ayarlar kaydedildi")
+        self.saklama_uygula()                  # saklama suresi hemen gecerli (acilis/saatlik turu beklenmez)
         self.llm_tani()
 
     def llm_tani(self, test=False):
@@ -1778,17 +1899,40 @@ class Pencere(QtWidgets.QMainWindow):
         if cozulen:
             self.gecmis_yenile()
 
+    SAKLAMA_ARALIK_MS = 3600 * 1000
+
+    def _saklama_aktif(self):
+        """Saklama suresi dokunmayacagi klasorler: yalniz su an bir isin (yakalama, not uretimi, yeniden ozetleme, parca,
+        soru, ses kuyrugu) calistigi toplantilar. Yalniz goruntulenen (Notu ac / bitmis kayit) toplanti korunmaz: temizlik
+        sonrasi Motor zaten diskten okur; korunsaydi uygulama acik kaldikca transkripti suresiz kalirdi."""
+        klasorler = [getattr(getattr(self.is_, "motor", None), "klasor", None) if _calisiyor(self.is_) else None]
+        if self._durum() in ("yakalaniyor", "not_uretiliyor") or self._yeniden_kilit or self._parca_kilit \
+                or self._soru_kilit:
+            klasorler.append(getattr(self.motor, "klasor", None))          # isin motoru (baslarken / biterken de)
+        for isi in (self.tamamla, self.parca_isi, self._soru_isi):          # .m: bu iscinin motoru
+            if _calisiyor(isi):
+                klasorler.append(getattr(getattr(isi, "m", None), "klasor", None))
+        if _calisiyor(self.yeniden):
+            klasorler.append(getattr(self.yeniden, "klasor", None))
+        if _calisiyor(self.kesinti_isi):
+            klasorler += list(getattr(self.kesinti_isi, "klasorler", []) or [])
+        return [k[0] if isinstance(k, (tuple, list)) else k for k in klasorler if k]
+
     def saklama_uygula(self):
+        """KVKK: acilista, her saat ve ayar kaydedilince. Notu uretilmemis toplantilar da tarihe gore temizlenir (aktif
+        klasorler haric). Olaylar'a yalniz sayilar yazilir."""
         gun = int(self.ayar.get("saklama_gun", 0) or 0)
         if gun <= 0:
             return
         try:
-            n = motor_mod.saklama_uygula(gun)
+            sonuc = motor_mod.saklama_tara(gun, aktif=self._saklama_aktif())
         except Exception as e:
-            self.log(f"! saklama süresi uygulanamadı: {e!r}")
+            self.log(f"! saklama süresi uygulanamadı: {type(e).__name__}")
             return
-        if n:
-            self.log(f"saklama süresi ({gun} gün): {n} toplantının transkripti silindi, notları duruyor")
+        mesaj = motor_mod.saklama_ozeti(sonuc, gun)
+        if mesaj:
+            self.log(mesaj)
+        if sonuc["toplanti"]:
             self.gecmis_yenile()
 
     def _baglanti(self, url, klasor):
@@ -1864,6 +2008,10 @@ class Pencere(QtWidgets.QMainWindow):
     def kisiye_ozel_eposta(self):
         if not self.not_md or not self.motor:
             return
+        izin, aciklama = not_araclari.taslak_izni(self.motor.sablon, self.ayar)
+        if not izin:                                  # birebir: varsayilan kapali (dugme de kapali)
+            self.log(f"Kişiye özel e-posta açılmadı: {aciklama}")
+            return
         epostalar = not_araclari.kisiye_ozel_epostalar(self.not_md, self.motor.baslik, self.motor.tarih.isoformat())
         if not epostalar:
             QtWidgets.QMessageBox.information(self, "E-posta", "Sorumlusu belli aksiyon yok.")
@@ -1936,6 +2084,10 @@ class Pencere(QtWidgets.QMainWindow):
     def jira_disa_aktar(self):
         """N9: nottaki aksiyon tablosu -> Jira/Planner CSV (REST yok; dosya elle ice aktarilir)."""
         if not self.not_md:
+            return
+        izin, aciklama = not_araclari.taslak_izni(getattr(self.motor, "sablon", None), self.ayar)
+        if not izin:
+            self.log(f"Jira/Planner CSV yazılmadı: {aciklama}")
             return
         aks = not_araclari.aksiyonlari_ayikla(self.not_md)
         if not aks:
@@ -2186,7 +2338,7 @@ def duman_testi(pencere):
     kontrol("pencere kuruldu", isinstance(pencere, QtWidgets.QMainWindow) and pencere.sayfalar.count() == 4)
     kontrol("durum makinesi: bos", pencere._durum() == "bos" and pencere.b_ana.isEnabled(), pencere._durum())
     for ad in ("konusmaci", "stt", "ses", "saat", "terim", "duzelt", "kelime", "rag", "motor", "llm", "yakalayici",
-               "not_araclari", "outlook", "isler", "gorunum", "tarih", "metin"):
+               "not_araclari", "outlook", "isler", "gorunum", "tarih", "metin", "uzun", "ses_izi", "cihaz"):
         try:
             importlib.import_module(ad)
             kontrol(f"modül {ad}", True)

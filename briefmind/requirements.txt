@@ -11,3 +11,4 @@ sounddevice==0.5.6
 soundcard==0.4.6
 soundfile==0.13.1
 python-docx==1.2.0
+# Isteğe bağlı (Faz 6 spike, config 'ses_izi'; zorunlu degil, aynada dogrulanmadi): sherpa-onnx

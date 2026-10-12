@@ -72,6 +72,10 @@ class SahteMotor:
     def bitir(self):
         return []
 
+    def ses_izi_kur(self, ayar, ses_al_fn, cikarici=None):
+        self.ses_izi_kuruldu = ses_al_fn
+        return False
+
 
 class SahteSes:
     cagrilar = []
@@ -92,6 +96,9 @@ class SahteSes:
 
     def yeniden_kes(self, klip_no, an):
         return False
+
+    def ses_al(self, akis, bas, bit):
+        return None
 
     def baslat(self):
         return True
@@ -174,3 +181,10 @@ def test_faz2_ipucu_varsayilan_acik_ve_davet_terimleri_hazirlanir(qapp, tmp_path
     _calistir(qapp, tmp_path, monkeypatch, {"kaynak": "ses"})
     assert SahteSes.kw["stt_ipucu"] is True and SahteSes.kw["stt_repetition_penalty"] is None
     assert SahteMotor.son.hazirlandi == 1                       # davet / onceki not terimleri toplanti basinda havuza
+
+
+def test_faz6_ses_izi_bayrakla_baglanir(qapp, tmp_path, monkeypatch):
+    _calistir(qapp, tmp_path, monkeypatch, {"kaynak": "ses"})
+    assert not hasattr(SahteMotor.son, "ses_izi_kuruldu")
+    _calistir(qapp, tmp_path, monkeypatch, {"kaynak": "ses", "ses_izi": True})
+    assert getattr(SahteMotor.son.ses_izi_kuruldu, "__name__", "") == "ses_al"

@@ -1086,7 +1086,7 @@ class SahteSttIstemci:
 
 
 class SahteSes:
-    """SesServisi'nin kesinti kuyrugu yuzeyi: _coz, _bekci_baslat, _bekci, _kesinti_kuyrugu, _dur."""
+    """SesServisi'nin kesinti kuyrugu yuzeyi: kesinti_bosalt, duraklat (public API); _coz, _bekci_baslat dahili."""
     def __init__(self, klasor, saglikli=True):
         self.klasor = os.path.join(klasor, "olcum", "kesinti")
         self.stt = SahteSttIstemci(saglikli)
@@ -1101,6 +1101,21 @@ class SahteSes:
 
     def _coz(self, p):
         self.cozulen.append(p["klip_no"])
+
+    def duraklat(self):
+        self._dur.set()
+
+    def kesinti_bosalt(self, duraklatildi=None, kesinti_bekle_sn=None, kesinti_asildi=None, duraklat_hatasi=RuntimeError):
+        orijinal = self._coz
+        if duraklatildi is not None:
+            def coz(p):
+                if duraklatildi():
+                    raise duraklat_hatasi("kesinti kuyruğu duraklatıldı")
+                return orijinal(p)
+            self._coz = coz
+        self._bekci_baslat()
+        self._bekci.join(10)
+        return self.sayi()
 
     def _bekci_baslat(self):
         def dongu():
@@ -1426,3 +1441,144 @@ def test_main_yetim_is_kapanisi_pencereli_exede_stdout_none_iken_os_exit_eder(mo
     with pytest.raises(Cikis):
         app.main(["briefmind"])
     assert cagrilar == [0] and kutu == []
+
+
+# =============================================================== ayar.py: sonlu olmayan sayilar, dusunme butcesi
+
+@pytest.mark.parametrize("ham", ["Infinity", "-Infinity", "NaN", "1e999"])
+def test_sonlu_olmayan_sayi_ayar_oku_cokertmez_varsayilana_doner(ortam, ham):
+    (ortam / "config.json").write_text(
+        '{"otobitir": %s, "context": %s, "stt_repetition_penalty": %s, "llm_dusunme_butcesi": %s, "esikler": {"hal_at": %s}, '
+        '"ben": "Deniz Kaya"}' % (ham, ham, ham, ham, ham), encoding="utf-8")
+    v = ayar_mod.ayar_oku()
+    assert ayar_mod.AYAR_HATASI is None
+    assert v["otobitir"] == 180 and v["context"] == 0 and v["stt_repetition_penalty"] is None
+    assert "llm_dusunme_butcesi" not in v and "esikler" not in v and v["ben"] == "Deniz Kaya"
+    uyarilar = ayar_mod.ayar_uyarilari_al()
+    for anahtar in ("otobitir", "context", "stt_repetition_penalty", "llm_dusunme_butcesi", "esikler"):
+        assert len([u for u in uyarilar if f"'{anahtar}'" in u]) == 1                 # anahtar basina BIR uyari
+    ayar_mod.ayar_oku()
+    assert ayar_mod.ayar_uyarilari_al() == []                                          # ikinci okumada tekrar yok
+
+
+def test_llm_dusunme_butcesi_semada_sinirlanir(ortam):
+    (ortam / "config.json").write_text('{"llm_dusunme_butcesi": 99999}', encoding="utf-8")
+    assert ayar_mod.ayar_oku()["llm_dusunme_butcesi"] == 65536
+    (ortam / "config.json").write_text('{"llm_dusunme_butcesi": "abc"}', encoding="utf-8")
+    ayar_mod.uyarilari_sifirla()
+    assert "llm_dusunme_butcesi" not in ayar_mod.ayar_oku()
+    assert any("llm_dusunme_butcesi" in u for u in ayar_mod.ayar_uyarilari_al())
+
+
+# =============================================================== ses.py public kesinti API, isler.py
+
+def test_kesinti_devam_isi_yalniz_public_ses_api_kullanir():
+    import inspect
+    import isler
+    kaynak = inspect.getsource(isler.KesintiDevamIsi)
+    for ozel in ("._coz", "._bekci", "._kesinti_bas", "._kesinti_kuyrugu", "._dur.set", "servis._", "sv._"):
+        assert ozel not in kaynak.replace("self._dur", "").replace("self._servis", ""), ozel
+
+
+def test_ses_servisi_public_kesinti_api(ortam):
+    import ses
+    s = ses.SesServisi("http://stt.ornek")
+    assert s.kesinti_kalan() == 0                                                      # kuyruk yok
+    s.duraklat()
+    assert s._dur.is_set()
+    for ad in ("kesinti_bosalt", "duraklat", "kesinti_kalan"):
+        assert callable(getattr(ses.SesServisi, ad))
+
+
+def test_ses_servisi_kesinti_bosalt_duraklatilinca_klibi_diskte_birakir(ortam, monkeypatch):
+    import ses
+    import stt
+    s = ses.SesServisi("http://stt.ornek")
+    kalan = [2]
+    cagrilar = []
+    monkeypatch.setattr(s, "_bekci_baslat", lambda: None)
+    s._bekci = None
+    monkeypatch.setattr(s, "kesinti_kalan", lambda: kalan[0])
+    assert s.kesinti_bosalt() == 2                                                     # bekci yok: hemen doner
+    pasif = {"v": True}
+    s._coz = lambda p: cagrilar.append(p)
+    s.kesinti_bosalt(duraklatildi=lambda: pasif["v"], duraklat_hatasi=ValueError)
+    with pytest.raises(ValueError):
+        s._coz({"klip_no": 1})
+    assert cagrilar == []
+    pasif["v"] = False
+    s._coz({"klip_no": 1})
+    assert cagrilar == [{"klip_no": 1}]
+    assert stt.kesinti_hatasi_mi(ValueError("x")) is True
+
+
+def test_ses_servisi_kesinti_bosalt_uzun_kesintide_duraklatir(ortam, monkeypatch):
+    import ses
+    s = ses.SesServisi("http://stt.ornek")
+
+    class Bekci:
+        n = 0
+
+        def is_alive(self):
+            self.n += 1
+            return self.n < 3
+
+        def join(self, sn):
+            pass
+    s._bekci = Bekci()
+    s._kesinti_bas = saat.simdi() - 100
+    monkeypatch.setattr(s, "_bekci_baslat", lambda: None)
+    uyarilar = []
+    s.kesinti_bosalt(kesinti_bekle_sn=60, kesinti_asildi=lambda: uyarilar.append(1))
+    assert s._dur.is_set() and uyarilar == [1]
+
+
+# =============================================================== hata.log: bat + teshis ayar.hata_log_yolu() kullanir
+
+def test_toplanti_notu_bat_hata_log_yolunu_ayardan_alir():
+    kok = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bat = open(os.path.join(kok, "ToplantiNotu.bat"), encoding="utf-8").read()
+    assert "ayar.hata_log_yolu()" in bat and "Ayrinti: %HATALOG%" in bat
+
+
+def test_teshis_hata_logu_localappdata_yolunu_okur(ortam, monkeypatch):
+    import importlib.util
+    kok = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.setenv("LOCALAPPDATA", str(ortam / "yerel"))
+    ayar_mod.hata_yaz("Traceback ornek\n")
+    yol = ayar_mod.hata_log_yolu()
+    assert os.path.exists(yol) and "BriefMind" in yol
+    cwd = os.getcwd()
+    try:
+        spec = importlib.util.spec_from_file_location("teshis_modul", os.path.join(kok, "tools", "teshis.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)                                                       # chdir KOK yapar
+        m.CIKTI.clear()
+        m.hata_logu()
+        cikti = "\n".join(m.CIKTI)
+    finally:
+        os.chdir(cwd)
+    assert yol in cikti and "Traceback ornek" in cikti and "hata.log yok" not in cikti
+
+
+def test_config_example_semadaki_ve_kodun_okudugu_anahtarlari_icerir():
+    kok = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ornek = json.load(open(os.path.join(kok, "config.example.json"), encoding="utf-8"))
+    for k in ("kesinti_devam", "stt_ipucu", "stt_repetition_penalty", "olcum_kaydi", "altyazi_yedek",
+              "llm_dusunme_butcesi", "embed_url", "embed_key", "embed_boyut", "embed_proxy", "embed_talimat"):
+        assert k in ornek, k
+    import konusmaci
+    import stt
+    assert set(konusmaci.VARSAYILAN_ESIKLER) | set(stt.HAL_ESIKLER) <= set(ornek["esikler"])
+    for k, (tur, alt, ust) in ayar_mod.SEMA.items():
+        if k in ornek:
+            ayar_mod._tip_duzelt(ornek[k], (tur, alt, ust))                              # ornek deger sema ile uyumlu
+    metin = json.dumps(ornek)
+    assert "://<" in metin and "http://10." not in metin
+
+
+def test_ayar_faz3_faz6_anahtarlari_varsayilan_kapali(tmp_path, monkeypatch):
+    import ayar as ayar_mod
+    monkeypatch.chdir(tmp_path)
+    v = ayar_mod.ayar_oku()
+    assert v["uzun_pencere"] is False and v["ses_izi"] is False

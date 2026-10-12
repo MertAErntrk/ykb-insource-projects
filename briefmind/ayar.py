@@ -10,6 +10,7 @@ ayar.py — config.json okuma/yazma (arayuz ve komut satiri ortak).
   hata.log: %LOCALAPPDATA%\\BriefMind\\hata.log; yazilamazsa uygulama klasoru (calisma klasoru).
 """
 import json
+import math
 import os
 import time
 
@@ -28,11 +29,15 @@ SEMA = {
     "kesinti_kaydi": ("bool", None, None), "kesinti_devam": ("bool", None, None),
     "stt_url": ("str", None, None), "stt_model": ("str", None, None), "stt_key": ("str", None, None),
     "stt_proxy": ("bool", None, None), "mikrofon_modu": ("str", None, None), "mikrofon_cihaz": ("cihaz", None, None),
+    "cihaz_otomatik": ("bool", None, None),
     "ben": ("str", None, None), "altyazi_otomatik": ("bool", None, None), "altyazi_turkce": ("bool", None, None),
     "olcum_kaydi": ("bool", None, None), "stt_ipucu": ("bool", None, None),
+    "uzun_pencere": ("bool", None, None), "ses_izi": ("bool", None, None), "ses_izi_model": ("str", None, None),
+    "ses_izi_esik": ("sayi_veya_yok", 0.0, 1.0),
     "stt_repetition_penalty": ("sayi_veya_yok", 0.1, 3.0), "ca_bundle": ("str", None, None),
-    "not_sablonu": ("str", None, None), "saklama_gun": ("int", 0, 3650), "esikler": ("dict", None, None),
-    "llm_akis": ("bool", None, None), "llm_proxy": ("bool", None, None), "llm_key": ("str", None, None),
+    "not_sablonu": ("str", None, None), "not_sablonu_surum": ("int", 0, 100), "birebir_taslak": ("bool", None, None),
+    "saklama_gun": ("int", 0, 3650), "esikler": ("dict", None, None),
+    "llm_akis": ("bool", None, None), "llm_dusunme_butcesi": ("int", 0, 65536), "llm_proxy": ("bool", None, None), "llm_key": ("str", None, None),
     "api_key": ("str", None, None), "llm_zaman_asimi": ("int", 0, 86400), "llm_tekrar": ("int", 0, 20),
     "parca_token": ("int", 0, 1048576), "paralel": ("int", 0, 64),
     "embed_url": ("str", None, None), "embed_key": ("str", None, None), "embed_boyut": ("int", 0, 65536),
@@ -43,6 +48,7 @@ _DOGRU = {"true", "evet", "1", "acik", "açık", "yes", "on"}
 _YANLIS = {"false", "hayir", "hayır", "0", "kapali", "kapalı", "no", "off"}
 # kaldirilan ozellik anahtarlari (sozluk / inceleme akisi): okununca atilir, dosyadan da silinir
 KALDIRILAN_ANAHTARLAR = ("otomatik_not", "inceleme", "inceleme_yok")
+SABLON_SURUM = 2                           # not_sablonu_surum: 'otomatik' varsayilanina gecilen ayar surumu
 
 
 def _kaldirildi_mi(anahtar):
@@ -64,12 +70,17 @@ def varsayilanlar():
             "stt_model": "whisper-large-v3-turbo-prod",     # ARGE GPU servisi (Turkce fine-tune)
             "stt_key": "EMPTY",                              # kendi CPU servisimiz icin: model "whisper", anahtar bos
             "mikrofon_modu": "otomatik",      # Faz1: kulaklik/hoparlor pasif tespit; 'cift'/'tek' goc eder
+            "cihaz_otomatik": True,           # mikrofon otomatik secilir, loopback tum cikislardan (mikrofon_cihaz: elle)
             "ben": "",
             "altyazi_otomatik": True,         # altyazi gorunmezse Teams'te acmayi dene
             "altyazi_turkce": True,           # altyazi bulununca konusulan dili Turkce yapmayi dene
             "olcum_kaydi": False,             # Faz 0 PoC: klip + altyazi okumalarini toplanti klasorune yaz
+            "uzun_pencere": False,            # Faz 3: uzun pencere STT (olcumle acilir)
+            "ses_izi": False,                 # Faz 6: altyazisiz '?' satirlara ses izi (sherpa-onnx + model gerekir)
             "stt_ipucu": True,                # Whisper prompt'u: katilimci adlari + serinin <=20 terimi (dusuk RMS klibe gitmez)
             "stt_repetition_penalty": None,   # STT servisine repetition_penalty (None: gonderilmez; A/B icin 1.1 denenir)
+            "not_sablonu": "otomatik",        # toplanti davetinden (konu/metin) secilir; sabit deger o sablonu zorlar
+            "birebir_taslak": False,          # birebir toplantida kisiye ozel e-posta / Jira taslagi (varsayilan kapali)
             "ca_bundle": ""}                  # kurum kok sertifikasi (.cer, Base64); bos: TLS dogrulamasi kapali
 
 
@@ -113,10 +124,23 @@ def _tur_adi(deger):
             "list": "liste", "NoneType": "boş"}.get(type(deger).__name__, type(deger).__name__)
 
 
+def _sonlu_degil(deger):
+    """float olarak sonsuz/NaN (JSON'da Infinity, NaN, 1e999); sozluk degerlerinde de aranir (ic ice dahil)."""
+    if isinstance(deger, float):
+        return not math.isfinite(deger)
+    if isinstance(deger, dict):
+        return any(_sonlu_degil(v) for v in deger.values())
+    if isinstance(deger, list):
+        return any(_sonlu_degil(v) for v in deger)
+    return False
+
+
 def _tip_duzelt(deger, sema):
     """-> (yeni_deger, aciklama|None). Uyumsuzsa ValueError. Belirsiz olmayan donusumler (\"true\" -> true,
     \"180\" -> 180, 180.0 -> 180) kabul edilir ve aciklama doner; sinir disi sayilar sinira cekilir."""
     tur, alt, ust = sema
+    if _sonlu_degil(deger):
+        raise ValueError("sonlu bir sayı bekleniyordu (Infinity/NaN/1e999 geçersiz)")
     if tur == "str":
         if not isinstance(deger, str):
             raise ValueError("metin bekleniyordu")
@@ -177,6 +201,12 @@ def _goc_et(ham):
     if isinstance(mod, str) and mod not in ("otomatik", ""):
         notlar.append(f"mikrofon_modu '{mod}' artık yok: kulaklık/hoparlör otomatik algılanıyor")
         yeni["mikrofon_modu"] = "otomatik"
+    if yeni.get("not_sablonu") == "genel" and "not_sablonu_surum" not in yeni:
+        # eski varsayilan: Ayarlar her kayitta 'genel' yaziyordu (secim degil); yeni varsayilan otomatik. Surum isareti
+        # sonradan elle secilen 'genel'in yeniden goc edilmesini onler (Ayarlar kaydi da yazar).
+        yeni["not_sablonu"], yeni["not_sablonu_surum"] = "otomatik", SABLON_SURUM
+        notlar.append("not_sablonu 'genel' (eski varsayılan) 'otomatik' yapıldı: şablon toplantı davetinden seçilir; "
+                      "sabit şablon için Ayarlar → Not şablonu")
     for k in [k for k in yeni if _kaldirildi_mi(k)]:
         del yeni[k]
         notlar.append(f"'{k}' kaldırıldı (sözlük/inceleme akışı Faz 2'de kalktı)")

@@ -31,6 +31,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 | `rag.py` | Toplantıya soru için hibrit arama: transkript pencereleri, BM25 (Türkçe kök), embedding, RRF; vektör önbelleği toplantı klasöründe (`rag_dizin.npz`) |
 | `metin.py` | Metin benzerliği (kelime kökü), Türkçe küçük harf, ad eşleşmesi, konuşmacı gösterim kuralı (`gorunen_ad`) |
 | `ses.py` | Ses yakalama (WASAPI loopback + mikrofon), VAD, STT istemcisi, tekrar/halüsinasyon filtreleri |
+| `cihaz.py` | Ses cihazlarının otomatik seçimi: mikrofonlar arasında ses veren/en net olanı seçer, tüm çıkışların loopback'ini karıştırır; tak-çıkar |
 | `yakalayici.py` | Teams altyazısını UI Automation ile okuma, toplantı adı, altyazıyı otomatik açma |
 | `outlook.py` | Takvimden toplantı eşleştirme, taslak e-posta, oturum kullanıcısı |
 | `terim.py` | Terim havuzu (`terimler/terimler.json`): davet, önceki notlar ve katılımcılardan aday; bağımsız kanıtla öğrenme, geri alma |
@@ -48,7 +49,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 - **Gösterim.** `Ad` (güven ≥ 0,7); `Ad?` (ad var ama güven düşük); `Bilinmeyen` (kimse yok); `A → B` (klipte sıralı devir); `A / B (aynı anda)` (çakışma: bu satırdan karar ya da aksiyon çıkmaz, metin ⟨⟩ içinde).
 - **Terimler otomatik.** Terim düzeltmesi ve öğrenme onay istemez; LLM yalnızca öneri verir, kelime sınırı, ek uyumu ve sayı/tarih kapıları karar verir.
 - **Belirsizler paneli.** Kararsız kelimeler, emin olunmayan konuşmacılar ve şüpheli klipler Not sekmesinde salt okunur listelenir; `ts:` bağlantısı transkripti o ana açar. Şüpheli klip nota girmez.
-- **Sahiplik temkinli.** Sorumlu ataması kesin kaynaklarla sınırlanır (Faz 4, devam ediyor); belirsiz sahipler e-posta ve Jira taslağına girmez.
+- **Sahiplik temkinli.** Sorumlu yalnız kesin kaynaktan atanır (güvenli konuşmacının kendi taahhüdü ya da adıyla görev verilen katılımcı); belirsiz sahipler "Sahibi belirsiz" bloğunda kalır, e-posta ve Jira taslağına girmez.
 - **Ölçüm araçları.** `tools/olcum.py` (WER, SER, belirsiz oranı), `tools/etiketle.py` (klip etiketleme), `tools/replay.py` (kaydı çevrimdışı yeniden işletme). Kayıt yalnızca `olcum_kaydi` açıkken yazılır.
 
 ## Kurulum
@@ -76,14 +77,16 @@ python app.py
 | `altyazi_yedek` | (varsayılan `false`) `true`: STT yokken Teams altyazı metni yedek olarak girer (`kaynak: altyazi-yedek`, şüpheli; notta "altyazıdan, düşük güven"; sahip/aksiyon üretmez). Ayarlar → "STT yokken Teams altyazı metnini yedek olarak nota al" |
 | `altyazi_goster` | (varsayılan `false`) Canlı ekranda Teams altyazısı da `[altyazı]` etiketiyle görünür; transkripte girmez |
 | `kesinti_kaydi` | (varsayılan `false`) STT yokken klipler toplantı klasörüne (`olcum/kesinti/`) yazılır, STT dönünce sırayla çözülür (`olcum_kaydi` açıkken zaten açık) |
+| `kesinti_devam` | (varsayılan `true`) Önceki oturumdan diskte kalan STT kesinti kuyruğu (`olcum/kesinti/`) açılışta (STT ayaktaysa) otomatik çözülür; Olaylar'a ilerleme yazılır, not yeniden üretilmez (Geçmiş → Yeniden özetle). `false`: kuyruk diskte beklemeye devam eder |
 | `esikler` | (isteğe bağlı) Konuşmacı atama eşikleri, ör. `{"baskin": 0.6, "ikinci": 0.25, "kesin": 0.7, "erteleme_sn": 15}` (tam liste: `konusmaci.VARSAYILAN_ESIKLER`). Halüsinasyon eşikleri de burada: `hal_supheli` (varsayılan 0,5; satır nota girmez, Belirsizler'e düşer), `hal_at` (0,9; satır silinir) |
 | `ben` | Uygulamayı açan kişi (boşsa Outlook/Windows'tan alınır) |
-| `mikrofon_cihaz` | (isteğe bağlı) Mikrofon cihaz numarası ya da adı; yoksa Windows varsayılanı. Doğru cihazı bulmak için: `python tools\ses_teshis.py` |
+| `mikrofon_cihaz` | (isteğe bağlı, **gerekmez**) Elle mikrofon: cihaz adı (ya da eski numara). Boş: otomatik seçim (bkz. [Ses cihazları](#ses-cihazları-otomatik)). Ayarlanan cihaz yoksa, çıkarılırsa ya da hiç ses vermiyorsa otomatiğe dönülür, ses verince ona geri geçilir (sessize alınınca bırakılmaz) |
+| `cihaz_otomatik` | (varsayılan `true`) `false`: eski yol — yalnız Windows varsayılan hoparlörü ve `mikrofon_cihaz`/varsayılan mikrofon (tak-çıkar izlenmez) |
 | `stt_ipucu` | (varsayılan `true`) Whisper'a prompt olarak katılımcı adları ve serinin en çok 20 terimi gider; düşük sesli kliplere gitmez. Ayarlar'dan açılıp kapatılır |
 | `stt_repetition_penalty` | (varsayılan boş) Boşken STT'ye gönderilmez; sayı (ör. `1.1`) yazılırsa `repetition_penalty` olarak gider. Deneme amaçlı |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
 | `not_sablonu` | `genel` / `haftalik` / `karar` / `birebir` / `calistay` (Ayarlar → Not şablonu) |
-| `saklama_gun` | Notu üretilmiş toplantıların transkripti bu kadar gün sonra silinir; `0` kapalı (Ayarlar → Transkript saklama süresi) |
+| `saklama_gun` | Toplantı tarihinden bu kadar gün sonra konuşma içeren her veri silinir: transkript, düzeltme günlüğü, parça satırları, `olcum/` (klip wav, ham STT, okumalar, `kesinti/`), ses dosyaları, `rag_dizin.npz`, replay çıktıları, `.yedek-*`; `llm_log.jsonl`'den serbest metin alanları çıkarılır. `not.md`, `meta.json` ve parça özetleri kalır. Notu üretilmemiş (yarım/hata) toplantılar da tarihe göre temizlenir; yalnız o an bir işin (kayıt, not üretimi, yeniden özetleme, soru) çalıştığı toplantı atlanır ve sonraki turda denenir (yalnız açık/görüntülenen toplantı korunmaz). Konuşma verisi silinmiş toplantının notu yeniden üretilmez ve şablonu değiştirilemez (transkript olmadan doğrulanamaz); not ve parça özetleri olduğu gibi kalır. Açılışta, her saat ve ayar kaydedilince çalışır; Olaylar'a yalnız sayılar yazılır. `0` kapalı (Ayarlar → Transkript saklama süresi) |
 | `embed_url` | (isteğe bağlı) Embedding servisi (OpenAI uyumlu `POST /v1/embeddings`, gövde `{"input": [...]}`). Doluysa "Toplantıya sor" hibrit arama yapar: kelime (BM25) + anlam (vektör), RRF ile birleştirilir. Boşsa ya da servis hata verirse yalnızca kelime araması. Servisin yollarını bulmak için: `python tools\servis_kesfet.py <adres>` |
 | `embed_boyut` / `embed_key` / `embed_proxy` | Vektör boyutu (varsayılan `1024`; 4096'lık Qwen3-Embedding vektörü kırpılıp normalize edilir), anahtar (gerekirse), Windows proxy'si |
 | `ca_bundle` | (isteğe bağlı) Kurum kök sertifikası dosyası (`.cer`, Base64). Doluysa LLM ve STT bağlantılarında TLS doğrulanır; boşsa doğrulama kapalıdır ve açılışta Olaylar'a bir kez yazılır. Aşağıdaki adımlara bakın. |
@@ -102,7 +105,38 @@ Kurum içi sunucuların sertifikası kurumun kendi kök sertifikasıyla imzalıd
    `python tools\teshis.py` çıktısında da "TLS doğrulaması: açık" yazar. STT başka bir kökle imzalıysa
    iki sertifika aynı `.cer` dosyasına alt alta kopyalanabilir.
 
+**Duman testi:** `python app.py --duman` pencereyi ekransız kurar (ağ, Outlook, UIA ve zamanlayıcı yok), paketlenen
+modülleri ve `veri\` dosyalarını açmayı dener; çıkış kodu `0` = tamam (derlenmiş exe için de geçerli: `BriefMind.exe --duman`). Sonuç satırları konsol yoksa
+`hata.log`'un yanındaki `duman.txt`'ye de yazılır.
+
+**hata.log konumu:** `%LOCALAPPDATA%\BriefMind\hata.log` (yazılamazsa uygulama klasörü; 1 MB'ı aşınca `hata.log.1`'e
+döner). `ToplantiNotu.bat` ve `python tools\teshis.py` bu yolu kullanır. Paylaşmadan önce içeriğine bakın.
+
 Exe üretmek için `derle.bat` (PyInstaller, `dist\BriefMind\`); `veri\` klasörü (yaygın kelime listesi) exe'ye eklenir.
+
+## Ses cihazları (otomatik)
+
+Kimsenin cihaz ayarlaması gerekmez; kulaklıkla, dizüstü hoparlör/mikrofonuyla ya da toplantı ortasında kulaklık takıp
+çıkararak çalışılabilir.
+
+- **Mikrofon:** açık tüm mikrofonlar (en fazla 4) dinlenir. Hiç ses vermeyen (−90 dB altı, ör. Windows izni kapalıyken
+  gelen −98 dB) cihaz 2 sn'de elenir. Windows varsayılanı ses veriyorsa o, vermiyorsa (ya da −80 dB'den kısıksa) ses
+  veren ilk mikrofon seçilir. Kullanıcı konuşurken başka bir mikrofon ≥ 6 dB daha net duyuyorsa (≥ 3 sn konuşma, iki
+  geçiş arası ≥ 10 sn, klip açabilecek seviyede) ona geçilir; karşı taraf konuşurken ölçüm yapılmaz (hoparlörden
+  mikrofona giren eko seçimi kazanamaz), klavye tıkırtıları sayılmaz. Geçiş klip sınırında yapılır; seçili cihaz
+  çıkarılır ya da blok vermezse hemen geçilir (açık klip önce kapanır). Çalışırken tam sıfıra düşen seçili mikrofon
+  (kulaklıkta sessize alma, gürültü kapısı) bırakılmaz: sessizdeyken odada konuşulan transkripte girmez; Canlı sekmesinde
+  "— sessizde" yazar. Bluetooth kulaklığın eller-serbest mikrofonu yalnız gerektiğinde açılır (varsayılansa, diğer
+  mikrofonlar tam sessizse ya da kulaklık zaten eller-serbest modundaysa). Canlı sekmesinde "Mikrofon: <ad> (otomatik)"
+  yazar, Olaylar'a her seçim düşer.
+- **Hoparlör (karşı taraf):** tüm çıkış cihazlarının (en fazla 4) loopback'i karıştırılır: Teams sesi hangi cihazdan
+  çıkarsa çıksın yakalanır. Cihaz listesi 3 sn'de bir yenilenir; 4'ten fazla cihaz varsa Windows varsayılanı ve yeni
+  takılan cihaz, hiç ses vermeyenin yerini alır.
+- **Uyarılar:** tüm mikrofonlar 10 sn tam sessizse (hiçbiri daha önce ses vermediyse) bir kez şerit + Olaylar uyarısı çıkar (Windows Ayarlar → Gizlilik ve
+  güvenlik → Mikrofon → "Masaüstü uygulamalarının mikrofonunuza erişmesine izin ver"); ses gelince kalkar. Altyazıda
+  karşı taraf konuşurken 20 sn hoparlör sesi yoksa da uyarı çıkar.
+- **Teşhis:** `python tools\ses_teshis.py --otomatik` (8 sn konuş, bir ses çal): cihaz başına seviye, tam sessizlik ve
+  uygulamanın seçeceği mikrofon.
 
 ## Kullanım
 
@@ -157,7 +191,7 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
   Planner: CSV Excel'de açılıp görevler kopyalanır. Doğrudan Jira'ya kayıt açılmaz (kimlik bilgisi gerekmez).
 - **Konuşma payı:** Geçmiş sekmesinde bir toplantı seçilince üstte "Konuşma payı: Selin %38, Emre %27, …"
   (satırın süresi = sonraki satıra kadar, en fazla 15 sn). Nota yazılmaz; `meta.json` → `konusma_paylari`.
-- **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi.
+- **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi (açılışta, saatte bir ve ayar kaydedilince uygulanır; ses ve ölçüm kayıtları dahil).
 - **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
 
 ## Ölçüm (Faz 0)
@@ -172,6 +206,24 @@ python tools\etiketle.py toplantilar\<klasor> --bas 0 --bit 10   # ilk 10 dk'yı
 python tools\olcum.py toplantilar\<klasor> --token               # WER, SER-kesin, belirsiz oran, halüsinasyon (yalnız sayı) + karakter/token
 python tools\replay.py toplantilar\<klasor> [--stt] [--bas 0 --bit 10]   # kaydı bugünkü hattan çevrimdışı geçirip metrikleri hesapla
 ```
+
+## Ses izi (Faz 6 spike, isteğe bağlı, varsayılan kapalı)
+
+Teams altyazısı kapalıyken konuşmacısı `?` kalan satırlara **yalnızca ad adayı** vermek için deneme: `config.json` →
+`"ses_izi": true`, `"ses_izi_model": "<gömme modeli>.onnx"` (isteğe bağlı `"ses_izi_esik": 0.75`). `sherpa-onnx`
+zorunlu bağımlılık değildir (`pip install sherpa-onnx`); paket ya da model yoksa özellik tek log satırıyla kapanır, not hattı
+etkilenmez. Parça kapanınca (arka planda) kesin loopback satırlarından (`spk_guven` ≥ 0.9, çakışma yok, ≥ 2 sn; ses halka
+tampondan) kişi başı centroid kurulur; altyazısız (`kapsama_yok`) `?` satırı yalnız en iyi kosinüs ≥ eşik **ve** ikinciye
+fark ≥ 0.10 **ve** kişinin ≥ 5 centroid klibi varsa atanır. Atanan satırın `spk_guven` değeri en çok 0.6'dır: her yerde `Ad?`
+görünür, sahip/katılımcı üretmez, `kaynak_konusmaci: "ses_izi"`. Altyazı kararı olan satırlara dokunulmaz. Ses izi (centroid)
+yalnız toplantı süresince bellekte tutulur, diske yazılmaz. Kapı ölçümü Faz 0 kaydında (RTF < 0.3, `?`'lerin ≥ %50'si doğru,
+yanlış 0):
+
+```powershell
+python tools\ses_izi_dene.py toplantilar\<klasor> --model gomme.onnx   # RTF, kapsama, doğru/yanlış, eşik önerisi
+```
+
+Motor bağlantısı: `Motor.ses_izi_kur(ayar, ses_al_fn)` (`ses_al_fn(akis, bas, bit)` → 16 kHz ses, halka tampon).
 
 ## Test
 

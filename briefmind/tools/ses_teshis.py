@@ -2,6 +2,8 @@
 ses_teshis.py — Mikrofon ve hoparlor (loopback) yakalamasini dener: hangi cihaz ses aliyor?
 
 Kullanim (briefmind klasorunden):
+  python tools\\ses_teshis.py --otomatik       -> uygulamanin otomatik secimini dener: tum mikrofonlar + hoparlorler 8 sn
+                                                (konus ve bir ses cal), hangi mikrofonun secilecegini yazar
   python tools\\ses_teshis.py                  -> tum mikrofonlari 3'er sn dener (konus!)
   python tools\\ses_teshis.py --loopback       -> hoparlor cikisini 5 sn dener (bir video/ses cal)
   python tools\\ses_teshis.py --kaydet 3       -> 3 numarali cihazdan 15 sn test.wav kaydeder
@@ -92,10 +94,8 @@ def mikrofonlar(sure):
         r, i, ad, api = iyi[0]
         print(f"EN İYİ CİHAZ: [{i}] {ad} ({api}), rms {r:.1f} dB")
         print(f"  Test kaydı:     python tools\\ses_teshis.py --kaydet {i} --stt")
-        print(f"  Uygulamada:     config.json → \"mikrofon_cihaz\": {i}   (ya da adı: \"{ad[:30]}\")")
-        if varsayilan is not None and i != varsayilan:
-            print("  Not: bu cihaz Windows'un varsayılan girişi DEĞİL. İstersen Ayarlar → Sistem → Ses → Giriş'ten")
-            print("  varsayılan yap; o zaman config ayarına gerek kalmaz.")
+        print("  Uygulama mikrofonu otomatik seçer (ses veren, en net cihaz); ayar gerekmez. Seçimi görmek için: --otomatik")
+        print(f"  Yalnız zorlamak istersen: config.json → \"mikrofon_cihaz\": \"{ad[:30]}\"  (sessizse yine otomatiğe döner)")
     else:
         print("Ses var ama seviye düşük. Ayarlar → Sistem → Ses → Giriş → cihaz → Giriş düzeyi'ni artır,")
         print("mikrofonun fiziksel sessize alma tuşunu (kulaklık kablosu/klavye F4-F5) kontrol et.")
@@ -114,7 +114,89 @@ def loopback(sure):
     print(f"loopback: rms {r:.1f} dB  tepe {t:.1f} dB → {yorum(r, t)}")
     if r < -60:
         print("Teams sesi farklı bir cihazdan çıkıyor olabilir: Teams → Ayarlar → Cihazlar → Hoparlör ile")
-        print("Windows varsayılan hoparlörü AYNI olmalı (uygulama Windows varsayılanını dinler).")
+        print("Windows varsayılan hoparlörü farklı olabilir. Bu test yalnız varsayılanı dinler; uygulama TÜM çıkışları")
+        print("dinler (karışım): hepsini görmek için --otomatik.")
+
+
+def otomatik(sure, arka=None, elle=None):
+    """Uygulamanin kullandigi otomatik secim (cihaz.py) ile rapor: cihaz basina seviye, tam sessizlik, secilen mikrofon,
+    loopback karisimi. arka: testler icin sahte arka uc (senkron: tur sayisi = sure * 10)."""
+    import threading
+    import cihaz as cihaz_mod
+    arka = arka or cihaz_mod.SoundcardArka()
+    gunluk = []
+
+    def olay(tip, veri):
+        if tip == "log":
+            gunluk.append(str(veri))
+    print("Giriş cihazları (mikrofonlar):")
+    vg = arka.varsayilan_giris()
+    for k, ad in arka.girisler():
+        print(f"  {ad}" + ("  <- Windows varsayılanı" if k == vg else ""))
+    vc = arka.varsayilan_cikis()
+    print("Çıkış cihazları (hoparlör/kulaklık):")
+    for k, ad in arka.cikislar():
+        print(f"  {ad}" + ("  <- Windows varsayılanı" if k == vc else ""))
+    lp = cihaz_mod.LoopbackSecici(arka, olay=olay, saat=getattr(arka, "simdi", None))
+    mik = cihaz_mod.MikrofonSecici(arka, elle=elle, uzak_fn=lp.aktif_mi, olay=olay, saat=getattr(arka, "simdi", None),
+                                   hfp_fn=lp.hfp_aktif_mi)
+    print(f"\n{sure:.0f} sn dinleniyor — KONUŞ ve (varsa) bir video/ses çal (Teams test çağrısı da olur)…")
+    dur = threading.Event()
+    if getattr(arka, "senkron", False):
+        gm, gl = mik.bloklar(dur), lp.bloklar(dur)
+        for _ in range(int(sure * 10)):
+            if hasattr(arka, "n"):
+                arka.n += 1
+            for g in (gl, gm):
+                while next(g) is not None:
+                    pass
+        rapor_m, rapor_l = mik.durum_raporu(), lp.durum_raporu()
+        dur.set()
+        gm.close()
+        gl.close()
+    else:
+        def tuket(secici):
+            for _ in secici.bloklar(dur):
+                pass
+        ipler = [threading.Thread(target=tuket, args=(x,), daemon=True) for x in (mik, lp)]
+        for i in ipler:
+            i.start()
+        time.sleep(sure)
+        rapor_m, rapor_l = mik.durum_raporu(), lp.durum_raporu()
+        dur.set()
+        for i in ipler:
+            i.join(timeout=3)
+
+    def yaz(r, loop=False):
+        if not r["blok"]:
+            return f"  {r['ad'][:45]:45} veri gelmedi"
+        if r["sessiz"]:
+            durum = "ses yok (bu çıkıştan bir şey çalmadı)" if loop else "TAM SESSİZ ✖"
+        else:
+            durum = yorum(r["rms_db"], r["tepe_db"])
+        return (f"  {r['ad'][:45]:45} rms {r['rms_db']:6.1f} dB  tepe {r['tepe_db']:6.1f} dB  taban "
+                f"{r['taban_db'] if r['taban_db'] is not None else '?'} dB → {durum}" + ("  (varsayılan)" if r["varsayilan"] else ""))
+    print("\nMikrofonlar:")
+    for r in rapor_m:
+        print(yaz(r))
+    print("Hoparlör loopback:")
+    for r in rapor_l:
+        print(yaz(r, loop=True))
+    s = mik.secili_mikrofon()
+    print()
+    if s:
+        print(f"OTOMATİK SEÇİM: {s['ad']} ({'otomatik' if s['otomatik'] else 'elle ayarlı'})"
+              + (f" — {s['neden']}" if s.get("neden") else ""))
+    else:
+        print("OTOMATİK SEÇİM: yok (hiçbir mikrofondan veri gelmedi)")
+    if rapor_m and all(r["sessiz"] for r in rapor_m if r["blok"]):
+        print("HİÇBİR MİKROFON SES VERMEDİ (tam sıfır): Ayarlar → Gizlilik ve güvenlik → Mikrofon →")
+        print("  'Masaüstü uygulamalarının mikrofonunuza erişmesine izin verin' AÇIK olmalı; sessize alma tuşunu kontrol et.")
+    print(f"İşlem yükü: mikrofon {mik.blok_maliyeti_us() or 0:.0f} µs/blok, loopback {lp.blok_maliyeti_us() or 0:.0f} µs/blok")
+    for g in gunluk:
+        if g.startswith(("Mikrofon:", "Hoparlör yakalama:", "!")):
+            print("  log: " + g)
+    return s
 
 
 def kaydet(cihaz, stt):
@@ -156,11 +238,20 @@ def main():
     a = argparse.ArgumentParser()
     a.add_argument("--sure", type=float, default=3)
     a.add_argument("--loopback", action="store_true")
+    a.add_argument("--otomatik", action="store_true", help="uygulamanın otomatik cihaz seçimini dene (öneri)")
     a.add_argument("--kaydet", help="cihaz numarası ya da adı")
     a.add_argument("--stt", action="store_true")
     a.add_argument("--goster", action="store_true", help="STT metnini ekrana yaz")
     ARGS = a.parse_args()
-    if ARGS.loopback:
+    if ARGS.otomatik:
+        elle = None
+        try:
+            with open("config.json", encoding="utf-8-sig") as f:
+                elle = json.load(f).get("mikrofon_cihaz")
+        except Exception:
+            pass
+        otomatik(max(ARGS.sure, 8), elle=elle)
+    elif ARGS.loopback:
         loopback(max(ARGS.sure, 5))
     elif ARGS.kaydet is not None:
         kaydet(ARGS.kaydet, ARGS.stt)
