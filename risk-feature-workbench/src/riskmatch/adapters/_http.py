@@ -82,6 +82,8 @@ def post_json(config, payload, *, transport=None, api_key=None):
     endpoint = validate_endpoint(config)
     timeout = _bounded_timeout(config)
     retries = _bounded_int(config.get("max_retries"), 1, 0, 2, "max_retries")
+    # Varsayılan 1 MB; embedding adaptörü toplu yanıt için boyut × vektör sayısına göre yükseltir.
+    limit = _bounded_int(config.get("max_response_bytes"), 1_000_000, 1_000, 32_000_000, "max_response_bytes")
     key_name = config.get("api_key_env")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if api_key is not None:
@@ -112,8 +114,8 @@ def post_json(config, payload, *, transport=None, api_key=None):
     for attempt in range(retries + 1):
         try:
             with opener.open(request, timeout=timeout) as response:
-                raw = response.read(1_000_001)
-            if len(raw) > 1_000_000:
+                raw = response.read(limit + 1)
+            if len(raw) > limit:
                 raise IntegrationError("Servis yanıtı boyut sınırını aşıyor.")
             try:
                 return json.loads(raw)
@@ -123,7 +125,9 @@ def post_json(config, payload, *, transport=None, api_key=None):
             if exc.code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(0.2 * (attempt + 1))
                 continue
-            raise IntegrationError(f"Servis HTTP {exc.code} hatası verdi.") from None
+            error = IntegrationError(f"Servis HTTP {exc.code} hatası verdi.")
+            error.status = exc.code
+            raise error from None
         except (urllib.error.URLError, TimeoutError, OSError):
             if attempt < retries:
                 time.sleep(0.2 * (attempt + 1))

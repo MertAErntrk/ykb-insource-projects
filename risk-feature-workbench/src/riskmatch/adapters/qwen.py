@@ -71,6 +71,8 @@ class EmbeddingAdapter:
         self.max_batch = _bounded_int(self.config.get("max_batch"),
                                      1 if self.model_selection == "server_default" else 16,
                                      1, 64, "max_batch")
+        self.rejected_batches = 0
+        self.config["max_response_bytes"] = response_limit(self.max_batch, self.dimensions)
         # Optional asymmetric wrappers (e.g. an instruction prefix on queries only). Default: text as is.
         self.templates = {}
         for kind in ("query", "document"):
@@ -99,22 +101,54 @@ class EmbeddingAdapter:
             texts = [self.templates[kind].replace("{text}", text) for text in texts]
         vectors = []
         for start in range(0, len(texts), self.max_batch):
-            batch = texts[start : start + self.max_batch]
-            payload = render_template(
-                self.config["request_template"],
-                {"texts": batch, "model": self.model, "model_version": self.model_version},
-            )
-            response = post_json(self.config, payload, transport=self.transport,api_key=self.api_key)
-            output = response_path(response, self.config["response_path"])
-            if not isinstance(output, list) or len(output) != len(batch):
-                raise IntegrationError("Embedding yanıtındaki vektör sayısı istekle uyuşmuyor.")
-            for vector in output:
-                if (not isinstance(vector, list) or len(vector) != self.dimensions
-                        or any(isinstance(x, bool) or not isinstance(x, (int, float))
-                               or not math.isfinite(x) for x in vector)):
-                    raise IntegrationError("Embedding yanıtının boyutu veya sayısal değerleri geçersiz.")
-                vectors.append([float(x) for x in vector])
+            vectors.extend(self._embed_batch(texts[start : start + self.max_batch]))
         return vectors
+
+    def _embed_batch(self, batch):
+        try:
+            return self._post(batch)
+        except IntegrationError as error:
+            if len(batch) == 1 or not (getattr(error, "batch_rejected", False)
+                                       or getattr(error, "status", None) in BATCH_REJECTED_STATUSES):
+                raise
+        # Sunucu bu toplu isteği reddetti (boyut/sözleşme): aynı metinler tek tek gider.
+        # Üç kez tekrarlanırsa sonraki istekler de tek metinlik olur; indeks yarıda kalmaz.
+        self.rejected_batches += 1
+        if self.rejected_batches >= 3:
+            self.max_batch = 1
+        return [vector for text in batch for vector in self._post([text])]
+
+    def _post(self, batch):
+        payload = render_template(
+            self.config["request_template"],
+            {"texts": batch, "model": self.model, "model_version": self.model_version},
+        )
+        response = post_json(self.config, payload, transport=self.transport,api_key=self.api_key)
+        output = response_path(response, self.config["response_path"])
+        if not isinstance(output, list) or len(output) != len(batch):
+            error = IntegrationError("Embedding yanıtındaki vektör sayısı istekle uyuşmuyor.")
+            error.batch_rejected = True
+            raise error
+        vectors = []
+        for vector in output:
+            if (not isinstance(vector, list) or len(vector) != self.dimensions
+                    or any(isinstance(x, bool) or not isinstance(x, (int, float))
+                           or not math.isfinite(x) for x in vector)):
+                raise IntegrationError("Embedding yanıtının boyutu veya sayısal değerleri geçersiz.")
+            vectors.append([float(x) for x in vector])
+        return vectors
+
+
+def response_limit(batch, dimensions):
+    """JSON yanıt üst sınırı: sayı başına en çok ~32 bayt (ör. -1.2345678901234567e-05,).
+
+    4096 boyutlu 16 vektör ~1,4 MB tutar; sabit 1 MB sınırı toplu isteği engellerdi.
+    """
+    return max(1_000_000, batch * (dimensions * 32 + 256) + 65_536)
+
+
+# Toplu isteğin boyutu ya da biçimi reddedildiğinde dönen kodlar; kimlik, yetki ve sunucu hataları bölünmez.
+BATCH_REJECTED_STATUSES = {400, 413, 422}
 
 
 class LLMAdapter:

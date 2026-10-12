@@ -1,4 +1,5 @@
 """Connection diagnostics with controlled HTTP outcomes, never institution calls."""
+import hashlib
 import io
 import json
 import socket
@@ -24,9 +25,21 @@ class Opener:
                            "headers": dict(request.header_items()),
                            "body": json.loads(request.data) if request.data else None})
         value = self.routes[(request.get_method(), request.full_url)]
+        if callable(value):
+            value = value(self.calls[-1]["body"])
         if isinstance(value, BaseException):
             raise value
         return Response(value if isinstance(value, bytes) else json.dumps(value).encode("utf-8"))
+
+
+def text_vector(text):
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return [byte / 255 - .5 for byte in digest[:8]]
+
+
+def openai_vectors(body, order=lambda rows: rows, model=None, repeat=1):
+    rows = [{"embedding": text_vector(text) * repeat} for text in body["input"]]
+    return {"data": order(rows), **({"model": model} if model else {})}
 
 
 def http_error(code):
@@ -231,8 +244,9 @@ class ModelDiagnosticsTests(unittest.TestCase):
                     ("POST", "https://embed.invalid/v1/embeddings"): body,
                 })
                 self.assertTrue(report["ok"], report)
-                self.assertEqual(calls[-1]["body"], {"input": ["Connection validation"]})
-                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[2]["body"], {"input": ["Connection validation"]})
+                self.assertEqual([len(call["body"]["input"]) for call in calls[3:]], [16, 4])
+                self.assertEqual(len(calls), 5)
                 settings = report["settings"]
                 self.assertEqual(settings["model_selection"], "server_default")
                 self.assertEqual(settings["model"], "")
@@ -243,7 +257,64 @@ class ModelDiagnosticsTests(unittest.TestCase):
                 self.assertEqual(settings["request_template"], {"input": "{texts}"})
                 self.assertNotIn("models_endpoint", settings)
                 self.assertIn("varsayılan embedding", report["message"])
+                self.assertIn("tek metinlik", report["message"])
+                batch = [step for step in report["checks"] if "toplu istek" in step["name"]]
+                self.assertEqual([step["status"] for step in batch], ["unsupported", "unsupported"])
                 self.assertNotIn("deployment:", json.dumps(settings))
+
+    def test_server_default_verifies_batch_order_and_sends_16_texts(self):
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid"}}, "embedding", {
+            ("GET", "https://embed.invalid/v1/models"): http_error(404),
+            ("GET", "https://embed.invalid/info"): http_error(404),
+            ("POST", "https://embed.invalid/v1/embeddings"): openai_vectors,
+        })
+        self.assertTrue(report["ok"], report)
+        self.assertEqual((report["settings"]["model_selection"], report["settings"]["max_batch"]), ("server_default", 16))
+        self.assertIn("16 metinlik", report["message"])
+        batch = calls[3]["body"]["input"]
+        self.assertEqual((len(batch), batch[8]), (16, "Connection validation"))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual([step["status"] for step in report["checks"] if "toplu istek" in step["name"]], ["passed"])
+
+    def test_server_default_batch_accepts_large_4096_dimension_response(self):
+        # Kurum servisi: 4096 boyut; 16 vektörlük yanıt 1 MB'ı aşar.
+        def large(body):
+            return openai_vectors(body, repeat=512)
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid", "model_selection": "server_default"}},
+                                        "embedding", {("POST", "https://embed.invalid/v1/embeddings"): large})
+        self.assertTrue(report["ok"], report)
+        self.assertGreater(len(json.dumps(large({"input": ["x"] * 16}))), 1_000_000)
+        self.assertEqual((report["settings"]["dimensions"], report["settings"]["max_batch"]), (4096, 16))
+
+    def test_server_default_batch_steps_down_when_16_is_rejected(self):
+        def limited(body):
+            return http_error(413) if len(body["input"]) > 4 else openai_vectors(body)
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid", "model_selection": "server_default"}},
+                                        "embedding", {("POST", "https://embed.invalid/v1/embeddings"): limited})
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["settings"]["max_batch"], 4)
+        steps = [(step["status"], step["code"]) for step in report["checks"] if "toplu istek" in step["name"]]
+        self.assertEqual(steps, [("unsupported", "HTTP_413"), ("passed", "OK")])
+
+    def test_server_default_batch_with_wrong_order_stays_single(self):
+        def reversed_batches(body):
+            return openai_vectors(body, order=lambda rows: rows[::-1])
+        report, _ = self.run_report({"embedding": {"base_url": "https://embed.invalid", "model_selection": "server_default"}},
+                                    "embedding", {("POST", "https://embed.invalid/v1/embeddings"): reversed_batches})
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["settings"]["max_batch"], 1)
+        self.assertEqual({step["code"] for step in report["checks"] if "toplu istek" in step["name"]}, {"BATCH_ORDER"})
+        self.assertIn("tek metinlik", report["message"])
+
+    def test_server_default_reports_response_model_name_without_using_it(self):
+        def named(body):
+            return openai_vectors(body, model="qwen3-embedding")
+        report, calls = self.run_report({"embedding": {"base_url": "https://embed.invalid", "model_selection": "server_default"}},
+                                        "embedding", {("POST", "https://embed.invalid/v1/embeddings"): named})
+        self.assertTrue(report["ok"], report)
+        self.assertIn("qwen3-embedding", report["message"])
+        self.assertEqual((report["settings"]["model"], report["settings"]["model_selection"]), ("", "server_default"))
+        self.assertTrue(all("model" not in call["body"] for call in calls))
 
     def test_server_default_explicit_retest_goes_directly_to_inference(self):
         raw = {"embedding": {"base_url": "https://embed.invalid", "endpoint": "https://embed.invalid/v1/embeddings",
@@ -251,7 +322,8 @@ class ModelDiagnosticsTests(unittest.TestCase):
                               "request_template": {"input": "{texts}"}, "response_path": "$", "dimensions": 3}}
         report, calls = self.run_report(raw, "embedding", {("POST", "https://embed.invalid/v1/embeddings"): [[.1, .2, .3]]})
         self.assertTrue(report["ok"], report)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call["method"] == "POST" for call in calls))
         self.assertEqual(calls[0]["body"], {"input": ["Connection validation"]})
         self.assertEqual(report["settings"]["model_selection"], "server_default")
 
@@ -262,7 +334,7 @@ class ModelDiagnosticsTests(unittest.TestCase):
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["settings"]["response_path"], "data[*].embedding")
         self.assertEqual(report["settings"]["model_selection"], "server_default")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 3)
 
     def test_server_default_custom_template_and_response_path_are_preserved(self):
         raw = {"embedding": {"endpoint": "https://embed.invalid/custom", "model_selection": "server_default",
@@ -353,7 +425,7 @@ class ModelDiagnosticsTests(unittest.TestCase):
             ("POST", "https://embed.invalid/v1/embeddings"): [[.3, .6]],
         })
         self.assertTrue(report["ok"], report)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 3)
 
     def test_tei_route_fallback_does_not_replace_explicit_custom_contract(self):
         raw = {"embedding": {"base_url": "https://embed.invalid", "request_template": {"sentences": "{texts}"},
@@ -426,9 +498,10 @@ class ModelDiagnosticsTests(unittest.TestCase):
         self.assertEqual([step["status"] for step in discovery], ["unsupported", "unsupported"])
         self.assertEqual([step["code"] for step in discovery], ["HTTP_404", "HTTP_405"])
         self.assertTrue(all("isteğe bağlı" in step["message"] and step["elapsed_ms"] >= 0 for step in discovery))
-        self.assertEqual(report["checks"][-1]["status"], "passed")
+        inference = [step for step in report["checks"] if "gerçek deneme" in step["name"]]
+        self.assertEqual([step["status"] for step in inference], ["passed"])
         self.assertEqual(report["settings"]["dimensions"], 4096)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
 
     def test_failed_inference_does_not_soften_discovery_or_final_post_errors(self):
         for result, expected in [(http_error(404), "HTTP_404"), (http_error(401), "HTTP_401"),

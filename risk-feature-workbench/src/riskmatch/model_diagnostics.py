@@ -17,13 +17,15 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .adapters._http import _NoRedirect, response_path, validate_endpoint
-from .adapters.qwen import EmbeddingAdapter, LLMAdapter, _has_placeholder
+from .adapters.qwen import EmbeddingAdapter, LLMAdapter, _has_placeholder, response_limit
 from .deployment import EMBEDDING_BASE_URL, LLM_BASE_URL
 from .errors import ConfigError, IntegrationError
 
 MAX_RESPONSE = 1_000_000
 TOTAL_SECONDS = 55
 FALLBACK_CODES = {"HTTP_404", "HTTP_405", "MODEL_LIST_FORMAT"}
+# Sunucu varsayılanında toplu istek gerçek bir çağrıyla denenir; ilk geçen boyut kullanılır.
+BATCH_SIZES = (16, 4)
 
 
 class _Failure(Exception):
@@ -108,6 +110,7 @@ class _Client:
     def __init__(self, base, key, ca_file):
         self.base = base
         self.key = key
+        self.max_response = MAX_RESPONSE
         self.deadline = time.monotonic() + TOTAL_SECONDS
         try:
             context = ssl.create_default_context(cafile=ca_file or None)
@@ -128,9 +131,9 @@ class _Client:
                 status = getattr(response, "status", 200)
                 if not 200 <= status < 300:
                     raise urllib.error.HTTPError(request.full_url, status, "", {}, None)
-                body = response.read(MAX_RESPONSE + 1)
-            if len(body) > MAX_RESPONSE:
-                raise _Failure("RESPONSE_TOO_LARGE", "Servis yanıtı 1 MB sınırını aştı.")
+                body = response.read(self.max_response + 1)
+            if len(body) > self.max_response:
+                raise _Failure("RESPONSE_TOO_LARGE", "Servis yanıtı boyut sınırını aştı (%d bayt)." % self.max_response)
             return io.BytesIO(body)
         except Exception as error:
             raise _safe_failure(error) from None
@@ -233,7 +236,7 @@ def _llm_probe(client, config):
                        "column_comment": "Connection validation"}])
 
 
-def _embedding_probe(client, config):
+def _embedding_probe(client, config, seen=None):
     # Discover dimension from one real vector, then validate it through the same
     # adapter used by analyses, without issuing a second inference request.
     from .adapters._http import post_json, render_template
@@ -270,7 +273,60 @@ def _embedding_probe(client, config):
             return io.BytesIO(json.dumps(body, allow_nan=False).encode("utf-8"))
 
     EmbeddingAdapter({**config, "dimensions": dimensions}, transport=CapturedResponse(), api_key=client.key).embed(["Connection validation"])
+    if seen is not None:
+        seen["vector"] = vectors[0]
+        reported = body.get("model") if isinstance(body, dict) else None
+        seen["model"] = (reported.strip() if isinstance(reported, str) and reported.isprintable()
+                         and 0 < len(reported.strip()) <= 200 else "")
     return dimensions
+
+
+def _cosine(left, right):
+    dot = sum(a * b for a, b in zip(left, right))
+    norm = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    return dot / norm if norm else 0.0
+
+
+def _batch_probe(client, report, config, reference):
+    """Return the largest verified batch size for a server-default embedding route.
+
+    The known text is placed in the middle of the batch; its vector must come
+    back at the same position and match the single-request vector. Any error,
+    count mismatch or order doubt keeps that size unused; nothing is guessed.
+    """
+    if not reference:
+        return 1
+    path = urlsplit(config["endpoint"]).path
+    for size in BATCH_SIZES:
+        name = "POST %s · toplu istek denemesi (%d metin)" % (path, size)
+        start = time.monotonic()
+        try:
+            texts = ["Batch validation %02d" % index for index in range(size)]
+            middle = size // 2
+            texts[middle] = "Connection validation"
+            adapter = EmbeddingAdapter({**config, "max_batch": size}, transport=client, api_key=client.key)
+            # Toplu yanıt büyüktür (4096 boyut × 16 ≈ 1,4 MB); sınır analizdeki adaptörle aynı.
+            client.max_response = response_limit(size, len(reference))
+            try:
+                # _post: geri dönüşsüz tek istek; reddedilirse tek tek gönderime düşülmez, boyut elenir.
+                vectors = adapter._post(texts)
+            finally:
+                client.max_response = MAX_RESPONSE
+            scores = [_cosine(vector, reference) for vector in vectors]
+            others = max(score for index, score in enumerate(scores) if index != middle)
+            if scores[middle] < 0.98 or scores[middle] - others < 0.005:
+                raise _Failure("BATCH_ORDER", "Toplu yanıttaki vektörlerin sırası doğrulanamadı.")
+        except Exception as error:
+            failure = _safe_failure(error)
+            report.checks.append({"name": name, "status": "unsupported", "code": failure.code,
+                                  "elapsed_ms": round((time.monotonic() - start) * 1000),
+                                  "message": failure.message + " Bu boyutta toplu gönderim kullanılmayacak."})
+            continue
+        report.checks.append({"name": name, "status": "passed", "code": "OK",
+                              "elapsed_ms": round((time.monotonic() - start) * 1000),
+                              "message": "%d vektör doğru sırayla döndü." % size})
+        return size
+    return 1
 
 
 def _tei(client, report, base, raw, endpoint, model):
@@ -405,12 +461,13 @@ def discover_model(raw, name):
                 raise _Failure("INVALID_DIMENSIONS", "Embedding boyutu 1–8192 arasında tam sayı olmalı.")
             config["dimensions"] = dimensions
 
+        seen = {}
         label = "POST " + urlsplit(config["endpoint"]).path + " · gerçek deneme ve yanıt doğrulama"
         if name == "llm":
             report.run(label, lambda: _llm_probe(client, config))
         else:
             try:
-                config["dimensions"] = report.run(label, lambda: _embedding_probe(client, config))
+                config["dimensions"] = report.run(label, lambda: _embedding_probe(client, config, seen))
             except _Failure as failure:
                 if (explicit_endpoint or config.get("model_selection") == "server_default"
                         or failure.code not in {"HTTP_404", "HTTP_405"} or config.get("response_path") == "$"):
@@ -419,8 +476,10 @@ def discover_model(raw, name):
                 for setting in ("request_template", "response_path", "dimensions"):
                     if value.get(setting):
                         config[setting] = value[setting]
-                config["dimensions"] = report.run("POST " + urlsplit(config["endpoint"]).path + " · gerçek deneme ve yanıt doğrulama", lambda: _embedding_probe(client, config))
+                config["dimensions"] = report.run("POST " + urlsplit(config["endpoint"]).path + " · gerçek deneme ve yanıt doğrulama", lambda: _embedding_probe(client, config, seen))
 
+        if name == "embedding" and config.get("model_selection") == "server_default":
+            config["max_batch"] = _batch_probe(client, report, config, seen.get("vector"))
         allowed = {"base_url", "endpoint", "model", "model_version", "model_selection", "max_batch", "contract", "request_template", "response_path", "dimensions", "ca_file"}
         settings = {k: v for k, v in config.items() if k in allowed}
         if models_endpoint_verified:
@@ -428,7 +487,14 @@ def discover_model(raw, name):
         message = ("LLM gerçek çağrısı ve JSON yanıt sözleşmesi doğrulandı." if name == "llm"
                    else "Embedding gerçek çağrısı doğrulandı; vektör boyutu yanıttan okundu.")
         if settings.get("model_selection") == "server_default":
-            message += " Sunucunun varsayılan embedding modeli kullanılıyor; servis model kimliği ve sürümü bildirmiyor. İstekler tek metinlik gruplarla gönderilecek."
+            message += " Sunucunun varsayılan embedding modeli kullanılıyor; servis model kimliği ve sürümü bildirmiyor."
+            if settings.get("max_batch", 1) > 1:
+                message += " Toplu istek doğrulandı; istekler %d metinlik gruplarla gönderilecek." % settings["max_batch"]
+            else:
+                message += (" Sunucu toplu isteği doğrulatmadı; istekler tek metinlik gruplarla gönderilecek."
+                            " Büyük katalogda indeks yavaş olur; servis ekibinden toplu istek desteğini veya model kimliğini isteyin.")
+            if seen.get("model"):
+                message += " Yanıtta geçen model adı: %s (model listesiyle doğrulanmadığı için kimlik olarak kullanılmadı)." % seen["model"]
         elif settings["model_version"].startswith("deployment:"):
             message += " Servis model sürümü bildirmedi; deployment etiketi yalnız dağıtım kimliğidir. Model değişirse yeniden doğrulayın."
         report.explain_optional_discovery()

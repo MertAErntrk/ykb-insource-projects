@@ -151,6 +151,8 @@ Tam paket 486/486. Ölçüm değişmedi (hash embedding, sentetik): 273 satırda
 - Panel tüm katalog belgelerini sayar (`a / b belge`, tablo + kolon), katalog okunurken "Hazırlanıyor" gösterir, çalışırken tahmini kalan süreyi yazar. Kapının beklediği indeksleyici panelde görünür; yeniden bağlanılmışsa yeni bağlantının indeksine dokunulmaz.
 - İndeksleyici adaptörün `max_batch` değeriyle toplu gönderir (açık model 16; servis varsayılanı 1). Sahte servisle 3.164 belge: 3.164 yerine 210 istek. Aynı çalışma klasörüyle yeniden açılışta 0 belge yeniden embed edildi.
 - Bekleme metni bir dakikanın altında saniye yazar. `evaluate.py` web moduyla aynı kapsamı (DM_CAD, DM, EDW) ve tam indeks koşulunu kullanır; `-Schemas` isteğe bağlı.
+- Servis varsayılanı kipinde bağlantı testi toplu isteği dener (16, olmazsa 4): vektör sayısı ve sırası (ortadaki bilinen metin) doğrulanırsa o boyut kullanılır. Analizde toplu istek reddedilirse (400/413/422 ya da eksik vektör) metinler tek tek gönderilir; üç redden sonra tek metne düşülür. Yanıt sınırı vektör boyutuna göre büyür (varsayılan 1 MB; 4096 boyut × 16 ≈ 1,4 MB).
+- İş bilgisayarı ölçümü (kullanıcı çıktısı, 4096 boyut): toplu istek 32'ye kadar sıralı; tek metin 8,5 metin/sn, 16'lı toplu 38,6 metin/sn. Tanılama: `scripts/embedding_teshis.py`.
 - Rehber: [IS_PC_KURULUM_AYARLARI.md](IS_PC_KURULUM_AYARLARI.md). Tam paket 493/493; ölçüm değişmedi (0.982 / 0.974 / 0/54; 0.976 / 0.983 / 0/10). Tarayıcıda görsel kontrol yapılmadı.
 
 ## Kurum ortamında doğrulanmamış olanlar

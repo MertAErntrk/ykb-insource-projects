@@ -141,6 +141,52 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             adapter.embed(["x"], kind="other")
 
+    def test_embedding_rejected_batch_falls_back_to_single_texts(self):
+        class Rejecting(Transport):
+            def __init__(self, code):
+                super().__init__()
+                self.code = code
+
+            def open(self, request, timeout):
+                texts = json.loads(request.data)["inputs"]
+                self.requests.append(len(texts))
+                if len(texts) > 1 and self.code:
+                    raise urllib.error.HTTPError(request.full_url, self.code, "rejected", {}, None)
+                # Kod yoksa sunucu listeyi yok sayıp tek vektör döner: sayı uyuşmazlığı.
+                return Response({"vectors": [{"values": [len(texts[0]), 1]}]})
+
+        for code in (413, 422, 400, None):
+            with self.subTest(code=code):
+                transport = Rejecting(code)
+                adapter = EmbeddingAdapter({**EMBED, "max_batch": 2}, transport=transport)
+                self.assertEqual(adapter.embed(["a", "bb", "ccc"]), [[1.0, 1.0], [2.0, 1.0], [3.0, 1.0]])
+                self.assertEqual(transport.requests, [2, 1, 1, 1])
+                adapter.embed(["a", "bb"])
+                adapter.embed(["a", "bb"])
+                # Üç redden sonra toplu istek bırakılır; indeks yarıda kalmaz.
+                self.assertEqual(adapter.max_batch, 1)
+                transport.requests.clear()
+                adapter.embed(["a", "bb"])
+                self.assertEqual(transport.requests, [1, 1])
+
+    def test_embedding_batch_response_over_1_mb_is_accepted_for_large_vectors(self):
+        value = 0.012345678901234567
+        body = {"vectors": [{"values": [value] * 4096} for _ in range(16)]}
+        self.assertGreater(len(json.dumps(body)), 1_000_000)
+        adapter = EmbeddingAdapter({**EMBED, "dimensions": 4096, "max_batch": 16}, transport=Transport(body))
+        self.assertEqual(len(adapter.embed(["x"] * 16)), 16)
+        # Sınır yalnız yapılandırılan boyuta göre büyür; LLM ve diğer çağrılar 1 MB'ta kalır.
+        self.assertLess(adapter.config["max_response_bytes"], 3_000_000)
+        self.assertEqual(EmbeddingAdapter(EMBED, transport=Transport(body)).config["max_response_bytes"], 1_000_000)
+
+    def test_embedding_auth_or_server_error_is_not_split(self):
+        for code in (401, 403, 500):
+            with self.subTest(code=code):
+                transport = Transport(error=urllib.error.HTTPError("https://x", code, "no", {}, None))
+                with self.assertRaises(IntegrationError):
+                    EmbeddingAdapter({**EMBED, "max_batch": 2}, transport=transport).embed(["a", "bb"])
+                self.assertEqual(len(transport.requests), 1)
+
     def test_embedding_rejects_bad_shape_and_timeout(self):
         with self.assertRaises(IntegrationError):
             EmbeddingAdapter(EMBED, transport=Transport({"vectors": [{"values": [1]}]})).embed(["x"])

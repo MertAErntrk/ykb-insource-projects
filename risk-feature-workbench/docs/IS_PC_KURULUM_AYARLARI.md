@@ -90,7 +90,27 @@ Bağlantılar sayfasında **Temel servis adresi** alanını değiştirip test ed
 - Her bilgisayar kendi indeksini bir kez kurar.
 - **Embedding adresi değişip model aynı kalırsa** indeks korunur. Uygulama modeli adresten değil, sabit deneme metinlerinin vektöründen tanır.
 - **Embedding modeli değişirse** indeks bir kez baştan kurulur. Bu beklenen bir durumdur.
-- İndekslemede belgeler embedding servisine toplu gönderilir: bir istekte 16 metin. Servis model listesi vermiyorsa ve **Model kimliği** boşsa istek başına 1 metin gider; bu çok daha yavaştır. Büyük katalogda servis ekibinin bildirdiği model kimliğini girip testi tekrarlayın.
+- İndekslemede belgeler embedding servisine toplu gönderilir: bir istekte 16 metin.
+- Servis model listesi vermiyorsa uygulama "sunucu varsayılanı" kipine geçer. Bu kipte bağlantı testi toplu isteği ayrıca dener: 16 metin gönderir ve vektörlerin sayısını ve sırasını doğrular.
+  - Deneme geçerse mesajda "Toplu istek doğrulandı; istekler 16 metinlik gruplarla gönderilecek" yazar.
+  - 16 reddedilirse 4 denenir. O da geçmezse istekler tek metinlik gider ve mesaj bunu söyler.
+- 4096 boyutlu modelde 16 vektörlük yanıt yaklaşık 1,4 MB tutar; uygulama yanıt sınırını vektör boyutuna göre ayarlar, ayar gerekmez.
+- Toplu istek analiz sırasında reddedilirse metinler tek tek yeniden gönderilir; indeks yarıda kalmaz.
+- Daha önce tek tek embed edilen kısım korunur; indeks kaldığı yerden toplu gönderimle sürer.
+
+## 6a. Embedding yavaşsa: tanılama betiği
+Betik uygulamanın kendi bağlantı testini çalıştırır, model kimliğinin okunabileceği adresleri dener (`/v1/models`, `/models`, `/info`, `/health`, `/version`, `/openapi.json`) ve tek metinlik ile toplu istek hızını ölçer. Yalnız sabit deneme metinleri gönderir; API anahtarını yazdırmaz.
+
+```powershell
+.venv\Scripts\python.exe scripts\embedding_teshis.py --belge 150000
+```
+
+- `--belge`: indeks panelindeki toplam belge sayısı (`a / b belge`'deki `b`). Betik bu sayıya göre tahmini indeks süresini yazar.
+- `--ca C:\sertifikalar\kurum-ca.pem`: TLS hatası alırsanız ekleyin.
+- `--model <kimlik>`: servis ekibinin bildirdiği model kimliğini dener.
+- API anahtarı gerekiyorsa `--anahtar-sor` ekleyin; anahtar gizli olarak sorulur.
+
+Çıktının sonunda "Ne yapmalı" bölümü bir sonraki adımı söyler.
 
 ## 7. Sorun giderme
 
