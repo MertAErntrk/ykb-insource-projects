@@ -412,7 +412,8 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None, scan_
                 result=run(space["path"],root/identity/"sonuclar.xlsx",mode="real",config_data=config,
                            credentials=credentials,column_mapping=deepcopy(mapping),state_dir=root/identity/"state",progress=progress,
                            result_callback=store,cancelled=job["cancel_event"].is_set,row_ids=group,
-                           resources=resources,write_report=False,index_epoch=identity,require_full_index=full_index)
+                           resources=resources,write_report=False,index_epoch=identity,require_full_index=full_index,
+                           index_listener=lambda indexer:adopt_indexer(job["owner"],job["hold"],indexer))
                 for row in result.get("results",[]):store(row)
                 offset[0]+=len(group)
                 merge(result.get("run_info"))
@@ -517,6 +518,19 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None, scan_
                              name="riskmatch-index-wait",daemon=True).start()
         else:executor.submit(worker,identity,config,credentials,groups)
         return jsonify(id=identity,upload_id=space["id"]),202
+
+    def adopt_indexer(owner,hold,indexer):
+        # Kapının beklediği indeksleyici panelde görünür; aynı belgeleri ikinci kez embed eden eskisi durur.
+        # Yalnız işin başladığı bağlantı hâlâ geçerliyse: yeniden bağlanılmışsa yeni bağlantının indeksine dokunulmaz.
+        with guard:
+            current=connections.get(owner)
+            if current is None or current is not hold:return
+            previous=current.get("indexer")
+            current["indexer"]=indexer
+        if previous is not None and previous is not indexer:
+            # Beklemeden: tek analiz işçisi eski indeksleyicinin süren isteğine takılmasın.
+            try:previous.stop(wait=False)
+            except Exception:pass
 
     def uses_full_index(config):
         return bool(config.get("use_models") and "embedding" in config)
@@ -637,16 +651,29 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None, scan_
         if not isinstance(models,dict) or not models.get("use_models") or not isinstance(models.get("embedding"),dict):
             raise InputError("İndeks için embedding servisini açın ve ayarlayın.")
         config,credentials,resources,adapter,key=index_inputs(data)
+        owner=session["owner"]
+        def preparing(stage):
+            with guard:
+                current=connections.get(owner)
+                if current is not None:current["index_preparing"]={"stage":stage}
+        def catalog_progress(value):
+            records=(value or {}).get("records")
+            preparing("Oracle kataloğu okunuyor"+(" · "+format(records,",").replace(",",".")+" kolon" if isinstance(records,int) else ""))
         try:
             if "embedding" not in config:raise InputError("İndeks için embedding servisini açın ve ayarlayın.")
             from .adapters.qwen import EmbeddingAdapter
-            snapshot,_=resources.catalog(adapter,key)
+            preparing("Oracle kataloğu okunuyor")
+            snapshot,_=resources.catalog(adapter,key,progress=catalog_progress)
+            preparing("Embedding servisi hazırlanıyor")
             context=resources.embedding(EmbeddingAdapter(config["embedding"],api_key=credentials.get("embedding","")))
             from .config import load_config
             from .pipeline import index_settings
             indexer=resources.indexer(snapshot,context,index_settings(load_config(None,"real",data=config)))
         finally:
             credentials["oracle"].clear()
+            with guard:
+                current=connections.get(owner)
+                if current is not None:current.pop("index_preparing",None)
         with guard:
             current=connections.get(session["owner"])
             previous=current.pop("indexer",None) if current else None
@@ -663,25 +690,30 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None, scan_
 
     def index_snapshot(indexer):
         value=dict(indexer.status())
-        # Coverage of the whole catalog in the store, not just of this indexer run's missing list.
-        try:value["index_coverage"]=round(indexer.index.stored_coverage(),4)
-        except Exception:value["index_coverage"]=None
-        value["complete"]=index_complete(indexer,value)
-        return value
-
-    def index_complete(indexer,value):
-        # Kapıyla aynı ölçüt: tablo ve kolon belgelerinin hepsi depoda.
-        if value.get("state")!="done":return False
+        # Kapsam bu koşunun listesi değil, kataloğun tamamıdır (tablo + kolon belgesi); kapıyla aynı ölçüt.
+        counts=None
         if hasattr(indexer.index,"queue_counts"):
-            try:return indexer.index.queue_counts()[0]==0
-            except Exception:return False
-        return (value.get("index_coverage") or 0)>=1.0
+            try:counts=indexer.index.queue_counts()
+            except Exception:counts=None
+        if counts is not None:
+            missing,total=counts
+            value.update(documents_total=total,documents_stored=total-missing,
+                         index_coverage=round((total-missing)/total,4) if total else 0.0)
+            value["complete"]=value.get("state")=="done" and missing==0
+        else:
+            try:value["index_coverage"]=round(indexer.index.stored_coverage(),4)
+            except Exception:value["index_coverage"]=None
+            value["complete"]=value.get("state")=="done" and (value["index_coverage"] or 0)>=1.0
+        return value
 
     @app.get("/api/index/status")
     def index_status():
         with guard:
             current=connections.get(session.get("owner"))
             indexer=current.get("indexer") if current else None
+            preparing=dict(current["index_preparing"]) if current and current.get("index_preparing") else None
+        if preparing is not None and (indexer is None or indexer.status().get("state")!="running"):
+            return jsonify(state="preparing",message=preparing["stage"])
         return jsonify(index_snapshot(indexer) if indexer is not None else {"state":"idle"})
 
     @app.post("/api/index/stop")

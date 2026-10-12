@@ -2,7 +2,9 @@
 
 Sentetik mod (--fixture): tests/benchmark_fixture katalogu, in-process sahte Oracle ve embedding servisi.
   Sentetik sonuc gercek dogruluk kaniti degildir.
-Gercek mod (web-esdeger, varsayilan): --schemas DM_CAD --excel etiketli.xlsx [--llm] [--no-embedding]
+Gercek mod (web-esdeger, varsayilan): --excel etiketli.xlsx [--llm] [--no-embedding] [--schemas DM_CAD]
+  Semalar web ile ayni: DM_CAD -> DM -> EDW (erisilemeyen atlanir); --schemas yalniz bilincli daraltma icindir.
+  Embedding aciksa indeks once tamamlanir (web'deki gibi); --no-build-index ile kapatilir.
   Web uygulamasiyla AYNI ayarlar: deployment.login_settings + probe_oracle (container, erisilebilir semalar),
   discover_model ile EMBEDDING_BASE_URL / LLM_BASE_URL kesfi, web_services.build_run; arama modu web varsayilani.
   Kimlik: RISK_ORACLE_USER, RISK_ORACLE_PASSWORD, (varsa) RISK_EMBEDDING_API_KEY, RISK_LLM_API_KEY ortamdan.
@@ -17,7 +19,7 @@ Ciktilar: rapor.md/json, iskalar.md + satirlar.json (satir bazli teshis), katalo
 Hepsi yalniz metadata (ad, aciklama, katalog yorumu, sayilar) icerir.
 
   PYTHONPATH=src;tests python scripts/evaluate.py --fixture --out runtime/olcum
-  PYTHONPATH=src python scripts/evaluate.py --schemas DM_CAD --excel x.xlsx --resources-dir runtime/web --build-index
+  PYTHONPATH=src python scripts/evaluate.py --excel x.xlsx --resources-dir runtime/web
   PYTHONPATH=src python scripts/evaluate.py --config config/real.json --excel x.xlsx --label-column "Beklenen kolon" --probe
 """
 import argparse
@@ -274,7 +276,11 @@ def web_settings(args):
     if missing:
         raise UserError("Şu ortam değişkenleri tanımlı değil: " + ", ".join(missing)
                         + ". Değerleri bu araca yazmayın; is_pc_dogrulama.ps1 yalnız bu süreç için sorar.")
-    wanted = parse_schemas(args.schemas)
+    from riskmatch.config import DEFAULT_SCHEMA_TIERS
+    # Web ile aynı sabit kapsam; --schemas verilirse bilinçli daraltma sayılır ve eksik şema hatadır.
+    explicit = bool(args.schemas)
+    wanted = (parse_schemas(args.schemas) if explicit
+              else [name for tier in DEFAULT_SCHEMA_TIERS for name in tier.get("schemas") or ()])
     if not 1 <= len(wanted) <= 30:
         raise UserError("--schemas ile 1–30 şema verin (ör. DM_CAD).")
     raw = deployment.login_settings(values["user"], values["password"])
@@ -287,6 +293,12 @@ def web_settings(args):
         raise UserError("Oracle bağlantısı kurulamadı: " + safe_message(probe.get("error") or probe.get("warning") or "-"))
     available = {str(s).upper(): str(s) for s in probe.get("schemas") or []}
     unknown = [s for s in wanted if s not in available]
+    if unknown and not explicit and len(unknown) < len(wanted):
+        # Web gibi: erişilemeyen katman atlanır, o katmana inen satırlar "karar verilemedi" olur.
+        print("Uyarı: %s bu kullanıcıyla erişilebilir listede yok; bu katmanda arama yapılmaz." % ", ".join(unknown),
+              file=sys.stderr)
+        wanted = [s for s in wanted if s in available]
+        unknown = []
     if unknown:
         # The user's own schema carries the login name; it is never listed.
         listed = sorted(v for v in available.values() if v.casefold() != values["user"].casefold())
@@ -778,7 +790,7 @@ def parse_args(argv):
     p.add_argument("--config", help="config/real.json (gerçek mod, eski yol)")
     p.add_argument("--web-ayarlari", dest="web", action="store_true",
                    help="web uygulamasıyla aynı bağlantı/model ayarları (--fixture ve --config yoksa varsayılan)")
-    p.add_argument("--schemas", help="taranacak şemalar, ör. DM_CAD,DM_RISK (web-eşdeğer modda zorunlu; --config'i geçersiz kılar)")
+    p.add_argument("--schemas", help="taranacak şemaları daraltır, ör. DM_CAD (varsayılan web ile aynı: DM_CAD, DM, EDW; --config'i geçersiz kılar)")
     p.add_argument("--llm", action="store_true", help="web-eşdeğer: LLM yorumu (LLM_BASE_URL keşfi)")
     p.add_argument("--no-embedding", action="store_true", help="web-eşdeğer: embedding yok, yalnız ad/metin araması")
     p.add_argument("--embedding-model", default="", help="web-eşdeğer: servis birden çok model sunuyorsa web'de seçilen model kimliği")
@@ -808,8 +820,6 @@ def parse_args(argv):
         p.error("--fixture, --config ve --web-ayarlari birlikte verilemez.")
     # Config dosyasi gerektirmeyen web-esdeger mod varsayilan: is bilgisayarinda config/real.json yok.
     args.web = not args.fixture and not args.config
-    if args.web and not args.schemas:
-        p.error("Web-eşdeğer modda --schemas gerekli (ör. --schemas DM_CAD).")
     if not args.web and (args.llm or args.no_embedding or args.embedding_model or args.llm_model):
         p.error("--llm, --no-embedding ve model kimlikleri yalnız web-eşdeğer modda (--config/--fixture olmadan).")
     if args.llm and args.no_embedding:
@@ -825,7 +835,8 @@ def parse_args(argv):
     if args.fixture and args.probe:
         p.error("--probe yalnız gerçek modda.")
     if args.build_index is None:
-        args.build_index = args.fixture
+        # Web model açıkken eşleştirmeyi indeks %100 olana kadar başlatmaz; ölçüm de aynı koşulda yapılır.
+        args.build_index = args.fixture or (args.web and not args.no_embedding)
     return args
 
 

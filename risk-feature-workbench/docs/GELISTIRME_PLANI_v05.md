@@ -147,6 +147,12 @@ Ek olarak sözleşmeye uyum, sıra bağımsızlığı ve eşik dışı sızınt�
 
 Tam paket 486/486. Ölçüm değişmedi (hash embedding, sentetik): 273 satırda Hit@3 0.982, P@3 0.974, öneri 0/54; 51 satırda 0.976 / 0.983 / 0/10.
 
+### Faz 8 ek: indeks paneli ve hız
+- Panel tüm katalog belgelerini sayar (`a / b belge`, tablo + kolon), katalog okunurken "Hazırlanıyor" gösterir, çalışırken tahmini kalan süreyi yazar. Kapının beklediği indeksleyici panelde görünür; yeniden bağlanılmışsa yeni bağlantının indeksine dokunulmaz.
+- İndeksleyici adaptörün `max_batch` değeriyle toplu gönderir (açık model 16; servis varsayılanı 1). Sahte servisle 3.164 belge: 3.164 yerine 210 istek. Aynı çalışma klasörüyle yeniden açılışta 0 belge yeniden embed edildi.
+- Bekleme metni bir dakikanın altında saniye yazar. `evaluate.py` web moduyla aynı kapsamı (DM_CAD, DM, EDW) ve tam indeks koşulunu kullanır; `-Schemas` isteğe bağlı.
+- Rehber: [IS_PC_KURULUM_AYARLARI.md](IS_PC_KURULUM_AYARLARI.md). Tam paket 493/493; ölçüm değişmedi (0.982 / 0.974 / 0/54; 0.976 / 0.983 / 0/10). Tarayıcıda görsel kontrol yapılmadı.
+
 ## Kurum ortamında doğrulanmamış olanlar
 - Gerçek Oracle katalog boyutu ve tarama süresi.
 - Gerçek embedding modelinin kimliği ve kalitesi.

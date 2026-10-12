@@ -5,9 +5,10 @@
 #   Embedding/LLM: web'deki gibi EMBEDDING_BASE_URL / LLM_BASE_URL uzerinden kesfedilir; arama modu web varsayilani.
 #
 # Kullanim (proje kokunden):
-#   powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Schemas DM_CAD -Excel C:\yol\etiketleme.xlsx -BuildIndex
-#   ... -Schemas "DM_CAD,DM_RISK" -Excel C:\yol\etiketleme.xlsx -Rows 100 -GroupSize 25 -Llm
-#   ... -Schemas DM_CAD -Excel C:\yol\etiketleme.xlsx -NoEmbedding     (yalniz ad/metin aramasi)
+#   powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Excel C:\yol\etiketleme.xlsx   (DM_CAD, DM, EDW; once tam indeks)
+#   ... -Excel C:\yol\etiketleme.xlsx -Rows 100 -GroupSize 25 -Llm
+#   ... -Excel C:\yol\etiketleme.xlsx -NoEmbedding     (yalniz ad/metin aramasi)
+#   ... -Schemas DM_CAD -Excel C:\yol\etiketleme.xlsx  (bilincli daraltma)
 #   ... -Llm -LlmModel <kimlik> / -EmbeddingModel <kimlik>  (servis birden cok model sunuyorsa web'de secilen kimlik)
 #   ... -Config config\real.json -Excel C:\yol\etiketli.xlsx             (eski yol: config dosyasi + *_env)
 #
@@ -71,7 +72,6 @@ if ($Llm -and $NoEmbedding) { Stop-Hata "-Llm ve -NoEmbedding birlikte kullanila
 
 $webModu = ($Config -eq "")
 if ($webModu) {
-    if ($Schemas -eq "") { Stop-Hata "-Schemas gerekli (ornek: -Schemas DM_CAD ya da -Schemas ""DM_CAD,DM_RISK"")." }
     if ($Excel -eq "" -and $NoEmbedding) { Stop-Hata "-Excel verilmeden yalniz embedding probe calisir; -NoEmbedding ile anlamsiz." }
     Set-SurecDegiskeni "RISK_ORACLE_USER" "EDWLIVE kullanici adi (yalniz bu surec icin)" $false $false
     Set-SurecDegiskeni "RISK_ORACLE_PASSWORD" "EDWLIVE parolasi (ekranda gorunmez, diske yazilmaz)" $true $false
@@ -109,7 +109,8 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $arguman = @("scripts\evaluate.py", "--out", $out)
 if ($webModu) {
-    $arguman += @("--schemas", $Schemas)
+    # Bos birakilirsa web ile ayni sabit semalar (DM_CAD, DM, EDW) taranir.
+    if ($Schemas -ne "") { $arguman += @("--schemas", $Schemas) }
     if ($Llm) { $arguman += @("--llm") }
     if ($NoEmbedding) { $arguman += @("--no-embedding") }
     if ($EmbeddingModel -ne "") { $arguman += @("--embedding-model", $EmbeddingModel) }

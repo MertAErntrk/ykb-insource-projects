@@ -118,7 +118,7 @@ def _wait_stage(status,documents=0):
     stage="İndeks tamamlanması bekleniyor · %%%d · %s/%s"%(percent,_thousands(stored),_thousands(total))
     eta=status.get("eta_s")
     if eta is not None and status.get("state")=="running":
-        stage+=" · tahmini kalan %d dk"%max(1,round(eta/60))
+        stage+=" · tahmini kalan "+("%d sn"%max(1,round(eta)) if eta<60 else "%d dk"%round(eta/60))
     return stage
 
 def _await_full_index(indexer,notify,check_cancelled,*,max_starts=INDEX_MAX_STARTS,poll=INDEX_POLL_SECONDS):
@@ -192,7 +192,7 @@ def analyze(input_path,output_path,**options):
         if own is not None:
             own.close()
 
-def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None,resume=True,strategy="hybrid",config_data=None,credentials=None,column_mapping=None,progress=None,result_callback=None,cancelled=None,row_ids=None,resources=None,write_report=True,index_epoch=None,require_full_index=False,_collected=None):
+def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None,resume=True,strategy="hybrid",config_data=None,credentials=None,column_mapping=None,progress=None,result_callback=None,cancelled=None,row_ids=None,resources=None,write_report=True,index_epoch=None,require_full_index=False,index_listener=None,_collected=None):
     from .semantics import parse_definition,build_dependencies,assess_production,prepare_production_catalog
     from .retrieval import HybridIndex
     from .ranking import rank,gate_config
@@ -287,7 +287,10 @@ def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=Non
             warnings.append("Embedding servisine ulaşılamadı veya model parmak izi alınamadı; ad ve metin aramasıyla devam edildi.")
         if require_full_index:
             # Web ile aynı anahtar (snapshot sürümü, namespace, index_settings): aynı indeksleyici paylaşılır.
-            _await_full_index(resources.indexer(snapshot,ctx,settings),notify,check_cancelled)
+            indexer=resources.indexer(snapshot,ctx,settings)
+            # Web bu indeksleyiciyi panelde gösterir; kalan süre arama beklerken de görünür.
+            if index_listener is not None:index_listener(indexer)
+            _await_full_index(indexer,notify,check_cancelled)
     reviewed_manifest=None
     if config.get("reviewed_definitions_path"):
         from .reviewed import apply_reviewed

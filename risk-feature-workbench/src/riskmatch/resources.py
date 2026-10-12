@@ -334,7 +334,13 @@ class Resources:
             return existing
         # No refresh: a running job's frozen semantic set must not change under it.
         index = self.index(snapshot, ctx, settings, refresh=False)
-        created = BackgroundIndexer(index, ctx.gate, ctx.namespace)
+        # Adaptörün tek istekte kabul ettiği kadar metin: her belge ayrı istek olursa büyük katalog saatler sürer.
+        # Kapı tek uçuşludur; arama bekleyişi en çok bir istek kadardır.
+        with self._lock:
+            adapter = self._adapters.get(ctx.adapter_identity)
+        batch = getattr(adapter, "max_batch", 1)
+        created = BackgroundIndexer(index, ctx.gate, ctx.namespace,
+                                    batch=batch if isinstance(batch, int) and batch > 0 else 1)
         with self._lock:
             if self._closed:
                 raise RuntimeError("resources are closed")

@@ -379,6 +379,20 @@ class WebEquivalentTests(unittest.TestCase):
                 evaluate.web_settings(args)
         self.assertNotIn(self.PASSWORD, str(caught.exception))
 
+    def test_default_scope_is_web_fixed_tiers_and_skips_invisible(self):
+        args = evaluate.parse_args(["--excel", "x.xlsx", "--out", "o", "--no-embedding"])
+        self.assertEqual((args.web, args.schemas, args.build_index), (True, None, False))
+        self.assertTrue(evaluate.parse_args(["--excel", "x.xlsx", "--out", "o"]).build_index)
+        env = {"RISK_ORACLE_USER": self.USER, "RISK_ORACLE_PASSWORD": self.PASSWORD}
+        with patch.dict(os.environ, env), patch("riskmatch.web_services.probe_oracle", return_value={
+                "ok": True, "container": "CDB1", "schemas": ["EDW", "DM_CAD", "DM_RISK"]}), contextlib_quiet():
+            config, _secrets, raw = evaluate.web_settings(args)
+        self.assertEqual(raw["oracle"]["schemas"], ["DM_CAD", "EDW"])
+        with patch.dict(os.environ, env), patch("riskmatch.web_services.probe_oracle", return_value={
+                "ok": True, "container": "CDB1", "schemas": ["DM_RISK"]}):
+            with self.assertRaises(evaluate.UserError):
+                evaluate.web_settings(args)
+
     def test_own_schema_not_listed_and_message_stays_visible(self):
         args = evaluate.parse_args(["--schemas", "DM_YOK", "--excel", "x.xlsx", "--out", "o"])
         env = {"RISK_ORACLE_USER": self.USER, "RISK_ORACLE_PASSWORD": self.PASSWORD}
@@ -430,7 +444,7 @@ class WebEquivalentTests(unittest.TestCase):
 
     def test_mode_arguments(self):
         with contextlib_quiet():
-            for argv in (["--excel", "x", "--out", "o"], ["--schemas", "A", "--llm", "--no-embedding", "--excel", "x", "--out", "o"],
+            for argv in (["--schemas", "A", "--llm", "--no-embedding", "--excel", "x", "--out", "o"],
                          ["--config", "c.json", "--llm", "--excel", "x", "--out", "o"]):
                 with self.assertRaises(SystemExit):
                     evaluate.parse_args(argv)

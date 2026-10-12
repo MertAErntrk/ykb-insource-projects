@@ -11,7 +11,7 @@ git pull --ff-only
 .\scripts\start.ps1
 ```
 
-Önceki sürüm kuruluysa tekrar paket kurmanız gerekmez. İlk kurulum veya eksik paket hatası için (paketler kurumun Artifactory PyPI aynasından iner; adresi kurum dokümanından alın):
+Pull sonrası hangi dosyanın değişeceği, LLM ve embedding adreslerinin nereye yazılacağı: [IS_PC_KURULUM_AYARLARI.md](IS_PC_KURULUM_AYARLARI.md). Önceki sürüm kuruluysa tekrar paket kurmanız gerekmez. İlk kurulum veya eksik paket hatası için (paketler kurumun Artifactory PyPI aynasından iner; adresi kurum dokümanından alın):
 
 ```powershell
 .\scripts\setup.ps1 -IndexUrl '<kurum-artifactory-pypi-simple-adresi>'
@@ -90,7 +90,7 @@ powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Schemas DM
 
 Betik EDWLIVE kullanıcı adını ve parolasını (gizli) sorar; embedding anahtarı tanımlı değilse sorar (anahtar gerekmiyorsa Enter). Değerler yalnız bu PowerShell sürecinde tutulur, diske yazılmaz.
 
-Parametreler: `-Schemas` (zorunlu; ör. `"DM_CAD,DM_RISK"`, web'de seçtiğiniz şemalar), `-Excel`, `-LabelColumn` ("Beklenen kolon"), `-BuildIndex` / `-IndexTimeout` (eksik anlamsal indeksi önce tamamlar; 3600 sn), `-Llm` (web'deki "LLM yorumu"), `-NoEmbedding` (yalnız ad/metin araması), `-EmbeddingModel` / `-LlmModel` (servis birden çok model sunuyorsa web'de seçtiğiniz model kimliği), `-Rows` (0 = tümü), `-GroupSize` (25), `-ResourcesDir` (`runtime\web`). `-Config config\real.json` verilirse eski yol (config + ortam değişkenleri) çalışır.
+Parametreler: `-Schemas` (isteğe bağlı; boşsa web ile aynı DM_CAD, DM, EDW taranır, erişilemeyen atlanır; yalnız bilinçli daraltma için ör. `DM_CAD`), `-Excel`, `-LabelColumn` ("Beklenen kolon"), `-BuildIndex` / `-IndexTimeout` (embedding açıkken varsayılan olarak eksik anlamsal indeks önce tamamlanır, web ile aynı; 3600 sn), `-Llm` (web'deki "LLM yorumu"), `-NoEmbedding` (yalnız ad/metin araması), `-EmbeddingModel` / `-LlmModel` (servis birden çok model sunuyorsa web'de seçtiğiniz model kimliği), `-Rows` (0 = tümü), `-GroupSize` (25), `-ResourcesDir` (`runtime\web`). `-Config config\real.json` verilirse eski yol (config + ortam değişkenleri) çalışır.
 
 **3) Paylaşılacak dosyalar.** Betik bitince çıktı klasörünü (`runtime\dogrulama\<zaman>\`) yazar. Paylaşın: `rapor.md`, `iskalar.md`, `katalog_ozet.md`. Ayrıntı gerekirse: `satirlar.json`, `katalog_ozet.json`, `havuz.json`.
 

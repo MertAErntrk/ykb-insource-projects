@@ -34,7 +34,7 @@ Standart Excel başlıkları: `Kategori | Alan Adı | Alan tipi | Açıklama | H
 - **Hız ve kaynak:** katalog önbelleği (imza kontrollü, 8 saat); katalog vektörleri bir kez üretilir ve model parmak iziyle saklanır; tek uçuşlu embedding kapısı; arka plan indeksleyici (başlat/durdur/ilerleme/kalan süre). Model iş sırasında değişirse etkilenen satırlar uyarılır.
 - **Web:** Excel bir kez yüklenir; İlk 1/5/10, Sıradaki 10 aranmamış, Tümü; grup boyutu 10/25/50; sonuçlar akışla gelir; **Durdur** kısmi sonuçları ve kısmi Excel raporunu korur; sayfa yenilenince iş yeniden bağlanır; "Tamamlandı" yalnız Excel yazıldıktan sonra görünür, rapor yazılamazsa sonuçlar ekranda kalır ve yeniden denenir.
 - **LLM** (isteğe bağlı) yalnız gösterilen aday var ama hiçbiri "güçlü" değilse çağrılır; kanıt yerine geçmez.
-- **Yapılandırma:** yeni `retrieval` anahtarları (`pool_size`, `lexical_k`, `semantic_k`, `shortlist_embed`, `background_size`, `gate`) [`config/real.example.json`](config/real.example.json) içindedir. Eski `search_mode`, `candidate_limit`, `embedding_budget`, `limit`, `expanded_limit` zararsızdır, yok sayılır.
+- **Yapılandırma:** yeni `retrieval` anahtarları (`pool_size`, `lexical_k`, `semantic_k`, `shortlist_embed`, `background_size`, `gate`) [`config/real.example.json`](config/real.example.json) içindedir (yalnız CLI şablonu; web varsayılanları kodda). Eski `search_mode`, `candidate_limit`, `embedding_budget`, `limit`, `expanded_limit` zararsızdır, yok sayılır.
 - Kullanım dışı kalan: 0.4'ün "hızlı aday araması / tüm katalogda anlamsal arama" seçimi.
 
 ## Rapor (Excel)
@@ -55,11 +55,11 @@ Bağlantı hatası veya eksik katalog, veritabanında yok diye gösterilmez. Tam
 
 ## Yerel veri ve geliştirme
 
-Parolalar/API anahtarları işlem belleğinde tutulur; çereze veya rapora kaydedilmez. Oracle bağlantısı bir saat kullanılmadığında kapanır. Excel, rapor, katalog önbelleği ve vektör deposu bu bilgisayardaki `runtime/` altındadır. Gerçek dosyalar, profiller ve kurum sertifikaları Git dışında tutulur. Kurum bağlantı adresleri `src/riskmatch/deployment.py` içindedir; parola ve servis anahtarı burada bulunmaz.
+Parolalar/API anahtarları işlem belleğinde tutulur; çereze veya rapora kaydedilmez. Oracle bağlantısı bir saat kullanılmadığında kapanır. Excel, rapor, katalog önbelleği ve vektör deposu bu bilgisayardaki `runtime/` altındadır. Gerçek dosyalar, profiller ve kurum sertifikaları Git dışında tutulur. Kurum bağlantı adresleri `src/riskmatch/deployment.py` içindedir; parola ve servis anahtarı burada bulunmaz. Adres değiştirme ve pull sonrası adımlar: [docs/IS_PC_KURULUM_AYARLARI.md](docs/IS_PC_KURULUM_AYARLARI.md). Web uygulaması ve ölçüm betiği `config/` klasörünü kullanmaz; `config/*.example.json` yalnız eski komut satırı (CLI) yolunun şablonudur.
 
 ```powershell
 .\scripts\test.ps1
-powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Config config\real.json   # iş bilgisayarında ölçüm
+powershell -ExecutionPolicy Bypass -File scripts\is_pc_dogrulama.ps1 -Excel C:\yol\etiketli.xlsx   # iş bilgisayarında ölçüm (web ile aynı ayarlar)
 ```
 
 Sentetik fixture'lar yalnız otomatik test içindir, web uygulamasında sunulmaz. Gerçek Oracle/embedding erişimi, kurum katalog boyutu ve gerçek doğruluk geliştirme bilgisayarından doğrulanmamıştır; iş bilgisayarında ölçülür ([rehber, bölüm 7](docs/IS_BILGISAYARINDA_BASLANGIC.md)). Eski masaüstü prototipine ait belgeler güncel kullanım talimatı değildir.

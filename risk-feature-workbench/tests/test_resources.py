@@ -247,6 +247,16 @@ class IndexerTests(ResourcesTestCase):
         self.assertEqual(index.index_coverage, 1.0)
         self.assertEqual(index.missing_documents(), [])
 
+    def test_indexer_sends_adapter_batch_per_request(self):
+        self.adapter.max_batch = 16
+        indexer = self.res.indexer(self.snap, self.ctx, {})
+        self.assertEqual(indexer.batch, 16)
+        indexer.start()
+        self.assertTrue(indexer.wait(10))
+        # 51 belge: 16 + 16 + 16 + 3; belge başına ayrı istek yok.
+        self.assertEqual([len(texts) for texts, _kind in self.adapter.calls], [16, 16, 16, 3])
+        self.assertEqual(indexer.status()["done"], 51)
+
     def test_queue_starts_with_table_documents(self):
         index = self.res.index(self.snap, self.ctx, {})
         queue = index.index_queue()

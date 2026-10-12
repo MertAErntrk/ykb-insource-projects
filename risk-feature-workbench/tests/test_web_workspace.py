@@ -31,19 +31,21 @@ class FakeIndex:
     def stored_coverage(self):return self.coverage
     # Tablo belgeleri de sayılır: kolonlar tam olsa da tablo eksikse indeks tamam değildir.
     tables_missing=0
-    def queue_counts(self):return (0 if self.coverage>=1.0 else 5)+self.tables_missing,12
+    def queue_counts(self):return round(12*(1-self.coverage))+self.tables_missing,12
 
 
 class FakeIndexer:
     def __init__(self):self.state="idle";self.index=FakeIndex();self.stops=0
     def start(self):self.state="running"
-    def stop(self):self.state="stopped";self.stops+=1
+    def stop(self,wait=True):self.state="stopped";self.stops+=1
     def status(self):return {"state":self.state,"done":5,"total":10,"failures":0,"rate_per_s":1.0,"eta_s":5,"message":""}
 
 
 class FakeResources:
     def __init__(self,root):self.root=root;self.calls=[];self.closed=False;self.last=None;self.closes=[];self.lock=None
+    on_catalog=None
     def catalog(self,adapter,key,*,refresh=False,progress=None):
+        if self.on_catalog:self.on_catalog(progress)
         self.calls.append(("catalog",key,refresh));return {"records":[{"column":"A"},{"column":"B"}]},{"source":"oracle" if refresh else "cache"}
     def embedding(self,adapter):self.calls.append(("embedding",));return "ctx"
     def indexer(self,snapshot,ctx,settings):self.last=FakeIndexer();return self.last
@@ -58,9 +60,9 @@ class WorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
         self.calls=[];self.seen_progress=[];self.resources=[]
-        self.gate=None;self.ready=threading.Event();self.cancel_group=None;self.before_group=None;self.infos={}
+        self.gate=None;self.ready=threading.Event();self.cancel_group=None;self.before_group=None;self.infos={};self.listen=None;self.on_catalog=None;self.reconnect=None
         def factory(root):
-            value=FakeResources(root);value.lock=self.app.extensions["riskmatch"]["guard"];self.resources.append(value);return value
+            value=FakeResources(root);value.lock=self.app.extensions["riskmatch"]["guard"];value.on_catalog=self.on_catalog;self.resources.append(value);return value
         self.app=create_app(self.root,analyzer=self.analyze,resources_factory=factory)
         self.client=self.app.test_client();self.client.get("/")
         with self.client.session_transaction() as s:self.headers={"X-CSRF-Token":s["csrf"]}
@@ -88,6 +90,9 @@ class WorkspaceTests(unittest.TestCase):
                                                        "require_full_index":kwargs.get("require_full_index")})
         number=len(self.calls)
         kwargs["progress"]({"stage":"Aranıyor","completed":1,"total":len(ids),"phase":"analysis"})
+        if self.listen is not None and kwargs.get("index_listener"):
+            if self.reconnect:self.reconnect()
+            kwargs["index_listener"](self.listen)
         if self.before_group:self.before_group(number)
         job=next(j for j in self.app.extensions["riskmatch"]["jobs"].values() if j["status"] in ("running","cancelling"))
         self.seen_progress.append({k:job["progress"][k] for k in ("group","groups","completed","total")})
@@ -267,6 +272,46 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(self.client.get("/api/index/status").json["complete"])
         indexer.index.tables_missing=1
         self.assertFalse(self.client.get("/api/index/status").json["complete"])
+
+    def test_index_status_counts_whole_catalog_documents(self):
+        started=self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers).json
+        self.assertEqual((started["documents_stored"],started["documents_total"],started["index_coverage"]),(6,12,0.5))
+
+    def test_index_status_shows_preparing_while_catalog_is_read(self):
+        seen=[]
+        def during(progress):
+            progress({"stage":"x","records":1234})
+            current=next(iter(self.app.extensions["riskmatch"]["connections"].values()))
+            seen.append(dict(current.get("index_preparing") or {}))
+        self.on_catalog=during
+        self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        self.assertEqual(seen,[{"stage":"Oracle kataloğu okunuyor · 1.234 kolon"}])
+        self.assertEqual(self.client.get("/api/index/status").json["state"],"running")
+        current=next(iter(self.app.extensions["riskmatch"]["connections"].values()))
+        current["index_preparing"]={"stage":"Embedding servisi hazırlanıyor"}
+        current["indexer"].state="stopped"
+        self.assertEqual(self.client.get("/api/index/status").json,{"state":"preparing","message":"Embedding servisi hazırlanıyor"})
+
+    def test_gate_indexer_is_shown_in_panel_and_replaces_other_run(self):
+        self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        first=self.resources[0].last;first.state="done"
+        self.listen=FakeIndexer();self.listen.state="running"
+        self.finish(self.start(row_ids=self.row_ids()[:1],settings=EMBEDDING))
+        status=self.client.get("/api/index/status").json
+        self.assertEqual((status["state"],first.stops),("running",1))
+
+    def test_gate_indexer_does_not_replace_indexer_of_newer_connection(self):
+        connections=self.app.extensions["riskmatch"]["connections"]
+        owner=next(iter(connections))
+        newer=FakeIndexer();newer.state="running"
+        def reconnect():
+            # Kullanıcı iş sürerken yeniden bağlandı: yeni bağlantı kendi indeksleyicisiyle.
+            with self.app.extensions["riskmatch"]["guard"]:
+                connections[owner]={**connections[owner],"indexer":newer}
+        self.listen=FakeIndexer();self.listen.state="running";self.reconnect=reconnect
+        self.finish(self.start(row_ids=self.row_ids()[:1],settings=EMBEDDING))
+        self.assertIs(connections[owner]["indexer"],newer)
+        self.assertEqual((newer.stops,newer.state),(0,"running"))
 
     def test_index_start_does_not_stop_same_cached_indexer(self):
         self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)

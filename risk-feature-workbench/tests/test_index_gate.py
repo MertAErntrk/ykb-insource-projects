@@ -79,6 +79,12 @@ class GateTests(unittest.TestCase):
         self.assertTrue(all(phase == "index_wait" for _stage, phase in self.notices))
         self.assertEqual(self.notices[0][0], "İndeks tamamlanması bekleniyor · %30 · 3/10 · tahmini kalan 10 dk")
 
+    def test_wait_eta_uses_seconds_under_a_minute(self):
+        status = {"state": "running", "done": 9, "total": 10, "eta_s": 4.6}
+        self.assertEqual(_wait_stage(status), "İndeks tamamlanması bekleniyor · %90 · 9/10 · tahmini kalan 5 sn")
+        status["eta_s"] = 600
+        self.assertTrue(_wait_stage(status).endswith("tahmini kalan 10 dk"))
+
     def test_wait_percent_counts_documents_stored_before_restart(self):
         status = {"state": "running", "done": 1, "total": 4}
         self.assertEqual(_wait_stage(status, 10), "İndeks tamamlanması bekleniyor · %70 · 7/10")
@@ -168,8 +174,12 @@ class EndToEndGateTests(unittest.TestCase):
         return [[1.0] + [float(len(text) % 5)] + [0.0] * 6 for text in payload["input"]]
 
     def test_full_index_gate_fills_store_before_matching(self):
-        stages = []
-        result, rows = self.run_analysis(self.embed, require_full_index=True, progress=stages.append)
+        stages, seen = [], []
+        result, rows = self.run_analysis(self.embed, require_full_index=True, progress=stages.append,
+                                         index_listener=seen.append)
+        # Web paneli kapının beklediği indeksleyiciyi gösterebilsin diye dışarı verilir.
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].status()["state"], "done")
         self.assertEqual(result["run_info"]["Hatalar"], [])
         self.assertEqual(len(rows), 1)
         self.assertTrue(any(s.get("phase") == "index" for s in stages))

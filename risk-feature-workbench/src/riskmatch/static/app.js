@@ -148,6 +148,7 @@ async function poll(){
         const active=activeStatuses.includes(job.status);
         state.running=active;
         $("empty-results").hidden=true;
+        state.indexWait=active&&job.progress?.phase==="index_wait";
         renderProgress(job);
         if(state.results.length&&(added||!active||!state.rendered))renderResults(job);
         state.rendered=state.results.length>0;
@@ -202,20 +203,24 @@ function showDetail(row){$("detail-title").textContent=row.request.name;const co
 $("close-detail").addEventListener("click",()=>$("detail-dialog").close());
 
 
-const indexLabels={idle:"Henüz başlatılmadı",running:"İndeksleniyor",stopped:"Durduruldu",failed:"Hata ile durdu",done:"Tamamlandı"};
+const indexLabels={idle:"Henüz başlatılmadı",preparing:"Hazırlanıyor",running:"İndeksleniyor",stopped:"Durduruldu",failed:"Hata ile durdu",done:"Tamamlandı"};
+function formatCount(value){return Number(value||0).toLocaleString("tr-TR");}
 function indexVisible(){return $("use-models").checked&&!!state.connection&&!$("workspace").hidden;}
 function renderIndex(s){
     state.index=s||{state:"idle"};const st=state.index.state||"idle";
     $("index-state").textContent="Durum: "+(indexLabels[st]||st);
-    const total=state.index.total||0,done=state.index.done||0;
-    if(total>0){$("index-progress").max=total;$("index-progress").value=done;}else $("index-progress").value=0;
-    const parts=[];if(total>0)parts.push(done+" / "+total+" kolon");
-    if(Number.isFinite(state.index.index_coverage))parts.push("Kapsam %"+Math.round(state.index.index_coverage*100));
-    if(st==="running"&&Number.isFinite(state.index.eta_s))parts.push("Tahmini kalan: "+duration(state.index.eta_s));
+    // Tüm katalog (tablo + kolon belgesi) üzerinden: yeniden başlatmada ilerleme sıfırlanmaz.
+    const whole=Number.isFinite(state.index.documents_total),total=whole?state.index.documents_total:(state.index.total||0),done=whole?state.index.documents_stored:(state.index.done||0);
+    if(total>0){$("index-progress").max=total;$("index-progress").value=done;}else $("index-progress").value=st==="done"?$("index-progress").max:0;
+    const parts=[];if(total>0)parts.push("%"+Math.floor(100*done/total)+" · "+formatCount(done)+" / "+formatCount(total)+" belge");
+    else if(whole)parts.push("Katalogda indekslenecek belge yok");
+    else if(Number.isFinite(state.index.index_coverage))parts.push("Kapsam %"+Math.round(state.index.index_coverage*100));
+    if(st==="running")parts.push("Tahmini kalan: "+(Number.isFinite(state.index.eta_s)?duration(state.index.eta_s):"hesaplanıyor"));
+    if(state.running&&state.indexWait&&st!=="done")parts.push("Arama indeks bitince kendiliğinden başlayacak");
     if(state.index.failures)parts.push(state.index.failures+" hata");
     if(state.index.message)parts.push(state.index.message);
     $("index-detail").textContent=parts.join(" · ");
-    $("index-start").disabled=st==="running"||!state.schemas.size||!state.connection;$("index-stop").disabled=st!=="running";updateScope();
+    $("index-start").disabled=st==="running"||st==="preparing"||!state.schemas.size||!state.connection;$("index-stop").disabled=st!=="running";updateScope();
 }
 async function indexStatus(){try{const s=await api("/api/index/status");renderIndex(s);return s;}catch{return null;}}
 function updateIndexPanel(){const visible=indexVisible();$("index-panel").hidden=!visible;if(visible)indexStatus();}
