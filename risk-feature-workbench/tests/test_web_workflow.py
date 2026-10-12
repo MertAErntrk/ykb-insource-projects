@@ -64,13 +64,28 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["request"]["reported"],"Evet")
 
     def test_schema_selection_required_and_must_come_from_login(self):
-        for schemas in ([],["SYS"],["NOT_VISIBLE"],"RISK_DWH",[1]):
-            response=self.client.post("/api/analyze",json={"input_type":"manual",
-                "variables":[{"name":"x","description":"d"}],"schemas":schemas},headers=self.headers)
-            self.assertEqual(response.status_code,400)
-        self.assertFalse(self.app.extensions["riskmatch"]["jobs"])
+        # İstemci şema listesi yok sayılır: geçersiz ya da eksik "schemas" işi engellemez, tarama sabit şemalarla yapılır.
+        seen=[]
+        def connect(adapter):
+            seen.append(adapter.schemas)
+            return FakeConnection()
+        with patch.object(OracleAdapter,"_connect",connect):
+            for schemas in ([],["SYS"],"RISK_DWH",[1],None):
+                body={"input_type":"manual","variables":[{"name":"x","description":"d"}]}
+                if schemas is not None:body["schemas"]=schemas
+                response=self.client.post("/api/analyze",json=body,headers=self.headers)
+                self.assertEqual(response.status_code,202,response.json)
+                self.finish(response.json["id"])
+        self.assertTrue(seen)
+        self.assertTrue(all(schemas==["RISK_DWH"] for schemas in seen),seen)
 
     def test_multiple_schemas_passed_to_scan_and_empty_scope_stays_incomplete(self):
+        # Sabit şema listesi birden çok şema içerdiğinde hepsi taramaya geçer; istemcinin listesi etkisizdir.
+        self.app.extensions["riskmatch"]["executor"].shutdown(wait=True)
+        self.app=test_web.create_app(self.root/"multi",scan_schemas=["RISK_DWH","ANOTHER_SCHEMA"])
+        self.client=self.app.test_client();self.client.get("/")
+        with self.client.session_transaction() as s:self.headers={"X-CSRF-Token":s["csrf"]}
+        self.connect()
         seen=[]
         def connect(adapter):
             seen.append(adapter.schemas)
@@ -78,12 +93,12 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(OracleAdapter,"_connect",connect):
             response=self.client.post("/api/analyze",json={"input_type":"manual",
                 "variables":[{"name":"x","description":"d"}],
-                "schemas":["RISK_DWH","ANOTHER_SCHEMA"]},headers=self.headers)
+                "schemas":["NOT_VISIBLE"]},headers=self.headers)
             self.assertEqual(response.status_code,202,response.json)
             result=self.finish(response.json["id"])
         # v0.5 connects for the catalog signature and for the scan; every connection gets both schemas.
         self.assertTrue(seen)
-        self.assertTrue(all(schemas==["ANOTHER_SCHEMA","RISK_DWH"] for schemas in seen),seen)
+        self.assertTrue(all(sorted(schemas)==["ANOTHER_SCHEMA","RISK_DWH"] for schemas in seen),seen)
         self.assertFalse(result["run_info"]["Tarama tamamlandı"])
         self.assertEqual(result["results"][0]["physical_name"],"unknown")
 

@@ -33,11 +33,11 @@ from .semantics import differences, evaluate_candidate
 
 GATE_DEFAULTS = {"z_min": 2.5, "c_min": 0.5, "z_strong": 4.0, "c_low": 0.3, "margin": 1.5,
                  "lexical_min_coverage": 0.8, "lexical_min_tokens": 2, "max_shown": 3, "max_rejected": 5,
-                 "require_subject": True}
+                 "require_subject": True, "table_bonus": 0.0, "fact_min": 4}
 NAME_BONUS = {"exact": 3.0, "normalized": 2.0, "partial": 0.5, "none": 0.0}
 MEANING_ORDER = {"strong": 0, "likely": 1, "different": 2, "weak": 3, "no_description": 4}
 SCOPES = ("none", "partial", "full")
-_INTEGER_KEYS = {"lexical_min_tokens", "max_shown", "max_rejected"}
+_INTEGER_KEYS = {"lexical_min_tokens", "max_shown", "max_rejected", "fact_min"}
 _FRACTION_KEYS = {"c_min", "c_low", "lexical_min_coverage"}
 _BOOL_KEYS = {"require_subject"}
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
@@ -74,7 +74,7 @@ def gate_config(gate=None):
             raise ConfigError("Sıralama eşiği negatif olmayan tam sayı olmalı: " + key)
         if key in _FRACTION_KEYS and not 0.0 <= value <= 1.0:
             raise ConfigError("Sıralama eşiği 0 ile 1 arasında olmalı: " + key)
-        if key in ("margin", "z_min", "z_strong") and (value < 0 or value == float("inf")):
+        if key in ("margin", "z_min", "z_strong", "table_bonus") and (value < 0 or value == float("inf")):
             raise ConfigError("Sıralama eşiği negatif olmayan sonlu sayı olmalı: " + key)
         config[key] = value
     if config["max_shown"] < 1:
@@ -125,6 +125,17 @@ def _gate(features, config):
     return None
 
 
+def _fact_supported(evaluation, features, config):
+    """Embedding eşiği geçilmese de talebin en az fact_min anlam boyutu kolon açıklamasıyla doğrulandıysa aday kalır.
+    Ad kuralından gelen olgu sayılmaz: benzer ad tek başına kanıt değildir."""
+    agreed = sum(1 for check in evaluation.get("checks", [])
+                 if check["status"] == "compatible" and check["dimension"] not in ("data_type", "qualifier")
+                 and "naming_rule" not in ((check.get("evidence") or {}).get("request_source"),
+                                           (check.get("evidence") or {}).get("candidate_source")))
+    return (config["fact_min"] > 0 and evaluation.get("status") == "supported" and agreed >= config["fact_min"]
+            and features["coverage"] >= config["c_min"] and not _no_subject(features, config))
+
+
 def _meaning(record, evaluation, features, gate, config):
     z, coverage, level = features["z"], features["coverage"], features["name_level"]
     supported = evaluation["status"] == "supported"
@@ -167,6 +178,9 @@ def _evidence(request, record, features, config):
     z = features["z"]
     if z is not None and z >= config["z_min"]:
         out.append("Anlamsal benzerlik arka plana göre yüksek (z=" + ("%.1f" % z).replace(".", ",") + ")")
+    table_rank = (record.get("_features") or {}).get("table_rank")
+    if isinstance(table_rank, int) and not isinstance(table_rank, bool) and 1 <= table_rank <= 3:
+        out.append("Tablo açıklaması talep konusuyla uyumlu (tablo sırası %d)" % table_rank)
     return out
 
 
@@ -185,6 +199,8 @@ def _order(record):
 def _candidate(request, record, evaluation, locations, config):
     features = _features(record)
     gate = _gate(features, config)
+    if gate is None and _fact_supported(evaluation, features, config):
+        gate = "weak"
     candidate = dict(evaluation)
     candidate.update({
         "catalog_id": record.get("catalog_id", ""),

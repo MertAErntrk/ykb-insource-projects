@@ -170,4 +170,47 @@ class ReportWriteTests(unittest.TestCase):
         self.assertTrue(cell.value.startswith("=cmd"))
         wb.close()
 
+class VerdictColumnsTests(unittest.TestCase):
+    def results(self,extra):
+        with tempfile.TemporaryDirectory() as directory:
+            src=Path(directory)/"source.xlsx"
+            dst=Path(directory)/"out.xlsx"
+            ExcelTests().make(src)
+            req=read_requests(src)
+            rows=[]
+            for i,r in enumerate(req):
+                row={"row_id":r["row_id"],"physical_name":"unknown","semantic_status":"insufficient","production_status":"insufficient","reasons":[],"errors":[],"candidates":[]}
+                row.update(extra.get(i,{}))
+                rows.append(row)
+            write_results(src,dst,req,rows,{"Mod":"DEMO"})
+            wb=load_workbook(dst)
+            ws=wb["Sonuçlar"]
+            headers=[c.value for c in ws[1]]
+            values=[{h:c.value for h,c in zip(headers,row)} for row in ws.iter_rows(min_row=2)]
+            wb.close()
+            return headers,values
+
+    def test_verdict_columns_are_appended_after_existing_ones(self):
+        direct={"verdict":"dogrudan","verdict_reasons":[{"code":"x","text":"Ad ve anlam uyuşuyor"}],"derivation":None,"tier_trace":[],
+                "candidates":[{"catalog_id":"c","source":{"schema":"DM_CAD","object":"T","column":"C"}}]}
+        ratio={"verdict":"turetilebilir","verdict_reasons":[{"code":"a","text":"Pay bulundu"},{"code":"b","text":"Aynı tabloda"}],
+               "derivation":{"formula":"pay / payda","relationship":"same_object","verdict":"turetilebilir","verdict_reasons":[],
+                             "components":[{"role":"numerator","name":"p","window":"1M","verdict":"dogrudan","source":{"schema":"DM","object":"T","column":"P"},"tier":"DM","reasons":[]},
+                                           {"role":"denominator","name":"d","window":"1M","verdict":"bulunamadi","source":None,"tier":"DM","reasons":[]}]}}
+        headers,values=self.results({0:direct,1:ratio})
+        self.assertEqual(headers[-5:],["Uzman kararı","Sonuç","Kaynak","Dayanak","Türetme yöntemi"])
+        self.assertEqual(headers[:3],["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"])
+        self.assertEqual((values[0]["Sonuç"],values[0]["Kaynak"]),("Doğrudan eşleşti","DM_CAD.T.C"))
+        self.assertEqual(values[0]["Dayanak"],"Ad ve anlam uyuşuyor")
+        self.assertEqual(values[1]["Sonuç"],"Türetilebilir")
+        self.assertEqual(values[1]["Kaynak"],"Pay: DM.T.P; Payda: aranan katmanlarda bulunamadı")
+        self.assertEqual(values[1]["Dayanak"],"Pay bulundu; Aynı tabloda")
+        self.assertEqual(values[1]["Türetme yöntemi"],"pay / payda (aynı tablo)")
+
+    def test_old_results_without_verdict_leave_cells_empty(self):
+        _,values=self.results({})
+        for row in values:
+            for key in ("Sonuç","Kaynak","Dayanak","Türetme yöntemi"):
+                self.assertIn(row[key],(None,""))
+
 if __name__=="__main__":unittest.main()

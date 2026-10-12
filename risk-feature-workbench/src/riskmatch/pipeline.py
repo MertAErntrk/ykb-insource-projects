@@ -2,21 +2,23 @@
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
-from time import monotonic
+from time import monotonic, sleep
 import hashlib
 import json
 import os
 from pathlib import Path
 
 from . import __version__
-from .config import load_config, signature_config
+from .config import DEFAULT_EXCLUDE_OBJECTS, load_config, signature_config, validate_exclude_objects
 from .errors import ConfigError, IntegrationError, StaleIndexError, OracleOperationError, CatalogScanError, AnalysisCancelled, InputError, ReportWriteError
 from .excelio import read_requests, write_results
+from .derivation import plan_tiers, resolve_row
 
-INDEX_SETTINGS=("pool_size","lexical_k","semantic_k","shortlist_embed","background_size")
+INDEX_SETTINGS=("pool_size","lexical_k","semantic_k","shortlist_embed","background_size","table_k","table_embed")
 # End-of-job model check: two canaries catch a swapped model; the full set runs when the fingerprint expires.
 VERIFY_SAMPLE=2
-NO_CANDIDATE_REASON="Gösterilecek kadar güçlü aday bulunamadı. Bu, alanın bankada bulunmadığı anlamına gelmez."
+# derivation.REASON_TEXT'te technical_error şablonu yok; metin burada tutulur.
+TECHNICAL_REASON="Teknik sorun veya giriş hatası nedeniyle inceleme tamamlanamadı."
 MODEL_CHANGED_REASON="Embedding modeli analiz sırasında değişti; bu satırın anlamsal sonucu yeniden çalıştırılmalı."
 
 def digest(value):
@@ -49,6 +51,9 @@ def catalog_key(oracle,credentials=None):
     from .catalog_cache import cache_key
     keys=credentials if credentials is not None else {k:os.environ.get(oracle.get(k+"_env") or "","") for k in ("user","dsn")}
     scope="|".join(str(oracle.get(k,"")) for k in ("source_database","environment","container","max_records"))
+    # Dışlama kuralı (varsayılan dahil) değişirse katalog yeniden taranır.
+    rules=oracle.get("exclude_objects")
+    scope+="|"+json.dumps(validate_exclude_objects(DEFAULT_EXCLUDE_OBJECTS if rules is None else rules),sort_keys=True)
     return cache_key(keys.get("user",""),keys.get("dsn",""),scope,oracle.get("schemas") or [])
 
 def _physical(name,snapshot):
@@ -57,7 +62,11 @@ def _physical(name,snapshot):
     return "absent_in_scope" if snapshot["complete"] else "unknown"
 
 def _blank_result(req,snapshot):
-    return {"row_id":req["row_id"],"physical_name":_physical(req["name"],snapshot),"semantic_status":"incomplete","row_status":"not_evaluated","production_status":"not_evaluated","reasons":[],"candidates":[],"rejected_candidates":[],"dependencies":[],"errors":[],"expert_decision":""}
+    return {"row_id":req["row_id"],"physical_name":_physical(req["name"],snapshot),"semantic_status":"incomplete","row_status":"not_evaluated","production_status":"not_evaluated","reasons":[],"candidates":[],"rejected_candidates":[],"dependencies":[],"errors":[],"expert_decision":"",
+            "verdict":"karar_verilemedi","verdict_reasons":[],"derivation":None,"tier_trace":[]}
+
+def _technical_reason():
+    return {"code":"technical_error","text":TECHNICAL_REASON}
 
 def _semantic_status(req,candidates,row_status):
     # Legacy summary kept for dependency checks and older readers; row_status is the primary outcome.
@@ -82,6 +91,72 @@ def _safe_error(error):
     if isinstance(error,IntegrationError):
         return "Entegrasyon tamamlanamadı (erişim, süre aşımı veya geçersiz servis yanıtı)."
     return "Satır işlenirken teknik hata oluştu; ayrıntılar hassas veri koruması için kayda alınmadı."
+
+# Tam indeks kapısı: en çok bu kadar başlatma; bildirim aralığı ve tek uyku dilimi (iptal için ≤1 sn).
+INDEX_MAX_STARTS=3
+INDEX_POLL_SECONDS=2.0
+_INDEX_SLICE_SECONDS=0.5
+_sleep=sleep
+
+def _thousands(value):
+    return format(int(value),",").replace(",",".")
+
+def _queue_counts(index):
+    """(eksik, toplam) tablo + kolon belgesi."""
+    if hasattr(index,"queue_counts"):
+        return index.queue_counts()
+    missing=len(index.index_queue())
+    return missing,missing
+
+def _wait_stage(status,documents=0):
+    """documents: katalogdaki tüm tablo + kolon belgesi. Bu koşudan önce depoda olanlar da sayılır;
+    yeniden başlatmada yüzde sıfıra dönmez."""
+    done,run_total=int(status.get("done") or 0),int(status.get("total") or 0)
+    total=max(int(documents or 0),run_total)
+    stored=total-run_total+done
+    percent=int(stored*100/total) if total else 0
+    stage="İndeks tamamlanması bekleniyor · %%%d · %s/%s"%(percent,_thousands(stored),_thousands(total))
+    eta=status.get("eta_s")
+    if eta is not None and status.get("state")=="running":
+        stage+=" · tahmini kalan %d dk"%max(1,round(eta/60))
+    return stage
+
+def _await_full_index(indexer,notify,check_cancelled,*,max_starts=INDEX_MAX_STARTS,poll=INDEX_POLL_SECONDS):
+    """Arka plan indeksleyici bütün tablo ve kolon belgelerini vektör deposuna yazana kadar bekler.
+
+    Eksik yoksa hemen döner; çalışıyorsa bekler; durmuş ve eksikse yeniden başlatır. İkinci başarısızlıkta
+    ya da max_starts başlatmadan sonra eksik kalırsa IntegrationError; iptal AnalysisCancelled ile çıkar.
+    """
+    starts=failures=0
+    last_notice=documents=None
+    while True:
+        check_cancelled()
+        status=indexer.status()
+        if status.get("state")=="running":
+            if last_notice is None or monotonic()-last_notice>=poll:
+                if documents is None:documents=_queue_counts(indexer.index)[1]
+                notify(_wait_stage(status,documents),phase="index_wait")
+                last_notice=monotonic()
+            _sleep(min(_INDEX_SLICE_SECONDS,poll))
+            continue
+        # Bitmek üzere olan iş parçacığı start()'ı yutmasın.
+        waiter=getattr(indexer,"wait",None)
+        if waiter is not None:
+            waiter(1.0)
+        missing,total=_queue_counts(indexer.index)
+        if missing==0:
+            return
+        if status.get("state")=="failed":
+            failures+=1
+        if failures>=2 or starts>=max_starts:
+            percent=int((total-missing)*100/total) if total else 0
+            message="İndeks %%%d'de kaldı (%s belge eklenemedi); arama yapılmadı. İndeksi yeniden başlatıp tekrar deneyin."%(percent,_thousands(missing))
+            if status.get("message"):
+                message+=" "+str(status["message"])
+            raise IntegrationError(message)
+        indexer.start()
+        starts+=1
+        last_notice=None
 
 def _select(requests,row_ids):
     """Rows to search in this run; the rest of the workbook stays in the report as not searched."""
@@ -117,7 +192,7 @@ def analyze(input_path,output_path,**options):
         if own is not None:
             own.close()
 
-def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None,resume=True,strategy="hybrid",config_data=None,credentials=None,column_mapping=None,progress=None,result_callback=None,cancelled=None,row_ids=None,resources=None,write_report=True,index_epoch=None,_collected=None):
+def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=None,resume=True,strategy="hybrid",config_data=None,credentials=None,column_mapping=None,progress=None,result_callback=None,cancelled=None,row_ids=None,resources=None,write_report=True,index_epoch=None,require_full_index=False,_collected=None):
     from .semantics import parse_definition,build_dependencies,assess_production,prepare_production_catalog
     from .retrieval import HybridIndex
     from .ranking import rank,gate_config
@@ -205,9 +280,14 @@ def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=Non
             raise
         except Exception:
             check_cancelled()
+            if require_full_index:
+                raise IntegrationError("Embedding servisine ulaşılamadı; indeks tamamlanamadığı için arama yapılmadı.") from None
             ctx=None
             strategy="lexical"
             warnings.append("Embedding servisine ulaşılamadı veya model parmak izi alınamadı; ad ve metin aramasıyla devam edildi.")
+        if require_full_index:
+            # Web ile aynı anahtar (snapshot sürümü, namespace, index_settings): aynı indeksleyici paylaşılır.
+            _await_full_index(resources.indexer(snapshot,ctx,settings),notify,check_cancelled)
     reviewed_manifest=None
     if config.get("reviewed_definitions_path"):
         from .reviewed import apply_reviewed
@@ -249,8 +329,9 @@ def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=Non
             saved=json.loads(checkpoint.read_text(encoding="utf-8"))
             if saved.get("key")==state_key:
                 # Retry omitted model work; reuse semantic results only from the same index coverage.
+                # Rows saved before the verdict model have no "verdict" and are searched again.
                 prior={r["row_id"]:r for r in saved.get("results",[])
-                       if not r.get("errors") and not r.get("model_changed")
+                       if "verdict" in r and not r.get("errors") and not r.get("model_changed")
                        and not r.get("retrieval_info",{}).get("embedding_skipped",False)
                        and (r.get("retrieval_info",{}).get("semantic_scope") in ("full",None) or ctx is None
                             or r.get("retrieval_info",{}).get("index_coverage")==coverage_now)
@@ -261,6 +342,15 @@ def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=Non
     llm_calls=0
     llm_failed=False
     checkpoint_at=monotonic();io_notes=[]
+    # Schema priority: DM_CAD first, then DM, then EDW; a later tier is searched only without a direct match.
+    tier_plan=plan_tiers((config.get("oracle") or {}).get("schemas") or scope.get("schemas") or [],config["retrieval"].get("schema_tiers"))
+    schema_complete=snapshot.get("schema_complete") or {}
+    def run(tier_req,tier):
+        records=index.search(tier_req,strategy=strategy)
+        info=deepcopy(getattr(index,"last_search_info",{}))
+        tier_complete=all(schema_complete.get(s,snapshot["complete"]) for s in tier["schemas"])
+        ranked=rank(tier_req,records,gate=gate,semantic_scope=info.get("semantic_scope","none"),catalog_complete=bool(tier_complete))
+        return records,info,ranked
     for req in selected:
         check_cancelled()
         current_name=req["name"]
@@ -275,27 +365,31 @@ def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=Non
             result["errors"].extend(errors)
             if not result["errors"] and index is not None:
                 try:
-                    records=index.search(req,strategy=strategy)
-                    info=deepcopy(getattr(index,"last_search_info",{}))
-                    scope_used=info.get("semantic_scope","none")
-                    ranked=rank(req,records,gate=gate,semantic_scope=scope_used,catalog_complete=bool(snapshot["complete"]))
-                    candidates=ranked["candidates"]
-                    result.update({"candidates":candidates,"rejected_candidates":ranked["rejected_candidates"],
-                                   "row_status":ranked["row_status"],"retrieval_info":info,
+                    resolved=resolve_row(req,tier_plan["tiers"],run,unselected=tier_plan["unselected"],schema_complete=schema_complete,
+                                         catalog_complete=bool(snapshot["complete"]),naming=config["naming"])
+                    outcome=resolved["outcome"]
+                    ranked,records=outcome["ranked"],outcome["records"]
+                    # The weakest tier scope is kept so resume never trusts a partially searched tier.
+                    scope_used=outcome["semantic_scope"]
+                    info={**outcome["info"],"tier":outcome["tier"],"semantic_scope":scope_used}
+                    candidates=ranked.get("candidates") or []
+                    result.update({"candidates":candidates,"rejected_candidates":ranked.get("rejected_candidates") or [],
+                                   "verdict":resolved["verdict"],"verdict_reasons":resolved["verdict_reasons"],
+                                   "derivation":resolved["derivation"],"tier_trace":resolved["tier_trace"],
+                                   "row_status":ranked.get("row_status","not_evaluated"),"retrieval_info":info,
                                    "pool_ids":[r["catalog_id"] for r in records],
                                    "coverage":{"catalog_complete":bool(snapshot["complete"]),"semantic_scope":scope_used,
                                                "index_coverage":info.get("index_coverage"),"pool_size":len(records),
                                                "catalog_records":len(snapshot["records"])}})
                     result["retrieval_warnings"]=warnings+([info["warning"]] if info.get("warning") else [])
-                    result["semantic_status"]=_semantic_status(req,candidates,ranked["row_status"])
+                    result["semantic_status"]=_semantic_status(req,candidates,result["row_status"])
                     result["reasons"].extend(req["definition"].get("issues",[]))
                     if not snapshot["complete"]:
                         result["reasons"].append("Katalog taraması eksik; kurum geneline ilişkin yokluk sonucu verilemez.")
-                    result["reasons"].extend(ranked["notes"])
-                    if not candidates:
-                        result["reasons"].append(NO_CANDIDATE_REASON)
-                    else:
+                    result["reasons"].extend(ranked.get("notes") or [])
+                    if candidates:
                         result["reasons"].extend(candidates[0].get("reasons",[]))
+                    result["reasons"].extend(r["text"] for r in result["verdict_reasons"])
                     result["reasons"].extend(result["retrieval_warnings"])
                     # The model is consulted only where the evidence is ambiguous; it never adds or removes candidates.
                     if llm and candidates and not any(c["meaning"]=="strong" for c in candidates):
@@ -318,9 +412,11 @@ def _analyze(input_path,output_path,*,mode="demo",config_path=None,state_dir=Non
                 except Exception as error:
                     result["semantic_status"]="incomplete"
                     result["row_status"]="not_evaluated"
+                    result.update({"verdict":"karar_verilemedi","verdict_reasons":[_technical_reason()],"derivation":None})
                     result["errors"].append(_safe_error(error))
             else:
-                result["reasons"].append("Teknik sorun veya giriş hatası nedeniyle inceleme tamamlanamadı.")
+                result["verdict_reasons"]=[_technical_reason()]
+                result["reasons"].append(TECHNICAL_REASON)
         results.append(result)
         notify("Değişkenler inceleniyor",len(results))
         if result_callback:

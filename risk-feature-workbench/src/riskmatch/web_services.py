@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from .adapters._http import _NoRedirect, post_json, render_template, response_path, validate_endpoint
 from .oracle_diagnostics import diagnose_oracle
 from .adapters.qwen import LLMAdapter
-from .config import load_config
+from .config import MAX_CATALOG_RECORDS, load_config
 from .errors import ConfigError, InputError, IntegrationError
 from .excelio import _load, norm, read_requests
 
@@ -75,8 +75,8 @@ def oracle_inputs(raw,probe=False):
     schemas=value.get("schemas",[])
     if isinstance(schemas,str):schemas=[s.strip() for s in re.split(r"[,;\n]",schemas) if s.strip()]
     if not isinstance(schemas,list) or len(schemas)>30:raise ConfigError("En fazla 30 açık şema seçin.")
-    limit=value.get("max_records",10000)
-    if isinstance(limit,bool) or not isinstance(limit,int) or not 1<=limit<=10000:raise ConfigError("Katalog sınırı 1–10000 olmalı.")
+    limit=value.get("max_records",50000)
+    if isinstance(limit,bool) or not isinstance(limit,int) or not 1<=limit<=MAX_CATALOG_RECORDS:raise ConfigError(f"Katalog sınırı 1–{MAX_CATALOG_RECORDS} olmalı.")
     config={"source_database":text(value.get("source_database"),"Kaynak adı") or "ORACLE",
             "environment":text(value.get("environment"),"Ortam") or "KURUM",
             "container":"PROBE" if probe else text(value.get("container"),"Container",True),

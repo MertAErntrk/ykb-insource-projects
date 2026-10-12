@@ -17,6 +17,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
+from .derivation import VERDICT_LABELS, ROLE_LABELS
 from .errors import InputError, ReportWriteError
 
 HEADERS = ["Kategori", "Alan Adı", "Alan tipi", "Açıklama", "Halihazırda bildiriliyor mu", "Görüş", "Hazırlama süresi"]
@@ -231,6 +232,42 @@ def _count_rows(path,sheet="Sonuçlar"):
     finally:
         wb.close()
 
+RELATION_LABELS={"same_object":"aynı tablo","verified":"doğrulanmış ilişki","unverified":"ilişki doğrulanamadı"}
+
+def _source_triple(source):
+    return ".".join(str(source.get(k)) for k in ("schema","object","column") if source.get(k)) if isinstance(source,dict) else ""
+
+# Kaynağı olmayan bileşen: aranıp bulunmadı mı, aday doğrulanamadı mı, yoksa hiç aranamadı mı.
+COMPONENT_STATE_LABELS={"bulunamadi":"aranan katmanlarda bulunamadı","weak":"aday var, doğrulanamadı","unsearched":"aranamadı (bileşen tanımı eksik)"}
+
+def component_state_text(c):
+    if c.get("source"):return _source_triple(c["source"])
+    if c.get("verdict")=="bulunamadi":return COMPONENT_STATE_LABELS["bulunamadi"]
+    if any(str(x).startswith("operand_facts_incomplete") for x in c.get("reasons") or []):return COMPONENT_STATE_LABELS["unsearched"]
+    return COMPONENT_STATE_LABELS["weak"]
+
+def verdict_source_text(r):
+    """Sonuç sınıfına göre kaynak: doğrudan ise en iyi aday; türetme/belirsizse pay ve payda."""
+    verdict=r.get("verdict")
+    derivation=r.get("derivation") or {}
+    if verdict in ("turetilebilir","belirsiz") and derivation.get("components"):
+        return "; ".join(f"{ROLE_LABELS.get(c.get('role'),c.get('role') or '')}: {component_state_text(c)}" for c in derivation["components"])
+    if verdict=="dogrudan" and r.get("candidates"):
+        return _candidate_source_path(r["candidates"][0])
+    return ""
+
+def derivation_method_text(r):
+    derivation=r.get("derivation")
+    if not derivation:return ""
+    parts=[str(derivation.get("formula") or "")]
+    relation=RELATION_LABELS.get(derivation.get("relationship"))
+    if relation:parts.append(f"({relation})")
+    return " ".join(p for p in parts if p)
+
+def verdict_cells(r):
+    if not r.get("verdict"):return ["","","",""]
+    return [VERDICT_LABELS.get(r["verdict"],""),verdict_source_text(r),"; ".join(str(x.get("text") or "") for x in r.get("verdict_reasons") or [] if x.get("text")),derivation_method_text(r)]
+
 def _classify_os_error(exc):
     code=getattr(exc,"winerror",None)
     if code==112 or getattr(exc,"errno",None)==errno.ENOSPC:return "disk_full"
@@ -281,7 +318,7 @@ def _build_workbook(input_path, requests, results, run_info):
     wb.remove(wb.active)
     original_headers=list(dict.fromkeys(k for r in requests for k in r["original"] if norm(k)!=norm("Talep Kimliği")))
     candidate_headers=[h for n in range(1,MAX_SHOWN+1) for h in (f"Aday {n} kaynak",f"Aday {n} kolon açıklaması",f"Aday {n} ad eşleşmesi",f"Aday {n} iş anlamı",f"Aday {n} farklar ve kanıt",f"Aday {n} diğer konumlar")]
-    headers=["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"]+original_headers+["Satır durumu","Kapsam"]+candidate_headers+["Fiziksel ad kontrolü","Semantik uyum","Üretim ihtimali","Gerekçe","Satır hataları","Bağımlılıklar","Uzman kararı"]
+    headers=["Talep Kimliği","Kaynak Sayfa","Kaynak Satır"]+original_headers+["Satır durumu","Kapsam"]+candidate_headers+["Fiziksel ad kontrolü","Semantik uyum","Üretim ihtimali","Gerekçe","Satır hataları","Bağımlılıklar","Uzman kararı","Sonuç","Kaynak","Dayanak","Türetme yöntemi"]
     result_map={r["row_id"]:r for r in results}
     rows=[]
     for req in requests:
@@ -297,15 +334,15 @@ def _build_workbook(input_path, requests, results, run_info):
             else:
                 cells+=[""]*6
         pn,ss,ps=(r.get("physical_name",""),r.get("semantic_status",""),r.get("production_status",""))
-        rows.append([req["row_id"],req["sheet"],req["excel_row"]]+[req["original"].get(h) for h in original_headers]+[_status_text(r),_coverage_text(r)]+cells+[LABELS.get(pn,pn),LABELS.get(ss,ss),LABELS.get(ps,ps),"\n".join(reason_text(v) for v in r.get("reasons",[])),"\n".join(r.get("errors",[])),r.get("dependencies",[]),r.get("expert_decision","")])
+        rows.append([req["row_id"],req["sheet"],req["excel_row"]]+[req["original"].get(h) for h in original_headers]+[_status_text(r),_coverage_text(r)]+cells+[LABELS.get(pn,pn),LABELS.get(ss,ss),LABELS.get(ps,ps),"\n".join(reason_text(v) for v in r.get("reasons",[])),"\n".join(r.get("errors",[])),r.get("dependencies",[]),r.get("expert_decision","")]+verdict_cells(r))
     ws=_table(wb,"Sonuçlar",headers,rows)
-    for h in ("Açıklama","Gerekçe","Satır hataları"):
+    for h in ("Açıklama","Gerekçe","Satır hataları","Kaynak","Dayanak","Türetme yöntemi"):
         if h in headers:
             ws.column_dimensions[get_column_letter(headers.index(h)+1)].width=64
     for n in range(1,MAX_SHOWN+1):
         for suffix in ("kolon açıklaması","farklar ve kanıt"):
             ws.column_dimensions[get_column_letter(headers.index(f"Aday {n} {suffix}")+1)].width=48
-    expert_col=get_column_letter(len(headers))
+    expert_col=get_column_letter(headers.index("Uzman kararı")+1)
     dv=DataValidation(type="list",formula1='"İncelenmedi,Onaylandı,Reddedildi,Ek bilgi bekleniyor"')
     ws.add_data_validation(dv)
     if rows:

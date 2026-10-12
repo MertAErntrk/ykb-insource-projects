@@ -23,7 +23,7 @@ Tarayıcıda **http://127.0.0.1:8765** açılır. PowerShell penceresi açık ka
 
 ## Kullanım (özet)
 
-Bağlan → şemaları seç → embedding testi → indekslemeyi başlat → Excel yükle → **İlk 1** → **Sıradaki 10 aranmamış** → **Tümü** → Excel sonucunu indir. Ayrıntı ve sorun giderme: **[İş bilgisayarı rehberi](docs/IS_BILGISAYARINDA_BASLANGIC.md)**.
+Bağlan (yalnız kullanıcı adı ve parola; DM_CAD → DM → EDW otomatik taranır) → embedding testi ve indeks kendiliğinden başlar → Excel yükle → **İlk 1** → **Sıradaki 10 aranmamış** → **Tümü** → Excel sonucunu indir. Model açıkken eşleştirme indeks %100 olunca başlar. Ayrıntı ve sorun giderme: **[İş bilgisayarı rehberi](docs/IS_BILGISAYARINDA_BASLANGIC.md)**.
 
 Standart Excel başlıkları: `Kategori | Alan Adı | Alan tipi | Açıklama | Halihazırda bildiriliyor mu`. Yalnız **Alan Adı** ve **Açıklama** zorunludur; farklı başlıklar ekrandan eşlenir. Bildirim bilgisi kullanıcı beyanıdır, veritabanı kanıtı sayılmaz.
 

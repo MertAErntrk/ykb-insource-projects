@@ -29,7 +29,8 @@ def workbook(headers=None):
 class WebTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
-        self.app=create_app(self.root);self.client=self.app.test_client();self.client.get("/")
+        # Sabit şemalar testte sahte katalogdaki şemaya ayarlanır (varsayılan DM_CAD, DM, EDW).
+        self.app=create_app(self.root,scan_schemas=getattr(self,"SCAN",["RISK_DWH"]));self.client=self.app.test_client();self.client.get("/")
         with self.client.session_transaction() as s:self.headers={"X-CSRF-Token":s["csrf"]}
         self.connect()
     def connect(self):
@@ -218,5 +219,82 @@ class WebTests(unittest.TestCase):
         for path in self.root.rglob("*.json"):
             self.assertNotIn("SECRET_SENTINEL",path.read_text("utf-8"))
 
+
+class AnnotateVerdictTests(unittest.TestCase):
+    def test_verdict_fields_and_old_result_without_them(self):
+        from riskmatch.web import annotate
+        row={"row_id":"r","row_status":"found","candidates":[],"verdict":"turetilebilir","verdict_reasons":[{"code":"c","text":"Neden"}],
+             "derivation":{"formula":"a / b","relationship":"verified","components":[{"role":"numerator","name":"a","window":None,"verdict":"dogrudan","source":{"schema":"DM","object":"T","column":"A"},"tier":"DM","reasons":[]}]},
+             "tier_trace":[{"tier":"DM","schemas":["DM"],"row_status":"found","top":"DM.T.A","meaning":"supported","semantic_scope":"full"}]}
+        out=annotate(row,{"name":"X"})
+        self.assertEqual(out["verdict"],"turetilebilir")
+        self.assertEqual(out["verdict_label"],"Türetilebilir")
+        self.assertEqual(out["verdict_reasons"][0]["text"],"Neden")
+        self.assertEqual(out["derivation_method"],"a / b (doğrulanmış ilişki)")
+        self.assertEqual(out["verdict_source"],"Pay: DM.T.A")
+        self.assertEqual(out["tier_trace"][0]["scope_label"],"tam")
+        old=annotate({"row_id":"r","row_status":"found","candidates":[]},{"name":"X"})
+        self.assertIsNone(old["verdict"])
+        self.assertEqual((old["verdict_label"],old["verdict_source"],old["tier_trace"],old["verdict_reasons"]),("","",[],[]))
+        self.assertIsNone(old["derivation"])
+
+    def test_fixed_scan_schemas_keep_tier_order_and_report_missing(self):
+        from riskmatch.web import connection_scope
+        fixed=["DM_CAD","DM","EDW"]
+        value=connection_scope({"ok":True,"schemas":["EDW","ZZZ","DM_CAD"]},fixed)
+        self.assertTrue(value["ok"])
+        self.assertEqual(value["scan_schemas"],["DM_CAD","EDW"])
+        self.assertEqual(value["missing_schemas"],["DM"])
+        self.assertTrue(value["warning"].startswith("DM şeması bu kullanıcıyla erişilebilir listede yok"))
+        self.assertNotIn("default_schemas",value)
+        full=connection_scope({"ok":True,"schemas":["EDW","DM","DM_CAD"]},fixed)
+        self.assertEqual((full["scan_schemas"],full["missing_schemas"],full.get("warning")),(fixed,[],None))
+        two=connection_scope({"ok":True,"schemas":["DM_CAD"]},fixed)
+        self.assertIn("DM, EDW şemaları",two["warning"])
+        none=connection_scope({"ok":True,"schemas":["ZZZ"],"container":"PDB1"},fixed)
+        self.assertFalse(none["ok"])
+        self.assertTrue(none["error"])
+        self.assertEqual(none["scan_schemas"],[])
+
+
+class FixedSchemaConnectTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
+        self.app=create_app(self.root);self.client=self.app.test_client();self.client.get("/")
+        with self.client.session_transaction() as s:self.headers={"X-CSRF-Token":s["csrf"]}
+    def tearDown(self):
+        self.app.extensions["riskmatch"]["executor"].shutdown(wait=True)
+        self.tmp.cleanup()
+    def login(self,schemas):
+        connection=FakeConnection();connection.cur.fetchmany=lambda count:[(name,) for name in schemas]
+        with patch.object(OracleAdapter,"_connect",return_value=connection):
+            response=self.client.post("/api/connect",json={"user":"u","password":"PASSWORD_SENTINEL"},headers=self.headers)
+        self.assertEqual(response.status_code,200)
+        self.assertNotIn("PASSWORD_SENTINEL",response.text)
+        return response.json
+    def test_default_schemas_are_fixed_tiers_in_order(self):
+        value=self.login(["EDW","OTHER","DM","DM_CAD"])
+        self.assertTrue(value["ok"])
+        self.assertEqual(value["scan_schemas"],["DM_CAD","DM","EDW"])
+        self.assertEqual(value["missing_schemas"],[])
+        self.assertNotIn("warning",value)
+        self.assertNotIn("default_schemas",value)
+        status=self.client.get("/api/connection").json
+        self.assertEqual(status["scan_schemas"],["DM_CAD","DM","EDW"])
+        with self.client.session_transaction() as cookie:owner=cookie["owner"]
+        self.assertEqual(self.app.extensions["riskmatch"]["connections"][owner]["scan_schemas"],["DM_CAD","DM","EDW"])
+    def test_missing_tier_schema_warns_but_connects(self):
+        value=self.login(["DM_CAD","DM"])
+        self.assertTrue(value["ok"])
+        self.assertEqual((value["scan_schemas"],value["missing_schemas"]),(["DM_CAD","DM"],["EDW"]))
+        self.assertIn("EDW şeması",value["warning"])
+        self.assertIn("karar verilemedi",value["warning"])
+    def test_no_tier_schema_rejects_login_and_keeps_no_connection(self):
+        value=self.login(["OTHER"])
+        self.assertFalse(value["ok"])
+        self.assertTrue(value["error"])
+        self.assertEqual(value["missing_schemas"],["DM_CAD","DM","EDW"])
+        self.assertFalse(self.app.extensions["riskmatch"]["connections"])
+        self.assertFalse(self.client.get("/api/connection").json["ok"])
 
 if __name__=="__main__":unittest.main()

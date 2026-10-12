@@ -20,6 +20,10 @@ DIMENSIONS = (
 # Not facts parsed from text: data_type comes from the request/catalog type
 # columns, qualifier compares unparsed residual words.
 DERIVED_DIMENSIONS = {"data_type", "qualifier"}
+# Bir oranın iki bileşeni aynı işlemi sayar; açıklamadaki bu olgular oranın da olgusudur.
+RATIO_SHARED_DIMENSIONS = ("entity", "transaction", "direction", "aggregation")
+# Farklı adlı bileşenlerde dönem tek başına yetmez; neyin sayıldığını açıklama doğrulamalı.
+RATIO_SUBJECT_DIMENSIONS = ("transaction", "concept")
 WINDOWS = {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}
 TRUSTED_SOURCES = {"description", "verified_metadata", "naming_rule"}
 IDENTIFIER = r"[^\W\d]\w*"
@@ -65,6 +69,27 @@ def _lexicon_windows(text):
     for number, unit in _lexicon().window(text):
         value = _window_value(number, unit)
         if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _suffix_window(token, windows):
+    """Name suffix -> canonical window: confirmed suffixes first, then the
+    lexicon (L6M, W1M, LM), so names and descriptions share one canon."""
+    token = str(token or "")
+    if token.upper() in windows:
+        return windows[token.upper()]
+    found = _lexicon().tokens(token) if token else []
+    if len(found) == 1 and found[0].startswith("win:"):
+        _, number, unit = found[0].split(":")
+        return _window_value(int(number), unit)
+    return None
+
+
+def _description_windows(clean, text):
+    values = _lexicon_windows(clean)
+    for pattern, value in ((r"son (?:3|uc) ay", "last_3_months"), (r"son (?:2|iki) hafta", "last_2_weeks"), (r"son (?:bir )?ay(?:da|in|lik)?\b", "last_month"), (r"son (?:bir )?hafta(?:da|nin|lik)?\b", "last_week")):
+        if re.search(pattern, text) and value not in values:
             values.append(value)
     return values
 
@@ -127,10 +152,18 @@ def parse_definition(name, description, naming=None):
             return
         facts[dimension] = {"value": value, "source": source, "evidence": evidence or original}
 
-    # Suffixes provide only user-confirmed window semantics, not measures or keys.
+    # Suffixes provide only window semantics (and an explicit TL unit), not measures or keys.
     suffixes = str(name or "").split("_")
-    name_window = windows.get(suffixes[-1].upper()) if suffixes else None
-    has_two_windows = len(suffixes) > 2 and suffixes[-2].upper() in windows and name_window
+    ratio_rule = naming.get("ratio_rule", "suffix_pair")
+    name_window = _suffix_window(suffixes[-1], windows) if suffixes else None
+    if ratio_rule == "approved_bases_only":
+        has_two_windows = len(suffixes) > 2 and suffixes[-2].upper() in windows and suffixes[-1].upper() in windows
+        pair_window = None
+    else:
+        # <base>_<P1>_<P2>: two window suffixes name the ratio base_P1 / base_P2.
+        pair_window = _suffix_window(suffixes[-2], windows) if len(suffixes) > 2 else None
+        has_two_windows = bool(pair_window and name_window)
+    suffix_pair = has_two_windows and ratio_rule == "suffix_pair"
     if not name_window and not has_two_windows:
         # Explicit numeric windows in a name (3M, 12AY, SON_6_AY); several are ambiguous.
         found = _lexicon_windows(name)
@@ -146,15 +179,17 @@ def parse_definition(name, description, naming=None):
             definition["formula"] = {"op": "divide", "numerator": numerator, "denominator": denominator, "zero": None, "null": None}
             for dim, val in (("numerator", numerator), ("denominator", denominator), ("concept", "ratio"), ("measure", "ratio")):
                 put(dim, val)
-    elif "/" in text or clean.startswith("="):
+    elif clean.startswith("=") or ("/" in text and not suffix_pair):
+        # Under suffix_pair the name states the ratio; "A'nın B'ye oranı" or "/" prose is not a formula.
         issues.append("unsupported_formula")
 
-    # Only the exact user-confirmed example (or explicitly configured bases) may
-    # infer a ratio from a name. An arbitrary two-window suffix is ambiguous.
+    # suffix_pair: any <base>_<P1>_<P2> name is base_P1 / base_P2.
+    # approved_bases_only: only the exact user-confirmed example (or explicitly
+    # configured bases) may infer a ratio; an arbitrary two-window suffix is ambiguous.
     ratio_bases = naming.get("ratio_bases", ["Giden_max_havale_adeti"])
     approved_base = "_".join(suffixes[:-2])
     if has_two_windows and not definition["formula"]:
-        if _key(approved_base) in {_key(x) for x in ratio_bases} and not text:
+        if suffix_pair or (_key(approved_base) in {_key(x) for x in ratio_bases} and not text):
             numerator = "_".join(suffixes[:-1])
             denominator = approved_base + "_" + suffixes[-1]
             definition["formula"] = {"op": "divide", "numerator": numerator, "denominator": denominator, "zero": None, "null": None}
@@ -172,7 +207,9 @@ def parse_definition(name, description, naming=None):
             expected_den = "_".join(suffixes[:-2] + [suffixes[-1]])
             if _key(formula["numerator"]) != _key(expected_num) or _key(formula["denominator"]) != _key(expected_den):
                 issues.append("conflict:ratio_direction")
-        zero = re.search(r"payda\s*(?:sifirsa|0\s*ise|sifir\s*ise)\s*[:=]?\s*(-?\d+(?:\.\d+)?)", text)
+        if suffix_pair and any(w not in (pair_window, name_window) for w in _description_windows(clean, text)):
+            issues.append("conflict:ratio_window")
+        zero =re.search(r"payda\s*(?:sifirsa|0\s*ise|sifir\s*ise)\s*[:=]?\s*(-?\d+(?:\.\d+)?)", text)
         if zero:
             val = float(zero.group(1))
             val = int(val) if val.is_integer() else val
@@ -188,6 +225,12 @@ def parse_definition(name, description, naming=None):
             trailing = re.sub(r"(?:payda\s+)?null\s*(?:ise|sa)\s*[:=]?\s*(?:null|-?\d+(?:\.\d+)?)", "", trailing)
             if trailing.strip(" .;,\n\t"):
                 issues.append("unparsed_formula_qualifier")
+        if suffix_pair and text:
+            base = parse_definition(approved_base, original, {**naming, "ratio_rule": "approved_bases_only", "ratio_bases": []})
+            clashing = {i.split(":", 1)[1] for i in base["issues"] if i.startswith("conflict:")}
+            for dim in RATIO_SHARED_DIMENSIONS:
+                if dim in base["facts"] and dim not in clashing and dim not in facts:
+                    facts[dim] = base["facts"][dim]
         return definition
 
     # Negation and multiple competing operations require review, not a guess.
@@ -207,7 +250,8 @@ def parse_definition(name, description, naming=None):
         put("grain", grains[0])
         if grains[0] == "application":
             put("entity", "application")
-    for word, val in (("havale", "havale"), ("eft", "eft")):
+    # Channels are distinct; "transfer" alone is an umbrella, not a channel.
+    for word, val in (("havale", "havale"), ("eft", "eft"), ("swift", "swift"), ("wu", "western_union"), ("western union", "western_union")):
         if re.search(r"\b" + word + r"\b", text):
             put("transaction", val)
             put("concept", "transfer")
@@ -227,7 +271,7 @@ def parse_definition(name, description, naming=None):
         # A duration, not a count of events; the period word is its unit.
         put("measure", "duration")
         put("unit", DURATION_UNITS[duration.group(1)])
-    elif re.search(r"\b(?:adet(?:i|leri)?|adedi|sayisi|sayi|count)\b", text):
+    elif re.search(r"\b(?:adet(?:i|leri)?|aded\w*|sayisi|sayi|count)(?:dir)?\b", text):
         put("measure", "count")
         put("aggregation", "count")
     if re.search(r"\b(?:tutar\w*|amount|bakiye\w*)\b", text):
@@ -244,16 +288,14 @@ def parse_definition(name, description, naming=None):
             put("aggregation", "count")
         else:
             put("aggregation", [inner, operations[0]] if inner else operations[0])
-    description_windows = _lexicon_windows(clean)
-    for pattern, value in ((r"son (?:3|uc) ay", "last_3_months"), (r"son (?:2|iki) hafta", "last_2_weeks"), (r"son (?:bir )?ay(?:da|in|lik)?\b", "last_month"), (r"son (?:bir )?hafta(?:da|nin|lik)?\b", "last_week")):
-        if re.search(pattern, text) and value not in description_windows:
-            description_windows.append(value)
-    for window in description_windows:
+    for window in _description_windows(clean, text):
         put("window", window)
     if name_window and not has_two_windows:
         if "window" in facts:
             if _key(facts["window"]["value"]) != _key(name_window):
+                # A request conflict; for a catalog column the comment wins (see evaluate_candidate).
                 issues.append("conflict:window")
+                definition["window_name_mismatch"] = {"name": name_window, "description": facts["window"]["value"]}
         else:
             put("window", name_window, str(name), "naming_rule")
 
@@ -285,6 +327,9 @@ def parse_definition(name, description, naming=None):
         put("unit", "TRY")
     elif "%" in text or "yuzde" in text:
         put("unit", "percent")
+    elif any(s.upper() in ("TL", "TRY") for s in suffixes):
+        # An explicit currency suffix (AMT_TL) is a unit, never a measure.
+        put("unit", "TRY", str(name), "naming_rule")
     # Currency or percent implies a measure only when nothing more specific did.
     if "measure" not in facts:
         if re.search(r"\b(?:tl|try)\b", text):
@@ -309,13 +354,14 @@ def parse_definition(name, description, naming=None):
         residual = re.sub(r"(?:^|[,;.\n])\s*\d+\s+[^,;\n.]+", " ", residual)
     covered = [
         r"(?:kredi karti|kart|kredi|islem|hesap|musteri|basvuru) (?:bazinda|bazli|basina)|her (?:kredi karti|kart|kredi|islem|hesap|musteri|basvuru) icin",
+        r"(?:(?:ilgili )?(?:yil )?aydan )?onceki \d+ ?(?:gun|hafta|ay|yil)\w*(?: (?:icerisinde|icinde))?",
         r"son (?:\d+|bir|iki|uc|dort|bes|alti|yedi|sekiz|dokuz|on|oniki)? ?(?:gun|hafta|ay|yil)\w*|\d+ ?(?:gun|hafta|ay|yil)\w*",
         r"(?:farkli|tekil|benzersiz)\s+(?:kisi|hesap)",
-        r"islem (?:sayisi|adedi)|adet\w*|adedi|sayisi|sayi|count|tutar\w*|amount|bakiye\w*|oran\w*",
+        r"islem (?:sayisi|adedi)|adet\w*|adedi\w*|sayisi|sayi|count|tutar\w*|amount|bakiye\w*|oran\w*",
         r"faiz turu|faiz orani|sabit faiz|degisken faiz",
         r"beyan edilen|dogrulanmis|basvurulan|onaylanan",
         r"toplam|sum|max|maksimum|en yuksek|ortalama|average|avg",
-        r"musterinin|musteri|basvuruda|havale|eft|gelen|giden|tutar(?:i)?|gelir|limit|vade|try|tl|yuzde",
+        r"musterinin|musteri|basvuruda|havale|eft|swift|wu|western union|gelen|giden|tutar(?:i)?|gelir|limit|vade|try|tl|yuzde",
         r"kac|ile|iliskisine|girdigi|sayisi|yaptigi|ve|burada|isteniyor",
     ]
     if facts.get("concept", {}).get("value") == "income" and "unit" in facts:
@@ -348,7 +394,7 @@ def _trusted(fact, dim):
     scalar_dimensions = {"entity", "grain", "concept", "transaction", "direction", "measure", "window", "reference_date", "person_key", "unit", "numerator", "denominator"}
     if dim in scalar_dimensions and not isinstance(value, str):
         return False
-    return fact["source"] != "naming_rule" or dim in {"window", "numerator", "denominator", "concept", "measure"}
+    return fact["source"] != "naming_rule" or dim in {"window", "numerator", "denominator", "concept", "measure", "unit"}
 
 
 def _critical(left, right):
@@ -367,11 +413,35 @@ def evaluate_candidate(request, record):
     checks, reasons, notes = [], [], []
     for dimension in _critical(left, right):
         a, b = left.get(dimension, {}), right.get(dimension, {})
+        if dimension == "unit" and not _trusted(a, dimension) and _trusted(b, dimension) and b["value"] == "TRY":
+            # A request silent on currency does not block a TL column; noted for review.
+            notes.append("unit_unverified: talep birim belirtmiyor, kolon TRY")
+            continue
+        if dimension == "entity" and not _trusted(a, dimension) and _trusted(b, dimension):
+            # Talep varlık söylemiyorsa kolonun varlığı engel değil; incelemede not olarak görünür.
+            notes.append("entity_unverified: talep varlık belirtmiyor, kolon " + str(b["value"]))
+            continue
         if not _trusted(a, dimension) or not _trusted(b, dimension):
             status = "missing"
+        elif dimension in ("numerator", "denominator") and _key(a["value"]) != _key(b["value"]):
+            # Adlandırma kurumdan kuruma değişir: bileşen son ekindeki dönemle karşılaştırılır, okunamazsa doğrulanamaz.
+            wanted_window, actual_window = (_suffix_window(str(v).split("_")[-1], WINDOWS) for v in (a["value"], b["value"]))
+            if wanted_window and actual_window:
+                status = "compatible" if wanted_window == actual_window else "conflict"
+            else:
+                # Dönem okunamıyorsa yalnız aynı adın ters rolde geçmesi (B / A) çelişkidir.
+                swapped = right.get("denominator" if dimension == "numerator" else "numerator", {})
+                status = "conflict" if _key(a["value"]) == _key(swapped.get("value")) else "missing"
         else:
             status = "compatible" if _key(a["value"]) == _key(b["value"]) else "conflict"
         checks.append({"dimension": dimension, "status": status, "requested": a.get("value"), "actual": b.get("value"), "evidence": {"request": a.get("evidence", ""), "candidate": b.get("evidence", ""), "request_source": a.get("source"), "candidate_source": b.get("source")}})
+    renamed = [c for c in checks if c["dimension"] in ("numerator", "denominator") and c["status"] == "compatible"
+               and _key(c["requested"]) != _key(c["actual"])]
+    if renamed and not any(c["dimension"] in RATIO_SUBJECT_DIMENSIONS and c["status"] == "compatible"
+                           and "naming_rule" not in (c["evidence"]["request_source"], c["evidence"]["candidate_source"])
+                           for c in checks):
+        for check in renamed:
+            check["status"] = "missing"
     # Physical type: only two known, different classes are a conflict.
     wanted_type, actual_type = request.get("data_type") or "", record.get("data_type") or ""
     wanted_class, actual_class = type_class(wanted_type), type_class(actual_type)
@@ -387,8 +457,14 @@ def evaluate_candidate(request, record):
     for check in checks:
         if check["status"] != "compatible":
             reasons.append(check["status"] + ":" + check["dimension"])
-    for origin, definition in (("request", wanted), ("candidate", actual)):
-        reasons.extend(origin + ":" + str(issue) for issue in definition.get("issues", []))
+    # Catalog column: the comment window wins over the name suffix; a note, not a conflict.
+    candidate_issues = list(actual.get("issues", []))
+    mismatch = actual.get("window_name_mismatch")
+    if isinstance(mismatch, dict) and "conflict:window" in candidate_issues:
+        candidate_issues.remove("conflict:window")
+        notes.append("window_name_mismatch: ad " + _window_text(mismatch.get("name")) + ", yorum " + _window_text(mismatch.get("description")))
+    for origin, issues in (("request", wanted.get("issues", [])), ("candidate", candidate_issues)):
+        reasons.extend(origin + ":" + str(issue) for issue in issues)
     conflicting = any(c["status"] == "conflict" for c in checks) or any("conflict:" in reason for reason in reasons)
     # An empty match is not support: at least two meaning dimensions must agree.
     agreed = sum(1 for c in checks if c["status"] == "compatible" and c["dimension"] not in DERIVED_DIMENSIONS)

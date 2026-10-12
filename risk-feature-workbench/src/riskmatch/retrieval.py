@@ -12,6 +12,7 @@ import re
 import unicodedata
 from collections import Counter
 
+from riskmatch import config as _config
 from riskmatch import lexicon as _lexicon
 from riskmatch.errors import AnalysisCancelled, InputError, IntegrationError, StaleIndexError
 from riskmatch.vectorstore import text_hash
@@ -124,8 +125,8 @@ class HybridIndex:
     def __init__(self, snapshot, *, embed=None, namespace=None, lexicon=None, progress=None,
                  cancelled=None, pool_size=30, lexical_k=40, semantic_k=30, shortlist_embed=10,
                  background_size=128, embedding=None, cache_dir=None, candidate_limit=None,
-                 embedding_budget=None):
-        for value in (pool_size, lexical_k, semantic_k, shortlist_embed, background_size):
+                 embedding_budget=None, table_k=10, table_embed=40, exclude_objects=None):
+        for value in (pool_size, lexical_k, semantic_k, shortlist_embed, background_size, table_k, table_embed):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise InputError("Aday havuzu ayarları negatif olmayan tam sayı olmalı.")
         self.progress = progress
@@ -143,12 +144,16 @@ class HybridIndex:
             raise InputError("Katalog sürümü gerekli.")
         self.signature = _signature(snapshot)
         allowed = set(scope["schemas"])
+        # Taramanın uyguladığı kural snapshot kapsamında taşınır; yoksa varsayılan kural.
+        excluded = self._exclusion_rules(exclude_objects if exclude_objects is not None else scope.get("exclude_objects"))
         self.records = []
         seen = set()
         for record in snapshot["records"]:
             if any(record.get(key) != scope[key] for key in ("source_database", "environment", "container")):
                 continue
             if record.get("schema") not in allowed:
+                continue
+            if excluded and self._excluded(record, excluded):
                 continue
             catalog_id = record.get("catalog_id")
             if not isinstance(catalog_id, str) or not catalog_id or catalog_id in seen:
@@ -157,6 +162,7 @@ class HybridIndex:
             self.records.append(record)
         self.pool_size, self.lexical_k, self.semantic_k = pool_size, lexical_k, semantic_k
         self.shortlist_embed, self.background_size = shortlist_embed, background_size
+        self.table_k, self.table_embed = table_k, table_embed
         self.lexicon = lexicon or _lexicon.load()
         self.embedding = embedding
         if embed is None and embedding is not None:
@@ -186,6 +192,7 @@ class HybridIndex:
         self._all_indices = list(range(len(self.records)))
         self._all_set = frozenset(self._all_indices)
         self._all_hashes = frozenset(self._doc_hashes)
+        self._build_tables()
         self._background = self._unique_hashes[:background_size]
         self._background_ready = False
         self._query_vectors = {}
@@ -227,6 +234,28 @@ class HybridIndex:
                  str(request.get("description") or "").strip(), str(request.get("category") or "").strip()]
         return " | ".join(part for part in parts if part)[:8000]
 
+    def table_document_text(self, schema, obj, table_comment):
+        obj = str(obj or "").strip()
+        parts = [obj, self.lexicon.describe(obj) if obj else "", str(table_comment or "").strip()]
+        return " | ".join(part for part in parts if part)[:8000]
+
+    @staticmethod
+    def _exclusion_rules(rules):
+        if rules is None:
+            rules = _config.DEFAULT_EXCLUDE_OBJECTS
+        if not isinstance(rules, list) or not all(
+                isinstance(rule, dict) and isinstance(rule.get("schema"), str)
+                and isinstance(rule.get("prefixes"), list) and all(isinstance(p, str) for p in rule["prefixes"])
+                for rule in rules):
+            raise InputError("Dışlama kuralları şema ve önek listesi olmalı.")
+        return [(rule["schema"], tuple(p.upper() for p in rule["prefixes"] if p)) for rule in rules]
+
+    @staticmethod
+    def _excluded(record, rules):
+        obj = str(record.get("object") or "").upper()
+        return any(record.get("schema") == schema and obj.startswith(prefixes)
+                   for schema, prefixes in rules if prefixes)
+
     def document_hash(self, record):
         return text_hash(self.document_text(record))
 
@@ -253,11 +282,53 @@ class HybridIndex:
                 self._normalized_indices.setdefault(tuple(sorted(column)), []).append(index)
         self._average_length = sum(self._lengths) / len(self._lengths) if self._lengths else 1.0
 
+    def _build_tables(self):
+        """Tablo belgeleri (ad + açıklama) ve tablo düzeyi BM25; kolon indeksinden ayrı."""
+        self._table_keys, self._table_members, self._record_table, ids = [], [], [], {}
+        comments = []
+        for index, record in enumerate(self.records):
+            key = (record.get("schema"), record.get("object"))
+            table = ids.get(key)
+            if table is None:
+                table = ids[key] = len(self._table_keys)
+                self._table_keys.append(key)
+                self._table_members.append([])
+                comments.append("")
+            self._table_members[table].append(index)
+            self._record_table.append(table)
+            if not comments[table] and str(record.get("table_comment") or "").strip():
+                comments[table] = record.get("table_comment")
+        self._table_hashes, self._table_texts, self._table_hash_tables = [], {}, {}
+        self._table_postings, self._table_lengths = {}, []
+        for table, (schema, obj) in enumerate(self._table_keys):
+            text = self.table_document_text(schema, obj, comments[table])
+            digest = text_hash(text)
+            self._table_hashes.append(digest)
+            self._table_texts[digest] = text
+            self._table_hash_tables.setdefault(digest, []).append(table)
+            weights = Counter()
+            for tokens, weight in ((self._lex(obj), 2), (self._lex(comments[table]), 1)):
+                for token in tokens:
+                    weights[token] += weight
+            for token, tf in weights.items():
+                self._table_postings.setdefault(token, []).append((table, tf))
+            self._table_lengths.append(sum(weights.values()))
+        self._table_average = (sum(self._table_lengths) / len(self._table_lengths)
+                               if self._table_lengths else 1.0)
+        self._table_unique = sorted(self._table_hash_tables)
+        self._all_tables = frozenset(range(len(self._table_keys)))
+
+    def _text(self, digest):
+        indices = self._hash_indices.get(digest)
+        return self._doc_texts[indices[0]] if indices else self._table_texts[digest]
+
     # -- frozen semantic set ----------------------------------------------------
 
     def refresh_index(self):
         self._frozen = (frozenset(self.namespace.has(self._unique_hashes))
                         if self.namespace is not None and self._unique_hashes else frozenset())
+        self._table_frozen = (frozenset(self.namespace.has(self._table_unique))
+                              if self.namespace is not None and self._table_unique else frozenset())
         self._all_covered = self._frozen >= self._all_hashes
         return len(self._frozen)
 
@@ -272,7 +343,7 @@ class HybridIndex:
     def embed_all(self):
         """Embed every catalog text not yet stored, then freeze; for small catalogs (demo, tests)."""
         if self.embed is not None and self._unique_hashes:
-            self._store_documents(self._unique_hashes, "Katalog metinleri anlamsal arama için hazırlanıyor")
+            self._store_documents(self._table_unique + self._unique_hashes, "Katalog metinleri anlamsal arama için hazırlanıyor")
             self.refresh_index()
         return self.index_coverage
 
@@ -291,6 +362,29 @@ class HybridIndex:
         missing = [(h, self._doc_texts[self._hash_indices[h][0]])
                    for h in self._unique_hashes if h not in present]
         return missing if limit is None else missing[:max(0, limit)]
+
+    def queue_counts(self):
+        """(eksik, toplam) benzersiz tablo + kolon belgesi; index_queue() sıralaması yapmadan sayar."""
+        hashes = set(self._table_unique) | set(self._unique_hashes)
+        present = self.namespace.has(list(hashes)) if self.namespace is not None and hashes else set()
+        return len(hashes) - len(present & hashes), len(hashes)
+
+    def index_queue(self):
+        """Arka plan sırası: önce eksik tablo belgeleri, sonra kolonlar şema katmanı önceliğiyle."""
+        hashes = self._table_unique + self._unique_hashes
+        present = self.namespace.has(hashes) if self.namespace is not None else set()
+        tiers = {}
+        for rank, tier in enumerate(_config.DEFAULT_SCHEMA_TIERS):
+            for schema in tier.get("schemas") or ():
+                tiers.setdefault(schema, rank)
+        last = len(_config.DEFAULT_SCHEMA_TIERS)
+        tables = [(h, self._table_texts[h]) for h in self._table_unique if h not in present]
+        tables.sort(key=lambda item: (min(tiers.get(self._table_keys[t][0], last)
+                                          for t in self._table_hash_tables[item[0]]), item[0]))
+        columns = [(h, self._doc_texts[self._hash_indices[h][0]]) for h in self._unique_hashes if h not in present]
+        columns.sort(key=lambda item: (min(tiers.get(self.records[i].get("schema"), last)
+                                           for i in self._hash_indices[item[0]]), item[0]))
+        return tables + columns
 
     # -- infrastructure ---------------------------------------------------------
 
@@ -354,7 +448,7 @@ class HybridIndex:
         missing = sorted(set(hashes) - self.namespace.has(hashes))
         self.stats["catalog_cache_hits"] += len(set(hashes)) - len(missing)
         if missing:
-            texts = [self._doc_texts[self._hash_indices[h][0]] for h in missing]
+            texts = [self._text(h) for h in missing]
             vectors = self._call_embed(texts, "document", stage)
             self.namespace.put_many(list(zip(missing, vectors)))
             self.stats["catalog_vectors_embedded"] += len(missing)
@@ -424,8 +518,72 @@ class HybridIndex:
             out.append(index)
         return out, matched
 
-    def _semantic(self, query, eligible, shortlist, info):
-        """Return (semantic ranked indices, cos-by-hash, background) or raise on provider failure."""
+    def _table_bm25(self, tokens, scoped):
+        n = len(self._table_keys)
+        scores, matched = {}, set()
+        for token in tokens:
+            postings = self._table_postings.get(token)
+            if not postings:
+                continue
+            df = len(postings)
+            idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
+            distinctive = self._distinctive(token)
+            for table, tf in postings:
+                if table not in scoped:
+                    continue
+                norm = 1.2 * (0.25 + 0.75 * self._table_lengths[table] / (self._table_average or 1))
+                scores[table] = scores.get(table, 0.0) + idf * (tf * 2.2) / (tf + norm)
+                if distinctive:
+                    matched.add(table)
+        return sorted((t for t in scores if t in matched), key=lambda t: (-scores[t], self._table_keys[t]))
+
+    def _rank_tables(self, tokens, scoped, vector):
+        """İlk table_k tablo: tablo BM25'i ve (vektör varsa) tablo cos sırasının RRF'i."""
+        lists, mode = [self._table_bm25(tokens, scoped)], "lexical"
+        if vector is not None:
+            hashes = {self._table_hashes[t] for t in scoped} & self._table_frozen
+            if hashes:
+                scored = self.namespace.rescore(vector, hashes)
+                self.stats["vector_comparisons"] += len(scored)
+                lists.append([t for h, _ in scored for t in sorted(self._table_hash_tables[h]) if t in scoped])
+                mode = "semantic"
+        scores = {}
+        for ranked in lists:
+            for rank, table in enumerate(ranked, 1):
+                scores[table] = scores.get(table, 0.0) + 1.0 / (60 + rank)
+        top = sorted(scores, key=lambda t: (-scores[t], self._table_keys[t]))[:self.table_k]
+        return top, {t: scores[t] for t in top}, mode
+
+    def _table_columns(self, tables, eligible_set, query_set):
+        """Seçilen tabloların kapsamdaki kolonları; tablo başına sorgu tokenı eşleşmesine göre sıralı."""
+        out = []
+        for table in tables:
+            members = [i for i in self._table_members[table] if i in eligible_set]
+            hits = {i: len(query_set & self._content_tokens[i]) for i in members}
+            out.append(sorted(members, key=lambda i: (-hits[i], self.records[i]["catalog_id"])))
+        return out
+
+    def _table_embed_hashes(self, tables, eligible_set, query_set):
+        """Seçilen tabloların vektörsüz kolonlarından en çok table_embed tanesi (tablolar arasında sırayla)."""
+        per_table = self._table_columns(tables, eligible_set, query_set)
+        chosen, seen, depth = [], set(), 0
+        while len(chosen) < self.table_embed and any(depth < len(c) for c in per_table):
+            for columns in per_table:
+                if depth < len(columns):
+                    digest = self._doc_hashes[columns[depth]]
+                    if digest not in self._frozen and digest not in seen:
+                        seen.add(digest)
+                        chosen.append(digest)
+                        if len(chosen) >= self.table_embed:
+                            break
+            depth += 1
+        return chosen
+
+    def _semantic(self, query, eligible, shortlist, info, extra=None):
+        """Return (semantic ranked indices, cos-by-hash, background) or raise on provider failure.
+
+        extra(vector) satırın ek anında-embed hash'lerini döndürür; kısa listeyle tek çağrıda saklanır.
+        """
         key, vector = self._query_vector(query)
         info["query_embedded"] = True
         background = self._background_stats(key, vector)
@@ -440,9 +598,11 @@ class HybridIndex:
             self.stats["vector_comparisons"] += len(scored)
             ranked = [h for h, _ in scored[:self.semantic_k]]
         short_hashes = list(dict.fromkeys(self._doc_hashes[i] for i in shortlist))[:self.shortlist_embed]
-        if short_hashes:
-            self._store_documents(short_hashes, "Kısa listedeki kolonlar anlam bakımından karşılaştırılıyor")
-        return vector, ranked, set(searchable) | set(short_hashes), background
+        extra_hashes = extra(vector) if extra is not None else []
+        stored = list(dict.fromkeys(short_hashes + extra_hashes))
+        if stored:
+            self._store_documents(stored, "Kısa listedeki kolonlar anlam bakımından karşılaştırılıyor")
+        return vector, ranked, set(searchable) | set(stored), background
 
     def search(self, request, limit=None, strategy="hybrid", expanded=False):
         self._check_cancelled()
@@ -451,7 +611,7 @@ class HybridIndex:
             "semantic_scope": "none", "index_coverage": self.index_coverage, "pool_size": 0,
             "query_embedded": False, "document_calls": 0, "warning": None, "eligible_count": 0,
             "exact_match_count": 0, "candidate_limited": False, "candidate_count": 0,
-            "embedding_skipped": False}
+            "embedding_skipped": False, "table_channel": {"tables": [], "mode": "off"}}
         if not isinstance(request, dict):
             raise InputError("Talep nesne olmalı.")
         if strategy == "bm25":
@@ -487,6 +647,18 @@ class HybridIndex:
             self.stats["lexical_searches"] += 1
             lexical, matched = self._bm25(query_tokens, eligible_set)
         info["exact_match_count"] = len(exact)
+        # Önce-tablo kanalı: talep tablo adı/açıklamasıyla eşlenir, ilk table_k tablonun kolonları ayrı liste olur.
+        use_tables = strategy in ("hybrid", "lexical") and self.table_k > 0 and bool(self._table_keys)
+        scoped_tables = ((self._all_tables if eligible is self._all_indices
+                          else {self._record_table[i] for i in eligible}) if use_tables else None)
+        query_set = {t for t in query_tokens if self._distinctive(t)}
+        table_state = {}
+
+        def table_extra(query_vector):
+            tables, table_scores, mode = self._rank_tables(query_tokens, scoped_tables, query_vector)
+            table_state.update(tables=tables, scores=table_scores, mode=mode)
+            return self._table_embed_hashes(tables, eligible_set, query_set) if self.table_embed else []
+
         semantic_hashes, cos_allowed, vector, background = [], set(), None, None
         if strategy in ("hybrid", "embedding") and self.embed is not None:
             if self.stats["circuit_open"]:
@@ -496,7 +668,8 @@ class HybridIndex:
                 shortlist = list(dict.fromkeys(exact + normalized + lexical)) if strategy == "hybrid" else []
                 try:
                     vector, semantic_hashes, cos_allowed, background = self._semantic(
-                        self.query_text(request), eligible, shortlist, info)
+                        self.query_text(request), eligible, shortlist, info,
+                        extra=table_extra if use_tables and strategy == "hybrid" else None)
                     self._consecutive_failures = 0
                     covered = (self._all_covered if eligible is self._all_indices
                                else self._frozen >= {self._doc_hashes[i] for i in eligible})
@@ -512,6 +685,35 @@ class HybridIndex:
                     if self._consecutive_failures >= self._CIRCUIT_LIMIT:
                         self.stats["circuit_open"] = True
                     self._warn("Embedding servisi hata verdi; bu değişken ad ve metin aramasıyla değerlendirildi.")
+        table_list, table_rank = [], {}
+        if use_tables:
+            if vector is None or "tables" not in table_state:
+                tables, table_scores, mode = self._rank_tables(query_tokens, scoped_tables, None)
+                table_state = {"tables": tables, "scores": table_scores, "mode": mode}
+            table_rank = {t: rank for rank, t in enumerate(table_state["tables"], 1)}
+            per_table = self._table_columns(table_state["tables"], eligible_set, query_set)
+            table_cos = {}
+            if vector is not None:
+                wanted = {self._doc_hashes[i] for columns in per_table for i in columns} & cos_allowed
+                if wanted:
+                    table_cos = dict(self.namespace.rescore(vector, wanted))
+                    self.stats["vector_comparisons"] += len(table_cos)
+            ordered_tables = []
+            for columns in per_table:
+                with_cos = sorted((i for i in columns if self._doc_hashes[i] in table_cos),
+                                  key=lambda i: (-table_cos[self._doc_hashes[i]], self.records[i]["catalog_id"]))
+                rest = [i for i in columns if self._doc_hashes[i] not in table_cos and query_set & self._content_tokens[i]]
+                ordered_tables.append(with_cos + rest)
+            depth = 0
+            while len(table_list) < self.lexical_k and any(depth < len(c) for c in ordered_tables):
+                for columns in ordered_tables:
+                    if depth < len(columns) and len(table_list) < self.lexical_k:
+                        table_list.append(columns[depth])
+                depth += 1
+            info["table_channel"] = {
+                "tables": [str(self._table_keys[t][0] or "?") + "." + str(self._table_keys[t][1] or "?")
+                           for t in table_state["tables"]],
+                "mode": table_state["mode"]}
         semantic = []
         for h in semantic_hashes:
             semantic.extend(sorted((i for i in self._hash_indices[h] if i in eligible_set),
@@ -519,7 +721,7 @@ class HybridIndex:
         semantic_rank = {}
         for rank, h in enumerate(semantic_hashes, 1):
             semantic_rank.setdefault(h, rank)
-        lists = {"exact": exact, "normalized": normalized, "lexical": lexical}
+        lists = {"exact": exact, "normalized": normalized, "lexical": lexical, "table": table_list}
         scores, sources = {}, {}
         for source, ranked in lists.items():
             for rank, index in enumerate(ranked, 1):
@@ -566,7 +768,8 @@ class HybridIndex:
         # adayın kolon adında varsa. Yapısal tokenlar (ort/maks, gelen/giden, süre) kapsamda kalır:
         # embedding yokken ORT ile MAX'ı, GELEN ile GIDEN'i ayıran tek kanıt onlar.
         query_plain = {t for t in query_tokens if self._distinctive(t) and not self.lexicon.is_structural(t)}
-        legacy = {"exact": "exact", "normalized": "normalized", "lexical": "bm25", "semantic": "embedding"}
+        legacy = {"exact": "exact", "normalized": "normalized", "lexical": "bm25", "semantic": "embedding",
+                  "table": "table"}
         results = []
         for index in pool[:limit]:
             digest = self._doc_hashes[index]
@@ -592,5 +795,7 @@ class HybridIndex:
                                 "name_level": level, "channels": list(sources[index]),
                                 "lexical_rank": lexical_rank.get(index),
                                 "semantic_rank": semantic_rank.get(digest) if index in semantic else None,
-                                "distinctive_matched": matched.get(index, 0), "doc_hash": digest}})
+                                "distinctive_matched": matched.get(index, 0), "doc_hash": digest,
+                                "table_rank": table_rank.get(self._record_table[index]),
+                                "table_score": (table_state.get("scores") or {}).get(self._record_table[index])}})
         return results

@@ -12,9 +12,12 @@ import time
 from flask import Flask, abort, jsonify, render_template, request, send_file, session
 from werkzeug.exceptions import HTTPException
 
+from .config import DEFAULT_SCHEMA_TIERS
+from .derivation import VERDICT_LABELS
 from .errors import ConfigError, InputError, IntegrationError, CatalogScanError, AnalysisCancelled, ReportWriteError
-from .excelio import LABELS, ROW_STATUS_LABELS, NAME_MATCH_LABELS, MEANING_LABELS, reason_text, write_results
-from .pipeline import analyze, MODEL_CHANGED_REASON
+from .excelio import LABELS, ROW_STATUS_LABELS, NAME_MATCH_LABELS, MEANING_LABELS, SCOPE_LABELS, reason_text, write_results, verdict_source_text, derivation_method_text, RELATION_LABELS, component_state_text
+from .semantics import _window_text
+from .pipeline import analyze, MODEL_CHANGED_REASON, INDEX_POLL_SECONDS, _queue_counts, _wait_stage
 from . import web_services as services
 from . import __version__
 from .model_diagnostics import discover_model
@@ -40,6 +43,22 @@ def annotate(source,original):
     row["labels"]={k:LABELS.get(row.get(k),row.get(k)) for k in ("physical_name","semantic_status","production_status")}
     row["reason_texts"]=[reason_text(v) for v in row.get("reasons",[])]
     row["row_status_label"]=ROW_STATUS_LABELS.get(row.get("row_status"),row.get("row_status") or "")
+    row["verdict"]=row.get("verdict") or None
+    row["verdict_label"]=VERDICT_LABELS.get(row["verdict"],"") if row["verdict"] else ""
+    row["verdict_reasons"]=row.get("verdict_reasons") or []
+    row["derivation"]=row.get("derivation") or None
+    row["tier_trace"]=row.get("tier_trace") or []
+    row["verdict_source"]=verdict_source_text(row)
+    row["derivation_method"]=derivation_method_text(row)
+    if row["derivation"]:
+        row["derivation"]["relationship_label"]=RELATION_LABELS.get(row["derivation"].get("relationship"),"")
+        for c in row["derivation"].get("components") or []:
+            c["state_label"]=component_state_text(c)
+            c["window_label"]=_window_text(c["window"]) if c.get("window") else ""
+    for step in row["tier_trace"]:
+        step["row_status_label"]=ROW_STATUS_LABELS.get(step.get("row_status"),"")
+        step["meaning_label"]=MEANING_LABELS.get(step.get("meaning"),"")
+        step["scope_label"]=SCOPE_LABELS.get(step.get("semantic_scope"),"")
     for candidate in row.get("candidates",[]):
         candidate["label"]=LABELS.get(candidate.get("status"),candidate.get("status"))
         candidate["reason_texts"]=[reason_text(v) for v in candidate.get("reasons",[])]
@@ -48,7 +67,29 @@ def annotate(source,original):
     return row
 
 
-def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
+def connection_scope(result,fixed):
+    # Taranan şemalar sabittir (katman sırası: DM_CAD, DM, EDW); kullanıcı seçmez, erişilemeyenler bildirilir.
+    value=dict(result)
+    # Probe'un "şema seçtikten sonra" uyarısı artık geçersiz; yalnız eksik katman uyarısı gösterilir.
+    value.pop("warning",None)
+    available=set(value.get("schemas") or [])
+    value["scan_schemas"]=[n for n in fixed if n in available]
+    value["missing_schemas"]=[n for n in fixed if n not in available]
+    missing=value["missing_schemas"]
+    if not value["scan_schemas"]:
+        return {"ok":False,"scan_schemas":[],"missing_schemas":missing,
+                "error":"Taranacak şemaların hiçbiri ("+", ".join(fixed)+") bu kullanıcıyla erişilebilir listede yok. "
+                        "Kullanıcı yetkilerini kontrol edin."}
+    if len(missing)==1:
+        value["warning"]=(missing[0]+" şeması bu kullanıcıyla erişilebilir listede yok; bu katmanda arama yapılamaz, "
+                          "ilgili satırlar 'karar verilemedi' olur.")
+    elif missing:
+        value["warning"]=(", ".join(missing)+" şemaları bu kullanıcıyla erişilebilir listede yok; bu katmanlarda arama "
+                          "yapılamaz, ilgili satırlar 'karar verilemedi' olur.")
+    return value
+
+
+def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None, scan_schemas=None):
     app=Flask(__name__)
     app.config.update(SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=12*1024*1024,
                       MAX_FORM_MEMORY_SIZE=100000, MAX_FORM_PARTS=10,
@@ -63,6 +104,8 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
     app.extensions["riskmatch"]={"executor":executor,"jobs":jobs,"uploads":uploads,"connections":connections,"guard":guard}
     run=analyzer or analyze
     make_resources=resources_factory or default_resources
+    fixed=list(dict.fromkeys(scan_schemas if scan_schemas is not None
+                             else [n for tier in DEFAULT_SCHEMA_TIERS for n in tier["schemas"]]))
 
     def sweep():
         # Finished job folders older than a day are removed; uploads, shared caches and running jobs stay.
@@ -172,11 +215,17 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
         if not result.get("ok"):
             settings["oracle"].clear()
             return jsonify(result)
+        scope=connection_scope(result,fixed)
+        if not scope.get("ok"):
+            # Hiçbir sabit şemaya erişim yoksa bağlantı saklanmaz.
+            settings["oracle"].clear()
+            return jsonify(scope)
         settings["oracle"].update(container=result["container"])
         with guard:
             if len(connections)>=30:raise InputError("Açık oturum sınırına ulaşıldı.")
-            connections[session["owner"]]={"settings":settings,"scope":result,"touched":time.monotonic()}
-        return jsonify(result)
+            connections[session["owner"]]={"settings":settings,"scope":scope,"scan_schemas":list(scope["scan_schemas"]),
+                                           "touched":time.monotonic()}
+        return jsonify(scope)
 
     @app.get("/api/connection")
     def connection_status():
@@ -196,12 +245,9 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
         with guard:
             current=connections.get(session.get("owner"))
             if not current:raise ConfigError("Önce EDWLIVE kullanıcı adı ve parolanızla bağlanın. Oturum 1 saat kullanılmadığında kapanır.")
-            schemas=data.get("schemas")
-            if (not isinstance(schemas,list) or not 1<=len(schemas)<=30 or
-                any(not isinstance(name,str) or name not in current["scope"]["schemas"] for name in schemas)):
-                raise ConfigError("Açılır listeden taranacak 1–30 şemayı seçin.")
+            # İstemcinin gönderdiği "schemas" yok sayılır; bağlantıda belirlenen sabit şemalar taranır.
             settings=deepcopy(current["settings"])
-            settings["oracle"]["schemas"]=list(dict.fromkeys(schemas))
+            settings["oracle"]["schemas"]=list(current["scan_schemas"])
             current["touched"]=time.monotonic()
         # The browser can configure optional model contracts, never the DB address/context.
         models=data.get("settings",{})
@@ -229,7 +275,7 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
     @app.post("/api/diagnostics/oracle-schemas")
     def schema_diagnostics():
         data=body()
-        config,credentials=run_settings({"schemas":data.get("schemas")})
+        config,credentials=run_settings({})
         try:
             return jsonify(diagnose_selected_schemas(config["oracle"],credentials["oracle"],config["oracle"]["schemas"]))
         finally:
@@ -303,6 +349,8 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
         mapping=job["mapping"]
         resources=job["hold"]["resources"] if job["hold"] else None
         total=sum(len(g) for g in groups)
+        # Model açıkken tarama yalnız indeks %100 tamamlandıktan sonra yapılır.
+        full_index=uses_full_index(config)
         offset=[0,0]
         merged={"errors":[],"warnings":[],"changed":False}
         def merge(info):
@@ -364,7 +412,7 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
                 result=run(space["path"],root/identity/"sonuclar.xlsx",mode="real",config_data=config,
                            credentials=credentials,column_mapping=deepcopy(mapping),state_dir=root/identity/"state",progress=progress,
                            result_callback=store,cancelled=job["cancel_event"].is_set,row_ids=group,
-                           resources=resources,write_report=False,index_epoch=identity)
+                           resources=resources,write_report=False,index_epoch=identity,require_full_index=full_index)
                 for row in result.get("results",[]):store(row)
                 offset[0]+=len(group)
                 merge(result.get("run_info"))
@@ -464,8 +512,39 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
                 raise
         finally:
             with guard:starting.discard(owner)
-        executor.submit(worker,identity,config,credentials,groups)
+        if uses_full_index(config):
+            threading.Thread(target=submit_after_index,args=(identity,config,credentials,groups),
+                             name="riskmatch-index-wait",daemon=True).start()
+        else:executor.submit(worker,identity,config,credentials,groups)
         return jsonify(id=identity,upload_id=space["id"]),202
+
+    def uses_full_index(config):
+        return bool(config.get("use_models") and "embedding" in config)
+
+    def submit_after_index(identity,config,credentials,groups):
+        # Bağlantının indeksi çalışırken iş tek analiz yuvasını tutmaz; indeks bitince sıraya girer.
+        # Kesin kapı pipeline içindedir: indeks durmuş ya da eksikse orada yeniden başlatılır.
+        job=jobs[identity]
+        try:
+            documents=None
+            while not job["cancel_event"].is_set():
+                with guard:
+                    current=connections.get(job["owner"])
+                    indexer=current.get("indexer") if current else None
+                status=indexer.status() if indexer is not None else {}
+                if status.get("state")!="running":break
+                if documents is None:documents=_queue_counts(indexer.index)[1]
+                with guard:
+                    job["progress"]={**job["progress"],"stage":_wait_stage(status,documents),"phase":"index_wait"}
+                    job["updated"]=time.time()
+                job["cancel_event"].wait(INDEX_POLL_SECONDS)
+        except Exception:
+            pass
+        try:executor.submit(worker,identity,config,credentials,groups)
+        except RuntimeError:
+            # Uygulama kapanıyor: iş başlatılamaz.
+            wipe(credentials);unhold(job["hold"])
+            with guard:job.update(status="failed",error="Uygulama kapanırken analiz başlatılamadı.",finished=time.time())
 
     @app.get("/api/jobs/latest")
     def latest():
@@ -575,7 +654,8 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
         if current is None:
             # Disconnected while the indexer was prepared: its resources are closing, so it is never started.
             return jsonify(error="Bağlantı kapandı. Yeniden bağlanıp indekslemeyi başlatın."),409
-        if previous is not None:
+        # Önbellekten aynı indeksleyici dönebilir; onu durdurmak çalışan kapıyı da keserdi.
+        if previous is not None and previous is not indexer:
             try:previous.stop()
             except Exception:pass
         indexer.start()
@@ -586,7 +666,16 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
         # Coverage of the whole catalog in the store, not just of this indexer run's missing list.
         try:value["index_coverage"]=round(indexer.index.stored_coverage(),4)
         except Exception:value["index_coverage"]=None
+        value["complete"]=index_complete(indexer,value)
         return value
+
+    def index_complete(indexer,value):
+        # Kapıyla aynı ölçüt: tablo ve kolon belgelerinin hepsi depoda.
+        if value.get("state")!="done":return False
+        if hasattr(indexer.index,"queue_counts"):
+            try:return indexer.index.queue_counts()[0]==0
+            except Exception:return False
+        return (value.get("index_coverage") or 0)>=1.0
 
     @app.get("/api/index/status")
     def index_status():
@@ -607,9 +696,16 @@ def create_app(runtime_dir=None, *, analyzer=None, resources_factory=None):
     @app.post("/api/catalog/refresh")
     def catalog_refresh():
         data=body()
-        config,credentials,resources,adapter,key=index_inputs({"schemas":data.get("schemas")})
+        config,credentials,resources,adapter,key=index_inputs({})
         try:snapshot,info=resources.catalog(adapter,key,refresh=True)
         finally:credentials["oracle"].clear()
+        # Yeni katalog eski indeksleyicinin listesini geçersiz kılar; istemci indekslemeyi yeniden başlatır.
+        with guard:
+            current=connections.get(session["owner"])
+            indexer=current.pop("indexer",None) if current else None
+        if indexer is not None:
+            try:indexer.stop()
+            except Exception:pass
         source=info.get("source") if isinstance(info,dict) else info
         return jsonify(columns=len(snapshot.get("records",[])),source=source)
 

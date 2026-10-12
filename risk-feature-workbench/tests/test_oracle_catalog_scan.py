@@ -67,6 +67,8 @@ class Cursor:
         if self.phase == "ALL_OBJECTS":
             rows = [(obj, info["kind"]) for obj, info in objects.items()]
             rows += [(obj, "TABLE") for obj, info in objects.items() if info["kind"] == "MATERIALIZED VIEW"]
+            prefixes = [value[:-1].replace("\\", "") for key, value in self.binds.items() if key.startswith("x")]
+            rows = [row for row in rows if not any(row[0].startswith(prefix) for prefix in prefixes)]
         elif self.phase == "ALL_TAB_COLUMNS":
             rows = [(self.schema, obj, column, "NUMBER", 22, 10, 0, "Y")
                     for obj, info in objects.items() if obj in allowed for column in info["columns"]]
@@ -316,7 +318,7 @@ class OracleCatalogScanTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_", json.dumps(result))
 
     def test_invalid_limits_rejected_and_scope_mismatch_aborts(self):
-        for config in ({"max_records": 0}, {"max_records": 10001}, {"catalog_timeout_seconds": 0}, {"catalog_timeout_seconds": 901}):
+        for config in ({"max_records": 0}, {"max_records": 100001}, {"catalog_timeout_seconds": 0}, {"catalog_timeout_seconds": 901}):
             with self.assertRaises(ConfigError):
                 self.run_scan(Database(), **config)
         database = Database()
@@ -324,6 +326,78 @@ class OracleCatalogScanTests(unittest.TestCase):
             self.run_scan(database, container="WRONG")
         self.assertTrue(database.connections[0].closed)
         self.assertFalse(any("ALL_OBJECTS" in sql for sql, _ in database.calls))
+
+    def test_max_records_accepts_100000_and_rejects_100001(self):
+        OracleAdapter(dict(CONFIG, max_records=100000), credentials=CREDS, connector=Database().connect)
+        with self.assertRaises(ConfigError):
+            OracleAdapter(dict(CONFIG, max_records=100001), credentials=CREDS, connector=Database().connect)
+
+    def test_dm_cad_inp_out_excluded_with_bound_escaped_patterns(self):
+        data = {"DM_CAD": {"INP_X": {"kind": "TABLE", "columns": ["F"]}, "OUT_Y": {"kind": "TABLE", "columns": ["F"]},
+                           "INPUT": {"kind": "TABLE", "columns": ["F"]}, "FEAT": {"kind": "TABLE", "columns": ["F"]}},
+                "EDW": {"INP_Z": {"kind": "TABLE", "columns": ["F"]}}}
+        database = Database(data)
+        result = self.run_scan(database, schemas=["DM_CAD", "EDW"])
+        self.assertEqual({(r["schema"], r["object"]) for r in result["records"]},
+                         {("DM_CAD", "INPUT"), ("DM_CAD", "FEAT"), ("EDW", "INP_Z")})
+        listing = [(sql, binds) for sql, binds in database.calls if "FROM ALL_OBJECTS" in sql]
+        dm_sql, dm_binds = next(item for item in listing if item[1]["schema_name"] == "DM_CAD")
+        self.assertEqual(dm_sql.count("NOT LIKE"), 2)
+        self.assertIn("ESCAPE '" + chr(92) + "'", dm_sql)
+        self.assertNotIn("INP", dm_sql)
+        self.assertEqual((dm_binds["x0"], dm_binds["x1"]), ("INP\\_%", "OUT\\_%"))
+        edw_sql, edw_binds = next(item for item in listing if item[1]["schema_name"] == "EDW")
+        self.assertNotIn("NOT LIKE", edw_sql)
+        self.assertFalse(any(key.startswith("x") for key in edw_binds))
+        self.assertEqual(result["scope"]["exclude_objects"], [{"schema": "DM_CAD", "prefixes": ["INP_", "OUT_"]}])
+
+    def test_signature_applies_same_exclusion_and_empty_list_disables_it(self):
+        database = Database()
+        OracleAdapter(dict(CONFIG, schemas=["DM_CAD", "EDW"]), credentials=CREDS, connector=database.connect).signature()
+        by_schema = {binds["schema_name"]: (sql, binds) for sql, binds in database.calls}
+        self.assertEqual(by_schema["DM_CAD"][0].count("NOT LIKE"), 2)
+        self.assertEqual(by_schema["DM_CAD"][1]["x0"], "INP\\_%")
+        self.assertNotIn("NOT LIKE", by_schema["EDW"][0])
+        database = Database()
+        OracleAdapter(dict(CONFIG, schemas=["DM_CAD"], exclude_objects=[]), credentials=CREDS,
+                      connector=database.connect).signature()
+        self.assertNotIn("NOT LIKE", database.calls[0][0])
+        with self.assertRaises(ConfigError):
+            OracleAdapter(dict(CONFIG, exclude_objects=[{"schema": "A"}]), credentials=CREDS)
+
+    def test_scan_follows_priority_then_alphabetical_order(self):
+        database = Database({name: catalog() for name in ("A", "B", "DM", "DM_CAD", "EDW")})
+        result = self.run_scan(database, schemas=["A", "B", "EDW", "DM", "DM_CAD"])
+        seen = []
+        for _, binds in database.calls:
+            schema = binds.get("schema_name")
+            if schema and schema not in seen:
+                seen.append(schema)
+        self.assertEqual(seen, ["DM_CAD", "DM", "EDW", "A", "B"])
+        self.assertEqual(result["scope"]["schemas"], ["A", "B", "DM", "DM_CAD", "EDW"])
+        self.assertTrue(all(result["schema_complete"].values()))
+        self.assertEqual(result["schema_errors"], {})
+        database = Database()
+        self.run_scan(database, schema_priority=["C", "B"])
+        order = []
+        for _, binds in database.calls:
+            if binds.get("schema_name") and binds["schema_name"] not in order:
+                order.append(binds["schema_name"])
+        self.assertEqual(order, ["C", "B", "A"])
+
+    def test_record_cap_marks_only_later_schemas_incomplete(self):
+        objects = {"T1": {"kind": "TABLE", "columns": ["F"]}, "T2": {"kind": "TABLE", "columns": ["F"]}}
+        result = self.run_scan(Database({"A": objects, "B": catalog(), "C": catalog()}), max_records=2)
+        self.assertEqual(result["schema_complete"], {"A": True, "B": False, "C": False})
+        self.assertEqual(result["schema_errors"], {"B": "KAYIT_SINIRI", "C": "KAYIT_SINIRI"})
+        self.assertFalse(result["complete"])
+
+    def test_failed_schema_gets_safe_code_and_others_stay_complete(self):
+        database = Database(execute_failures={("B", "ALL_TAB_COLUMNS"): "DPY-4024 PRIVATE_PASSWORD_SENTINEL"})
+        result = self.run_scan(database)
+        self.assertEqual(result["schema_complete"], {"A": True, "B": False, "C": True})
+        self.assertEqual(result["schema_errors"], {"B": "DPY-4024"})
+        self.assertNotIn("PRIVATE_", json.dumps(result))
 
 
 if __name__ == "__main__":

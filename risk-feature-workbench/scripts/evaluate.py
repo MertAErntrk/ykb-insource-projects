@@ -43,6 +43,7 @@ for _path in (ROOT / "scripts", ROOT / "tests", ROOT / "src"):
 
 from riskmatch import __version__  # noqa: E402
 from riskmatch.config import load_config  # noqa: E402
+from riskmatch.derivation import VERDICTS, VERDICT_LABELS  # noqa: E402
 from riskmatch.errors import ConfigError, InputError, IntegrationError  # noqa: E402
 from riskmatch.excelio import read_requests  # noqa: E402
 from riskmatch.lexicon import Lexicon, _words as lexicon_words, load as load_lexicon  # noqa: E402
@@ -639,6 +640,7 @@ def run_groups(rows, group_size, analyze_kwargs, resources, state_dir, xlsx, epo
     calls_before = service.calls if service else 0
     first, shown, stats = [], {}, Counter()
     errors = 0
+    verdicts = Counter()
 
     def on_result(_row):
         if not first:
@@ -651,6 +653,7 @@ def run_groups(rows, group_size, analyze_kwargs, resources, state_dir, xlsx, epo
         for item in result["results"]:
             shown[item["row_id"]] = frozenset(c["catalog_id"] for c in item.get("candidates") or [])
             errors += bool(item.get("errors"))
+            verdicts[item.get("verdict") or "belirtilmedi"] += 1
         for key, value in result["run_info"]["Arama istatistikleri"].items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 stats[key] += value
@@ -659,7 +662,8 @@ def run_groups(rows, group_size, analyze_kwargs, resources, state_dir, xlsx, epo
                    "embedding_cagri": calls, "embedding_cagri_satir_basi": round(calls / max(1, len(rows)), 2),
                    "ilk_sonuc_s": round(first[0], 2) if first else None,
                    "toplam_s": round(time.monotonic() - started, 2),
-                   "arama_istatistikleri": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in stats.items()}}
+                   "arama_istatistikleri": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in stats.items()},
+                   "sonuc_sinifi": dict(verdicts)}
 
 
 # -- probe ----------------------------------------------------------------------
@@ -722,6 +726,10 @@ def write_markdown(report, path):
     skipped = satir.get("girdi_hatasi_atlanan") or {}
     if skipped.get("adet"):
         lines.append("- Girdi hatası nedeniyle atlanan satır: %d (ilk hata: %s)" % (skipped["adet"], skipped["ilk_hata"]))
+    if report.get("sonuc_sinifi"):
+        lines.append("- Sonuç sınıfı dağılımı: " + ", ".join(
+            "%s %d" % (VERDICT_LABELS.get(k, "Belirtilmemiş"), v) for k, v in sorted(
+                report["sonuc_sinifi"].items(), key=lambda x: (VERDICTS.index(x[0]) if x[0] in VERDICTS else len(VERDICTS), x[0]))))
     if report.get("satir_siniflari"):
         lines.append("- Satır sınıfları (varsayılan kapı, iskalar.md): " + ", ".join(
             "%s %d" % kv for kv in sorted(report["satir_siniflari"].items(), key=lambda x: (-x[1], x[0]))))
@@ -932,6 +940,7 @@ def run_e2e(report, args, rows, analyze_kwargs, resources, work, xlsx, names=Non
     service = getattr(args, "_service", None)
     first, stats = run_groups(rows, group, analyze_kwargs, resources, work, xlsx, "eval-1", service)
     report["uctan_uca"] = stats
+    report["sonuc_sinifi"] = stats["sonuc_sinifi"]
     if args.consistency:
         other = max(1, group // 2) if group > 1 else 3
         second, _ = run_groups(list(reversed(rows)), other, analyze_kwargs, resources, work, xlsx, "eval-2", service)

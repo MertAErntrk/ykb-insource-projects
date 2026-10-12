@@ -8,10 +8,13 @@ import re
 import tempfile
 import time
 
+# 2: şema bazlı tamlık, dışlama ve öncelik alanları eklendi; eski önbellek karışmaz.
+FORMAT_VERSION = 2
+
 
 def cache_key(user, dsn, container, schemas):
     """Hash the scope; user and DSN are never stored in raw form."""
-    payload = {"user": str(user), "dsn": str(dsn), "container": str(container),
+    payload = {"format": FORMAT_VERSION, "user": str(user), "dsn": str(dsn), "container": str(container),
                "schemas": sorted({str(name).upper() for name in schemas})}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()

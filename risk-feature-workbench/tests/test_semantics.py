@@ -55,6 +55,21 @@ class DefinitionTests(unittest.TestCase):
     def test_description_name_conflict(self):
         self.assertIn("conflict:window", parse_definition("EFT_LW", "Son ayda toplam EFT tutarı")["issues"])
 
+    def test_window_canon_shared(self):
+        for text in ("Son ayda", "önceki 1 ay içerisinde", "son 1 ay"):
+            self.assertEqual(parse_definition("X", text)["facts"]["window"]["value"], "last_month", text)
+        for name in ("X_LM", "X_W1M"):
+            self.assertEqual(parse_definition(name, "")["facts"]["window"]["value"], "last_month", name)
+        for name, text in (("X_LW", ""), ("X_W1W", ""), ("X", "son bir haftada")):
+            self.assertEqual(parse_definition(name, text)["facts"]["window"]["value"], "last_week", name)
+        self.assertEqual(parse_definition("X_W3M", "")["facts"]["window"]["value"], "last_3_months")
+        self.assertEqual(parse_definition("X_L12M", "")["facts"]["window"]["value"], "last_12_months")
+
+    def test_channels_are_distinct(self):
+        for text, value in (("havale", "havale"), ("EFT", "eft"), ("SWIFT", "swift"), ("WU", "western_union"), ("Western Union", "western_union")):
+            self.assertEqual(parse_definition("X", text + " tutarı")["facts"]["transaction"]["value"], value, text)
+        self.assertNotIn("transaction", parse_definition("X", "para transferi tutarı")["facts"])
+
     def test_zero_does_not_imply_null(self):
         parsed = parse_definition("Havale_LW_LM", "Havale_LW / Havale_LM; payda sıfırsa -1.")
         self.assertEqual(parsed["formula"]["zero"], -1)
@@ -70,9 +85,25 @@ class DefinitionTests(unittest.TestCase):
         self.assertIn("conflict:ratio_direction", parsed["issues"])
 
     def test_arbitrary_ratio_not_inferred(self):
-        parsed = parse_definition("Whatever_LW_L3M", "")
+        # approved_bases_only keeps the old rule: only confirmed bases are ratios.
+        parsed = parse_definition("Whatever_LW_L3M", "", {"ratio_rule": "approved_bases_only"})
         self.assertIsNone(parsed["formula"])
         self.assertIn("ambiguous_ratio_name", parsed["issues"])
+        parsed = parse_definition("Giden_max_havale_adeti_LW_L3M", "", {"ratio_rule": "approved_bases_only"})
+        self.assertEqual(parsed["formula"]["numerator"], "Giden_max_havale_adeti_LW")
+        described = parse_definition("Giden_havale_adeti_LW_L3M", "Son bir haftadaki giden havale adedinin son 3 aydaki giden havale adedine oranı", {"ratio_rule": "approved_bases_only"})
+        self.assertIsNone(described["formula"])
+        self.assertIn("ambiguous_ratio_name", described["issues"])
+
+    def test_suffix_pair_ratio(self):
+        parsed = parse_definition("Giden_havale_adeti_LW_L3M", "Son bir haftadaki giden havale adedinin son 3 aydaki giden havale adedine oranı")
+        self.assertEqual(parsed["formula"]["numerator"], "Giden_havale_adeti_LW")
+        self.assertEqual(parsed["formula"]["denominator"], "Giden_havale_adeti_L3M")
+        self.assertEqual(parsed["issues"], [])
+        self.assertEqual(parse_definition("Whatever_L6M_L12M", "")["formula"]["denominator"], "Whatever_L12M")
+        self.assertNotIn("unsupported_formula", parse_definition("X_LW_L3M", "son hafta / son 3 ay")["issues"])
+        self.assertIn("conflict:ratio_window", parse_definition("X_LW_L3M", "Son 6 aydaki giden havale adedi")["issues"])
+        self.assertIn("conflict:ratio_direction", parse_definition("EFT_LW_L3M", "EFT_L3M / EFT_LW")["issues"])
 
     def test_exact_confirmed_example_ratio(self):
         parsed = parse_definition("Giden_max_havale_adeti_LW_L3M", "")
@@ -199,6 +230,36 @@ class EvaluationTests(unittest.TestCase):
     def test_numeric_zero_policy_is_valid(self):
         definition = verified(entity="customer", grain="customer", concept="ratio", measure="ratio", numerator="A", denominator="B", zero_policy=0, null_policy="propagate", reference_date="application_date")
         self.assertEqual(evaluate_candidate(request(definition=definition), record(definition))["status"], "supported")
+
+    def test_excel_request_matches_catalog_comment(self):
+        req = request("Giden_EFT_tut_LM", "Müşterinin son ayda giden toplam eft tutarı")
+        comment = "Müşterinin ilgili yıl aydan önceki {} ay içerisinde tüm kanallarından yaptığı toplam {}."
+        outcome = evaluate_candidate(req, described(comment.format("1", "giden EFT tutarıdır"), "TOTAL_EFT_TRX_AMT_TL_W1M"))
+        self.assertEqual(outcome["status"], "supported")
+        self.assertTrue(any(r.startswith("unit_unverified") for r in outcome["reasons"]))
+        for column, text, dimension in (
+                ("TOTAL_INC_EFT_TRX_AMT_TL_W1M", comment.format("1", "gelen EFT tutarıdır"), "direction"),
+                ("TOTAL_HVL_TRX_AMT_TL_W1M", comment.format("1", "giden havale tutarıdır"), "transaction"),
+                ("TOTAL_EFT_TRX_AMT_TL_W3M", comment.format("3", "giden EFT tutarıdır"), "window"),
+                ("TOTAL_EFT_TRX_CNT_W1M", comment.format("1", "giden EFT adedidir"), "measure")):
+            with self.subTest(column=column):
+                outcome = evaluate_candidate(req, described(text, column))
+                self.assertEqual(outcome["status"], "conflict")
+                self.assertIn("conflict:" + dimension, outcome["reasons"])
+
+    def test_catalog_comment_window_wins_over_name(self):
+        req = request("Giden_EFT_tut_LM", "Müşterinin son ayda giden toplam eft tutarı")
+        rec = described("Müşterinin önceki 1 ay içerisinde toplam giden EFT tutarıdır.", "TOTAL_EFT_TRX_AMT_TL_W3M")
+        outcome = evaluate_candidate(req, rec)
+        self.assertEqual(outcome["status"], "supported")
+        self.assertTrue(any(r.startswith("window_name_mismatch") for r in outcome["reasons"]))
+        # The request side keeps the name/description conflict.
+        swapped = evaluate_candidate(request("Giden_EFT_tut_L3M", "Müşterinin son ayda giden toplam eft tutarı"), rec)
+        self.assertEqual(swapped["status"], "conflict")
+
+    def test_unit_stated_only_by_request_still_missing(self):
+        outcome = evaluate_candidate(request("X", "Müşterinin son ayda giden toplam eft tutarı TL"), described("Müşterinin son ayda giden toplam eft tutarı"))
+        self.assertIn("missing:unit", outcome["reasons"])
 
     def test_blank_comments_name_not_proof(self):
         self.assertEqual(evaluate_candidate(request("EFT_LW"), record(column="EFT_LW"))["status"], "insufficient")

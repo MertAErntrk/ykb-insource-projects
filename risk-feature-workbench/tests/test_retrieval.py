@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from riskmatch.errors import IntegrationError, StaleIndexError
+from riskmatch.errors import InputError, IntegrationError, StaleIndexError
 from riskmatch.ranking import rank
 from riskmatch.retrieval import HybridIndex, MemoryNamespace, _tokens
 
@@ -304,6 +304,121 @@ class QualityFixTests(unittest.TestCase):
         scoped = index.search({"name": "KK_LIMIT", "scope": {"schemas": ["A", "B"]}})
         self.assertEqual([hit["catalog_id"] for hit in plain], [hit["catalog_id"] for hit in scoped])
         self.assertEqual([hit["catalog_id"] for hit in index.search({"name": "KK_LIMIT", "schema": "B"})], ["b"])
+
+
+def table_record(identifier, column, comment, obj, table_comment, schema="A"):
+    item = record(identifier, column, comment, schema=schema, obj=obj)
+    item["table_comment"] = table_comment
+    return item
+
+
+def table_catalog():
+    records = [table_record("g1", "C_017", "", "KART_GECIKME", "Kredi kartı gecikme bilgileri"),
+               table_record("g2", "GECIKME_GUN_SAYI", "gecikme gün sayısı", "KART_GECIKME",
+                            "Kredi kartı gecikme bilgileri")]
+    records += [table_record("m%02d" % i, "MUSTERI_YAS_%d" % i, "müşteri yaşı", "MUSTERI_DEMOGRAFI",
+                             "Müşteri demografik bilgileri") for i in range(12)]
+    # Kolon adı/yorumu talebe daha yakın dolgu: lexical_k=5 iken kolon BM25'ini doldurur.
+    records += [table_record("d%02d" % i, "KART_GECIKME_ADET_%d" % i, "kart gecikme adedi", "DIGER",
+                             "Diğer bilgiler") for i in range(10)]
+    return snapshot(records)
+
+
+class TableChannelTests(unittest.TestCase):
+    REQUEST = {"name": "Kart gecikme", "description": "Kredi kartı gecikme durumu"}
+
+    def test_weak_column_of_matching_table_enters_pool(self):
+        index = HybridIndex(table_catalog(), embed=HashEmbed(), lexical_k=5)
+        pool = index.search(self.REQUEST)
+        hit = next(item for item in pool if item["catalog_id"] == "g1")
+        self.assertIn("table", hit["_features"]["channels"])  # sözcük kanalı tablo adı/açıklamasını da indeksler (mevcut davranış)
+        self.assertEqual(hit["_features"]["table_rank"], 1)
+        self.assertIsNotNone(hit["_features"]["table_score"])
+        self.assertIsNotNone(hit["_features"]["cos"])
+        self.assertEqual(index.last_search_info["table_channel"]["tables"][0], "A.KART_GECIKME")
+
+    def test_table_vectors_give_semantic_mode(self):
+        embed = HashEmbed()
+        index = HybridIndex(table_catalog(), embed=embed)
+        index.embed_all()
+        index.search(self.REQUEST)
+        self.assertEqual(index.last_search_info["table_channel"]["mode"], "semantic")
+        self.assertEqual(index.last_search_info["table_channel"]["tables"][0], "A.KART_GECIKME")
+        self.assertIn(index.table_document_text("A", "KART_GECIKME", "Kredi kartı gecikme bilgileri"),
+                      [text for kind, texts in embed.calls if kind == "document" for text in texts])
+
+    def test_bm25_table_channel_without_embedding(self):
+        index = HybridIndex(table_catalog(), lexical_k=5)
+        pool = index.search(self.REQUEST)
+        self.assertEqual(index.last_search_info["table_channel"], {"tables": ["A.KART_GECIKME"], "mode": "lexical"})
+        hit = next(item for item in pool if item["catalog_id"] == "g2")
+        self.assertIn("table", hit["_features"]["channels"])
+        self.assertIn("table", hit["_retrieval"])
+        self.assertEqual(hit["_features"]["table_rank"], 1)
+        self.assertIsNotNone(hit["_features"]["table_score"])
+        g1 = next(item for item in pool if item["catalog_id"] == "g1")
+        self.assertIn("lexical", g1["_features"]["channels"])  # tablo adı/açıklaması ağırlık 1 ile sözcük kanalında (mevcut davranış)
+
+    def test_table_channel_off(self):
+        index = HybridIndex(table_catalog(), table_k=0)
+        pool = index.search(self.REQUEST)
+        self.assertEqual(index.last_search_info["table_channel"], {"tables": [], "mode": "off"})
+        self.assertTrue(all(item["_features"]["table_rank"] is None for item in pool))
+        index = HybridIndex(table_catalog())
+        index.search({"name": "GECIKME_GUN_SAYI"}, strategy="exact")
+        self.assertEqual(index.last_search_info["table_channel"]["mode"], "off")
+
+    def test_on_the_fly_table_embed_is_capped(self):
+        records = [table_record("k%02d" % i, "C_%02d" % i, "", "KART_GECIKME", "Kredi kartı gecikme bilgileri")
+                   for i in range(30)]
+        for cap in (5, 0):
+            embed = HashEmbed()
+            index = HybridIndex(snapshot(records), embed=embed, table_embed=cap, shortlist_embed=0,
+                                background_size=0)
+            pool = index.search(self.REQUEST)
+            documents = [text for kind, texts in embed.calls if kind == "document" for text in texts]
+            self.assertEqual(len(documents), cap)
+            self.assertEqual(sum(item["_features"]["cos"] is not None for item in pool), cap)
+
+    def test_on_the_fly_failure_falls_back_to_lexical_tables(self):
+        index = HybridIndex(table_catalog(), embed=HashEmbed(fail=True))
+        pool = index.search(self.REQUEST)
+        self.assertTrue(index.last_search_info["embedding_skipped"])
+        self.assertEqual(index.last_search_info["table_channel"]["mode"], "lexical")
+        self.assertIn("g2", [item["catalog_id"] for item in pool])
+
+    def test_excluded_objects_never_enter_index(self):
+        scope = dict(SCOPE, schemas=["DM_CAD"])
+        records = [table_record("out", "KK_LIMIT", "kart limiti", "OUT_SKOR", "", schema="DM_CAD"),
+                   table_record("inp", "KK_LIMIT_X", "kart limiti", "inp_ara", "", schema="DM_CAD"),
+                   table_record("ok", "KK_LIMIT_2", "kart limiti", "FEATURES", "", schema="DM_CAD")]
+        data = {"scope": scope, "records": records, "version": "v1", "complete": True}
+        embed = HashEmbed()
+        index = HybridIndex(data, embed=embed)
+        index.embed_all()
+        self.assertEqual([r["catalog_id"] for r in index.records], ["ok"])
+        self.assertEqual(len(index.missing_documents()), 0)
+        self.assertNotIn("OUT_SKOR", str(embed.calls))
+        self.assertNotIn("out", [hit["catalog_id"] for hit in index.search({"name": "KK_LIMIT"})])
+        self.assertEqual(index.search({"name": "KK_LIMIT"}, strategy="lexical")[0]["catalog_id"], "ok")
+        index = HybridIndex(data, exclude_objects=[])
+        self.assertEqual(index.search({"name": "KK_LIMIT"})[0]["catalog_id"], "out")
+        with self.assertRaises(InputError):
+            HybridIndex(data, exclude_objects=[{"schema": "DM_CAD"}])
+        # Taramanın kuralı snapshot kapsamında gelir; indeks aynı kuralı uygular.
+        scanned = dict(data, scope=dict(scope, exclude_objects=[]))
+        self.assertEqual(HybridIndex(scanned).search({"name": "KK_LIMIT"})[0]["catalog_id"], "out")
+
+    def test_index_queue_puts_tables_first_then_tiers(self):
+        scope = dict(SCOPE, schemas=["EDW", "DM_CAD", "Z"])
+        records = [table_record("z", "Z_COL", "", "ZT", "", schema="Z"),
+                   table_record("e", "E_COL", "", "ET", "", schema="EDW"),
+                   table_record("d", "D_COL", "", "DT", "", schema="DM_CAD")]
+        index = HybridIndex({"scope": scope, "records": records, "version": "v1", "complete": True},
+                            embed=HashEmbed())
+        queue = [text.split(" | ")[0] for _h, text in index.index_queue()]
+        self.assertEqual(queue, ["DT", "ET", "ZT", "D_COL", "E_COL", "Z_COL"])
+        self.assertEqual(index.document_text(records[0]).split(" | ")[0], "Z_COL")
 
 
 if __name__ == "__main__":

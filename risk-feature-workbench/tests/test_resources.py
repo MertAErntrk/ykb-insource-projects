@@ -240,11 +240,19 @@ class IndexerTests(ResourcesTestCase):
         indexer.start()
         self.assertTrue(indexer.wait(10))
         status = indexer.status()
-        self.assertEqual((status["state"], status["done"], status["total"]), ("done", 50, 50))
-        self.assertEqual(self.ctx.namespace.count(), 50)
+        # 50 kolon belgesi + 1 tablo belgesi (A.FEATURES); kapsam yüzdesi yalnız kolonları sayar.
+        self.assertEqual((status["state"], status["done"], status["total"]), ("done", 51, 51))
+        self.assertEqual(self.ctx.namespace.count(), 51)
         index = self.res.index(self.snap, self.ctx, {})
         self.assertEqual(index.index_coverage, 1.0)
         self.assertEqual(index.missing_documents(), [])
+
+    def test_queue_starts_with_table_documents(self):
+        index = self.res.index(self.snap, self.ctx, {})
+        queue = index.index_queue()
+        self.assertEqual(len(queue), 51)
+        self.assertTrue(queue[0][1].startswith("FEATURES"))
+        self.assertEqual(index.stored_coverage(), 0.0)
 
     def test_stop_midway(self):
         reached, release, count = threading.Event(), threading.Event(), [0]

@@ -199,7 +199,7 @@ class AdapterTests(unittest.TestCase):
         self.assertIn(":schema_name", object_sql)
         self.assertIn(":row_limit", object_sql)
         self.assertEqual(object_binds["schema_name"], "RISK_DWH")
-        self.assertLessEqual(object_binds["row_limit"], 10001)
+        self.assertLessEqual(object_binds["row_limit"], 50001)
         for sql, binds in catalog_calls:
             self.assertTrue(sql.lstrip().upper().startswith("SELECT"))
             self.assertNotIn("'RISK_DWH'", sql)

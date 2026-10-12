@@ -13,7 +13,10 @@ _CAMEL_LOWER_UPPER = re.compile(r"(?<=[a-zçğıöşü])(?=[A-ZÇĞİÖŞÜ])")
 _CAMEL_ACRONYM = re.compile(r"(?<=[A-ZÇĞİÖŞÜ])(?=[A-ZÇĞİÖŞÜ][a-zçğıöşü])")
 _APOSTROPHE = re.compile(r"['’`´][a-zA-ZçğıöşüÇĞİÖŞÜ]+")
 
-_WINDOW_PREFIX = {"son": True, "last": True, "past": True, "previous": True, "l": False}
+# L = son (L3M, L2W); W = pencere (katalog adlarında W1W, W1M, W3M).
+_WINDOW_PREFIX = {"son": True, "last": True, "past": True, "previous": True, "l": False, "w": False}
+# Sayısız Excel kısaltmaları: LM son 1 ay, LW son 1 hafta.
+_LAST_SHORT = {"lm": "ay", "lw": "hafta"}
 _UNITS = {
     "gun": "gun", "gunluk": "gun", "day": "gun", "days": "gun", "dy": "gun",
     "hafta": "hafta", "haftalik": "hafta", "week": "hafta", "weeks": "hafta", "wk": "hafta", "wks": "hafta",
@@ -232,6 +235,8 @@ class Lexicon:
         word = parts[index]
         if word == "ytd":
             return 1, (0, "ytd")
+        if word in _LAST_SHORT:
+            return 1, (1, _LAST_SHORT[word])
         cursor, prefix = index, None
         if word in _WINDOW_PREFIX:
             prefix, cursor = word, index + 1

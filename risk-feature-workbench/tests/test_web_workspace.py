@@ -27,13 +27,17 @@ def workbook(count=10):
 
 
 class FakeIndex:
-    def stored_coverage(self):return 0.5
+    coverage=0.5
+    def stored_coverage(self):return self.coverage
+    # Tablo belgeleri de sayılır: kolonlar tam olsa da tablo eksikse indeks tamam değildir.
+    tables_missing=0
+    def queue_counts(self):return (0 if self.coverage>=1.0 else 5)+self.tables_missing,12
 
 
 class FakeIndexer:
-    def __init__(self):self.state="idle";self.index=FakeIndex()
+    def __init__(self):self.state="idle";self.index=FakeIndex();self.stops=0
     def start(self):self.state="running"
-    def stop(self):self.state="stopped"
+    def stop(self):self.state="stopped";self.stops+=1
     def status(self):return {"state":self.state,"done":5,"total":10,"failures":0,"rate_per_s":1.0,"eta_s":5,"message":""}
 
 
@@ -80,7 +84,8 @@ class WorkspaceTests(unittest.TestCase):
 
     def analyze(self,path,output,**kwargs):
         ids=list(kwargs["row_ids"]);self.calls.append({"row_ids":ids,"write_report":kwargs["write_report"],"resources":kwargs["resources"],
-                                                       "mapping":kwargs["column_mapping"]})
+                                                       "mapping":kwargs["column_mapping"],
+                                                       "require_full_index":kwargs.get("require_full_index")})
         number=len(self.calls)
         kwargs["progress"]({"stage":"Aranıyor","completed":1,"total":len(ids),"phase":"analysis"})
         if self.before_group:self.before_group(number)
@@ -246,6 +251,61 @@ class WorkspaceTests(unittest.TestCase):
         self.client.post("/api/disconnect",json={},headers=self.headers)
         self.assertTrue(self.resources[0].closed)
         self.assertEqual(self.client.get("/api/index/status").json,{"state":"idle"})
+
+    def test_worker_requires_full_index_only_with_embedding_models(self):
+        self.finish(self.start(row_ids=self.row_ids()[:1],settings={"use_models":False}))
+        self.finish(self.start(row_ids=self.row_ids()[:1],settings=EMBEDDING))
+        self.assertEqual([c["require_full_index"] for c in self.calls],[False,True])
+
+    def test_index_status_complete_only_when_done_and_full(self):
+        started=self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        self.assertFalse(started.json["complete"])
+        indexer=self.resources[0].last
+        indexer.state="done"
+        self.assertFalse(self.client.get("/api/index/status").json["complete"])
+        indexer.index.coverage=1.0
+        self.assertTrue(self.client.get("/api/index/status").json["complete"])
+        indexer.index.tables_missing=1
+        self.assertFalse(self.client.get("/api/index/status").json["complete"])
+
+    def test_index_start_does_not_stop_same_cached_indexer(self):
+        self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        indexer=self.resources[0].last
+        self.resources[0].indexer=lambda snapshot,ctx,settings:indexer
+        again=self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        self.assertEqual(again.status_code,202,again.json)
+        self.assertEqual((indexer.stops,indexer.state),(0,"running"))
+
+    def test_job_waits_for_running_index_without_holding_executor(self):
+        self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        indexer=self.resources[0].last
+        with patch("riskmatch.web.INDEX_POLL_SECONDS",0.01):
+            identity=self.start(row_ids=self.row_ids()[:1],settings=EMBEDDING)
+            deadline=time.monotonic()+5
+            while self.client.get("/api/jobs/"+identity).json["progress"].get("phase")!="index_wait":
+                self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+            # Tek analiz yuvası boş kalır; indeks bitmeden pipeline çağrılmaz.
+            self.assertEqual(self.app.extensions["riskmatch"]["executor"].submit(lambda:1).result(timeout=2),1)
+            self.assertEqual(self.calls,[])
+            self.assertIn("İndeks tamamlanması bekleniyor",self.client.get("/api/jobs/"+identity).json["progress"]["stage"])
+            indexer.state="done"
+            self.assertEqual(self.finish(identity)["status"],"complete")
+        self.assertEqual([c["require_full_index"] for c in self.calls],[True])
+
+    def test_catalog_refresh_stops_and_forgets_indexer(self):
+        self.client.post("/api/index/start",json={"settings":EMBEDDING},headers=self.headers)
+        indexer=self.resources[0].last
+        refresh=self.client.post("/api/catalog/refresh",json={"schemas":["NOT_VISIBLE"]},headers=self.headers)
+        self.assertEqual(refresh.status_code,200,refresh.json)
+        self.assertEqual(indexer.state,"stopped")
+        self.assertEqual(self.client.get("/api/index/status").json,{"state":"idle"})
+
+    def test_client_schemas_are_ignored_for_index_and_connection_keeps_fixed_scope(self):
+        started=self.client.post("/api/index/start",json={"schemas":["NOT_VISIBLE"],"settings":EMBEDDING},headers=self.headers)
+        self.assertEqual(started.status_code,202,started.json)
+        status=self.client.get("/api/connection").json
+        self.assertEqual((status["scan_schemas"],status["missing_schemas"]),(["DM_CAD"],["DM","EDW"]))
+        self.assertIn("karar verilemedi",status["warning"])
 
     def pause_first_group(self,number):
         if number==1:self.ready.set();self.gate.wait(5)

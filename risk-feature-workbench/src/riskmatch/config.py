@@ -5,16 +5,62 @@ from pathlib import Path
 
 from .errors import ConfigError
 
+# Şema önceliği (Faz 7): önce DM_CAD, bulunamazsa DM, sonra EDW. Seçili ama listede olmayan şemalar son katmandır.
+DEFAULT_SCHEMA_TIERS = [{"name": "DM_CAD", "schemas": ["DM_CAD"]},
+                        {"name": "DM", "schemas": ["DM"]},
+                        {"name": "EDW", "schemas": ["EDW"]}]
+# Taramada dışlanan nesneler: DM_CAD'deki ara (INP_) ve çıktı (OUT_) tabloları.
+DEFAULT_EXCLUDE_OBJECTS = [{"schema": "DM_CAD", "prefixes": ["INP_", "OUT_"]}]
+RATIO_RULES = ("suffix_pair", "approved_bases_only")
+MAX_CATALOG_RECORDS = 100000
+
 DEFAULTS = {
     "mode": "demo",
     # limit/expanded_limit/search_mode/candidate_limit/embedding_budget are accepted for old config files
     # but no longer change the search: every row gets the same channels and pool (0.5).
     "retrieval": {"limit": 8, "expanded_limit": 24, "search_mode": "full", "candidate_limit": 24, "embedding_budget": 256,
                   "pool_size": 30, "lexical_k": 40, "semantic_k": 30, "shortlist_embed": 10, "background_size": 128,
-                  "gate": {}},
+                  "table_k": 10, "table_embed": 40, "gate": {}, "schema_tiers": DEFAULT_SCHEMA_TIERS},
     "llm_review": True,
-    "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"}},
+    "naming": {"windows": {"LM": "last_month", "LW": "last_week", "L2W": "last_2_weeks", "L3M": "last_3_months"},
+               "ratio_rule": "suffix_pair"},
 }
+
+
+def _schema_name(value):
+    return isinstance(value, str) and 0 < len(value.strip()) <= 128
+
+
+def validate_schema_tiers(tiers):
+    """[{name, schemas:[...]}] listesi; boş liste eski tek havuz davranışıdır. Büyük harfli kopya döner."""
+    if not isinstance(tiers, list) or len(tiers) > 10:
+        raise ConfigError("retrieval.schema_tiers en çok 10 katmanlı liste olmalı.")
+    out, seen = [], set()
+    for tier in tiers:
+        if not isinstance(tier, dict) or not isinstance(tier.get("schemas"), list) or not tier["schemas"]                 or not all(_schema_name(s) for s in tier["schemas"]):
+            raise ConfigError("Her şema katmanı boş olmayan 'schemas' listesi içermeli.")
+        schemas = [s.strip().upper() for s in tier["schemas"]]
+        if seen.intersection(schemas):
+            raise ConfigError("Bir şema birden çok katmanda olamaz.")
+        seen.update(schemas)
+        name = tier.get("name") or "/".join(schemas)
+        if not isinstance(name, str):
+            raise ConfigError("Şema katmanı adı metin olmalı.")
+        out.append({"name": name, "schemas": schemas})
+    return out
+
+
+def validate_exclude_objects(rules):
+    """[{schema, prefixes:[...]}]; önekler büyük harfle karşılaştırılır."""
+    if not isinstance(rules, list) or len(rules) > 30:
+        raise ConfigError("exclude_objects en çok 30 kurallı liste olmalı.")
+    out = []
+    for rule in rules:
+        prefixes = rule.get("prefixes") if isinstance(rule, dict) else None
+        if not isinstance(rule, dict) or not _schema_name(rule.get("schema")) or not isinstance(prefixes, list)                 or not prefixes or not all(isinstance(p, str) and 0 < len(p.strip()) <= 30 for p in prefixes):
+            raise ConfigError("Dışlama kuralı {schema, prefixes:[...]} biçiminde olmalı.")
+        out.append({"schema": rule["schema"].strip().upper(), "prefixes": [p.strip().upper() for p in prefixes]})
+    return out
 
 def load_config(path=None, mode="demo", *, data=None):
     if mode not in {"demo", "real"}:
@@ -48,11 +94,21 @@ def load_config(path=None, mode="demo", *, data=None):
             raise ConfigError("Arama ayarı geçersiz: " + field)
     if not isinstance(retrieval["gate"], dict):
         raise ConfigError("retrieval.gate nesne olmalı.")
+    table_k = retrieval["table_k"]
+    if isinstance(table_k, bool) or not isinstance(table_k, int) or not 0 <= table_k <= 50:
+        raise ConfigError("Arama ayarı geçersiz: table_k")
+    table_embed = retrieval["table_embed"]
+    if isinstance(table_embed, bool) or not isinstance(table_embed, int) or not 0 <= table_embed <= 200:
+        raise ConfigError("Arama ayarı geçersiz: table_embed")
+    retrieval["schema_tiers"] = validate_schema_tiers(retrieval["schema_tiers"])
     if not isinstance(config.get("llm_review"), bool):
         raise ConfigError("llm_review true veya false olmalı.")
     naming=config.get("naming")
     if not isinstance(naming,dict) or not isinstance(naming.get("windows"),dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in naming["windows"].items()):
         raise ConfigError("naming.windows metin anahtar/değer sözlüğü olmalı.")
+    naming.setdefault("ratio_rule", DEFAULTS["naming"]["ratio_rule"])
+    if naming["ratio_rule"] not in RATIO_RULES:
+        raise ConfigError("naming.ratio_rule suffix_pair veya approved_bases_only olmalı.")
     if config.get("reviewed_definitions_path"):
         reviewed_path=Path(config["reviewed_definitions_path"])
         base=Path(path).resolve().parent if path else Path.cwd()

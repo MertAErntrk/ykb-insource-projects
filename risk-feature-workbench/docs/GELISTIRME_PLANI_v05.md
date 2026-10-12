@@ -114,6 +114,39 @@ Ek olarak sözleşmeye uyum, sıra bağımsızlığı ve eşik dışı sızınt�
 - İndeks şema seçilince başlasın; eksik indeksle çalıştırmada sorulsun; iş "Tamamlandı (kısmi anlamsal kapsam)" olsun; kısmi satırlar için "Yeniden ara".
 - Kalite: ıska sınıflarına göre (sözlükte olmayan kısaltmalar, boş kolon yorumları, z eşiği, konu kelimesi kuralı).
 
+## Faz 7 — Katmanlı eşleştirme ve türetme açıklaması
+İstek: karşılık DM_CAD (INP_/OUT_ hariç) → DM → EDW sırasıyla aransın. Önce tablo açıklaması, sonra kolon açıklaması okunsun. Oran değişkenleri (`X_LW_L3M` = `X_LW / X_L3M`) bileşenleriyle açıklansın. Sonuç beş sınıfta verilsin: doğrudan, türetilebilir, belirsiz, bulunamadı, karar verilemedi. Plan Fable (architect) ile yapıldı, kullanıcı onayladı.
+
+| Paket | İçerik | Ajan / model | Durum |
+|---|---|---|---|
+| G | Graphify `update` + `affected`; config: `retrieval.schema_tiers`, `oracle.exclude_objects`, `naming.ratio_rule`, kayıt sınırı ayarlanabilir (üst 100.000) | ana oturum | tamam |
+| P0 | Medallion sahte kataloğu: DM_CAD.MVA_CUSTOMER_MONEY_XFER_DAILY (EFT/havale/SWIFT × tutar/adet × W1W/W1M/W3M), DM ve EDW benzerleri, INP_/OUT_ tuzakları | builder / Sonnet | tamam. Kapsam alanları snapshot ile aynı olacak şekilde ana oturum düzeltti |
+| P1 | Sözlük ve anlam: L=son (LM, LW, L3M), W1M kolon son eki, EFT/havale/SWIFT/WU ayrımı, oran kuralı, talep birim söylemiyorsa TL notu | builder / Opus | tamam |
+| P2 | SQL'de INP_/OUT_ dışlaması, katman sırasıyla tarama, şema bazlı tamlık, önbellek sürümü, web'de seçim sırası | builder / Sonnet | tamam |
+| P3 | Önce-tablo kanalı (tablo belgesi mevcut embedding endpoint'iyle, BM25 yalnız yedek), seçilen tabloların kolonlarına anında embedding, kanıt satırı | builder / Opus | tamam. İki test beklentisi mevcut sözcük kanalı davranışına göre düzeltildi |
+| P4a | `derivation.py`: katman planı, karar, oran türetme, Türkçe gerekçe metinleri | builder / Opus | tamam |
+| P4b | Pipeline'a bağlama ve kabul testleri A1–A5 | builder / Opus | kısmi döndü (A3). Ana oturum tamamladı: oran talebine taban olguları, varlık notu, bileşen dönemi karşılaştırması. Ek olarak açıklamayla en az 4 boyutu doğrulanan aday z eşiği altında da "zayıf" olarak gösterilir (`gate.fact_min`) |
+| P5 | Excel sütunları (Sonuç, Kaynak, Dayanak, Türetme yöntemi), web rozet/filtre/detay, DM_CAD/DM/EDW varsayılan seçili, evaluate sonuç dağılımı | builder / Sonnet | tamam. Tarayıcıda elle denenmedi |
+| R | Tüm değişikliğin incelenmesi | reviewer / Opus | tamam. 5 bulgu, hepsi ana oturumda düzeltildi: (1, yüksek) farklı tabanlı oran kolonu yalnız dönem eklerinin uyuşmasıyla "doğrudan" çıkabiliyordu. Artık işlem türü ya da kavram açıklamayla doğrulanmalı; `fact_min` ad kuralı olgularını saymıyor. (2) İndeks, taramanın dışlama kuralını snapshot'tan alıyor. (3) Kaynağı olmayan bileşen "aranan katmanlarda bulunamadı", "aday var, doğrulanamadı" ya da "aranamadı" diye ayrılıyor. (4) Web'de bileşen dönemi Türkçe. (5) Katalog anahtarına varsayılan dışlama kuralı giriyor. +2 test |
+
+Ölçüm (hash embedding, sentetik):
+- 273 satır: Hit@3 0.977 → 0.982, P@3 0.974 → 0.974, karşılığı olmayan satırlarda öneri 0/54.
+- 51 satır: 0.976 / 0.983 / 0/10 (önceki koşuyla aynı).
+- Sonuç dağılımı (273): doğrudan 28, belirsiz 187, karar verilemedi 58. "Karar verilemedi" satırları sentetik kapsamda DM ve EDW olmadığı içindir. "Belirsiz" satırların çoğunda kolon birimi ya da açıklama boyutu doğrulanamıyor. Doğrudan sınıfı için anlam desteği şart tutuldu; benzerlik skoru tek başına yetmiyor.
+- Tam paket 467/467. İnceleme düzeltmelerinden sonra ölçüm değişmedi.
+
+## Faz 8 — Sabit şemalar ve tam indeks kapısı
+İstek: eşleştirme indeks %100 olduktan sonra başlasın. Şema seçimi kalksın: risk alanı için DM_CAD, DM ve EDW taranır; kullanıcı yalnız kullanıcı adı ve parola girer.
+
+| Paket | İçerik | Ajan / model | Durum |
+|---|---|---|---|
+| P1 | Pipeline kapısı: model açıkken indeks eksiksiz olana kadar bekler (iptal edilebilir, yüzde ve kalan süre), durmuş indeksi en çok 3 kez yeniden başlatır, tamamlanamazsa arama yapmaz. `HybridIndex.queue_counts()` (tablo + kolon) | builder / Opus | tamam |
+| P2 | Web: tarama kapsamı sabit (DM_CAD → DM → EDW ∩ görünür şemalar); istemciden gelen şema listesi yok sayılır; görünmeyen katman uyarısı; indeks durumu `complete` | builder / Sonnet | tamam |
+| P3 | Arayüz: şema seçici kalktı, taranacak şemalar yazı olarak; bağlanınca embedding testi ve indeks kendiliğinden; embedding varsayılan açık, LLM varsayılan kapalı | builder / Sonnet | tamam. Tarayıcıda elle denenmedi |
+| R | İnceleme | reviewer / Opus | tamam. 4 bulgu, ana oturumda düzeltildi: (1, orta) indeks beklemesi tek analiz yuvasını tutuyordu; artık iş, bağlantının indeksi bitene kadar yuva dışında bekler, sonra sıraya girer. (2) `index_start` önbellekten dönen aynı indeksleyiciyi durdurmuyor. (3) `complete` kapıyla aynı ölçütü (tablo + kolon) kullanıyor. (4) Bekleme yüzdesi yeniden başlatmada sıfırlanmıyor. +4 test |
+
+Tam paket 486/486. Ölçüm değişmedi (hash embedding, sentetik): 273 satırda Hit@3 0.982, P@3 0.974, öneri 0/54; 51 satırda 0.976 / 0.983 / 0/10.
+
 ## Kurum ortamında doğrulanmamış olanlar
 - Gerçek Oracle katalog boyutu ve tarama süresi.
 - Gerçek embedding modelinin kimliği ve kalitesi.

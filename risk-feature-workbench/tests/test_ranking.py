@@ -253,5 +253,61 @@ class QualityFixTests(unittest.TestCase):
         self.assertEqual(rank(request(), [item("c1", z=5.0, coverage=1.0)], semantic_scope="full")["notes"], [])
 
 
+
+class TableEvidenceTests(unittest.TestCase):
+    def test_table_rank_evidence_and_bonus_config(self):
+        from riskmatch import ranking
+        config = ranking.gate_config()
+        self.assertEqual(config["table_bonus"], 0.0)
+        self.assertEqual(ranking.gate_config({"table_bonus": 0.5})["table_bonus"], 0.5)
+        with self.assertRaises(ConfigError):
+            ranking.gate_config({"table_bonus": -1})
+        request = {"name": "Kart gecikme", "description": ""}
+        for table_rank, expected in ((2, True), (4, False), (None, False)):
+            record = {"column": "C_017", "column_comment": "",
+                      "_features": {"name_level": "none", "table_rank": table_rank}}
+            evidence = ranking._evidence(request, record, ranking._features(record), config)
+            self.assertEqual("Tablo açıklaması talep konusuyla uyumlu (tablo sırası 2)" in evidence, expected)
+
+
+class FactSupportedGateTests(unittest.TestCase):
+    """z eşiğin altında kalsa da talebin anlam boyutları kolon açıklamasıyla doğrulanan aday gösterilir."""
+
+    def test_fully_supported_candidate_below_z_min_is_shown(self):
+        req = request(definition=verified(**CONTRACT))
+        pool = [item("a", z=2.2, coverage=0.75, definition=verified(**CONTRACT))]
+        out = rank(req, pool, semantic_scope="full", catalog_complete=True)
+        self.assertEqual(ids(out["candidates"]), ["a"])
+        self.assertEqual(out["candidates"][0]["meaning"], "likely")
+        off = rank(req, pool, gate={"fact_min": 0}, semantic_scope="full", catalog_complete=True)
+        self.assertEqual(off["candidates"], [])
+        with self.assertRaises(ConfigError):
+            rank(req, pool, gate={"fact_min": -1})
+
+    def test_partial_or_conflicting_facts_stay_below_gate(self):
+        req = request(definition=verified(**CONTRACT))
+        partial = verified(entity="customer", concept="transfer", window="last_week")
+        conflict = verified(**dict(CONTRACT, window="last_month"))
+        for definition in (partial, conflict):
+            out = rank(req, [item("b", z=2.2, coverage=0.75, definition=definition)],
+                       semantic_scope="full", catalog_complete=True)
+            self.assertEqual(out["candidates"], [])
+
+    def test_ratio_with_other_base_is_not_supported_by_name_rule_alone(self):
+        from riskmatch.derivation import is_direct
+        from riskmatch.semantics import evaluate_candidate, parse_definition
+        naming = {"windows": {"LW": "last_week", "L3M": "last_3_months"}, "ratio_rule": "suffix_pair"}
+        record = {"catalog_id": "a", "schema": "DM", "object": "T", "column": "KREDI_LIMIT_LW_L3M",
+                  "column_comment": "Kredi limit oranı", "data_type": "NUMBER"}
+        for description in ("", "Son hafta / son 3 ay oranı"):
+            req = {"row_id": 1, "name": "GIDEN_EFT_ADET_LW_L3M", "description": description,
+                   "definition": parse_definition("GIDEN_EFT_ADET_LW_L3M", description, naming)}
+            checks = {c["dimension"]: c["status"] for c in evaluate_candidate(req, record)["checks"]}
+            self.assertEqual((checks["numerator"], checks["denominator"]), ("missing", "missing"))
+            for features in ({"z": 1.0, "coverage": 0.6}, {"z": 3.0, "coverage": 0.6}):
+                out = rank(req, [dict(record, _features=features)], semantic_scope="full", catalog_complete=True)
+                self.assertFalse(any(is_direct(c) for c in out["candidates"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,21 +30,21 @@ Liste `ALL_USERS` üzerinden en fazla 1.000 **şema adayı** içerir. Listeye gi
 
 Önceki ekrandaki `DPY-4024`, Oracle çağrısının süre sınırını aşmasıdır. Ekranda bu hata şema listeleme aşamasında olduğundan kullanıcı/parola adımını geçmişti; bu tek başına yetki hatası olduğunu göstermiyordu. Yeni sürüm, giriş sırasında tüm `ALL_TAB_COLUMNS` görünümünden farklı sahipleri çıkarmak yerine sınırlı şema listesi okur. Kurumdaki gecikmenin gerçek sebebi yeni testin aşama ve süreleriyle ayrıca doğrulanmalıdır. [Oracle sürücüsünün zaman aşımı açıklaması](https://python-oracledb.readthedocs.io/en/v4.0.1/user_guide/appendix_c.html).
 
-## 3. Yalnız bir veya iki şemanın erişimini test edin
+## 3. Sabit şemaların erişimini test edin
 
-1. Açılır listeden işinizle ilgili, adını bildiğiniz **bir veya iki şema** seçin.
-2. **Seçimi tamamla**, ardından **Seçili şemaları test et** düğmesine basın.
+1. Bağlandıktan sonra üst alanda taranacak şemalar (DM_CAD, DM, EDW) yazar; hesabınızın göremediği şema varsa uyarı çıkar.
+2. **Şema erişimini test et** düğmesine basın.
 3. Test raporundaki **Şema erişimi · ...** satırlarını inceleyin.
 
 | Sonuç | Yorum ve sonraki adım |
 |---|---|
 | Geçti | Seçili şemadan en az bir kolonun adı/tipi ve açıklama kataloglarına sınırlı erişim doğrulandı. Değişken aramasına geçin. |
-| Görünür kolon bulunamadı | Şema boş olabilir veya hesabınız kolonları göremiyor olabilir. İşinizde kullandığınız başka bir şemayı seçin; gerekiyorsa veritabanı ekibiyle o şemanın görünürlüğünü kontrol edin. |
-| `DPY-4024` / `DPI-1067` | Katalog sorgusu zaman sınırını aştı. Bir şemayla tekrar deneyin; tekrarlarsa rapordaki aşama, süre ve kodla sorgu/ağ durumunu inceleyin. |
+| Görünür kolon bulunamadı | Şema boş olabilir veya hesabınız kolonları göremiyor olabilir. Veritabanı ekibiyle o şemanın görünürlüğünü kontrol edin; erişim gelene kadar o katmana inen satırlar "karar verilemedi" olur. |
+| `DPY-4024` / `DPI-1067` | Katalog sorgusu zaman sınırını aştı. Biraz sonra tekrar deneyin; tekrarlarsa rapordaki aşama, süre ve kodla sorgu/ağ durumunu inceleyin. |
 | `ORA-00942` / `ORA-01031` | İlgili katalog görünümü veya erişim izni kontrol edilmeli. |
 | Atlandı | O aşama denenmedi. Önceki hata veya toplam süre bütçesi nedeniyle test edilmemiş şema başarılı sayılmaz. |
 
-Her şema için **en fazla bir katalog satırı** okunur. Çağrı başına en fazla 10 saniye sınırı ve seçili şema testi için 45 saniyelik işlem bütçesi uygulanır. Zaman aşımı veya bağlantı kesintisinden sonra kalan şemalar aynı oturumla denenmez. Bu test, bütün tabloların tarandığı veya müşteri verisine erişildiği anlamına gelmez.
+Her şema için **en fazla bir katalog satırı** okunur. Çağrı başına en fazla 10 saniye sınırı ve şema testi için 45 saniyelik işlem bütçesi uygulanır. Zaman aşımı veya bağlantı kesintisinden sonra kalan şemalar aynı oturumla denenmez. Bu test, bütün tabloların tarandığı veya müşteri verisine erişildiği anlamına gelmez.
 
 ## 4. LLM ve embedding'i ayrı ayrı test edin
 

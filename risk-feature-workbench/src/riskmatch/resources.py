@@ -86,7 +86,7 @@ class EmbeddingGate:
 
 
 class BackgroundIndexer:
-    """Embeds index.missing_documents() into namespace via the gate's index lane.
+    """Embeds index.index_queue() (table documents first, then columns by schema tier) via the index lane.
 
     Never calls index.refresh_index(): a running job keeps its frozen semantic
     set; the next job picks the new vectors up through Resources.index().
@@ -145,7 +145,7 @@ class BackgroundIndexer:
 
     def _run(self):
         try:
-            missing = self.index.missing_documents()
+            missing = self.index.index_queue()
         except Exception as error:
             self._finish("failed", "Eksik belge listesi alınamadı (%s)." % type(error).__name__)
             return

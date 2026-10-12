@@ -85,6 +85,13 @@ class EvaluateSyntheticTests(unittest.TestCase):
         for key in ("ilk_sonuc_s", "toplam_s", "arama_istatistikleri"):
             self.assertIn(key, self.report["uctan_uca"])
 
+    def test_verdict_distribution_in_report(self):
+        counts = self.report["sonuc_sinifi"]
+        self.assertEqual(sum(counts.values()), self.report["uctan_uca"]["satir"])
+        self.assertEqual(self.report["uctan_uca"]["sonuc_sinifi"], counts)
+        text = (self.out / "rapor.md").read_text(encoding="utf-8")
+        self.assertIn("Sonuç sınıfı dağılımı:", text)
+
     def test_grid_has_nine_gates(self):
         grid = self.report["kapi_taramasi"]
         self.assertEqual([g["kapi"] for g in grid][0], "varsayilan")

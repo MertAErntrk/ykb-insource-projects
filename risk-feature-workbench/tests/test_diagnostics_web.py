@@ -28,6 +28,7 @@ class DiagnosticsWebTests(unittest.TestCase):
         self.assertTrue(connection.closed)
 
     def test_selected_schema_endpoint_uses_session_credentials_and_validates_selection(self):
+        # İstemcinin "schemas" alanı yok sayılır; her zaman bağlantıdaki sabit scan_schemas test edilir.
         seen=[]
         def diagnose(config,credentials,schemas):
             seen.append((credentials["user"],credentials["dsn"],schemas))
@@ -35,9 +36,10 @@ class DiagnosticsWebTests(unittest.TestCase):
         with patch("riskmatch.web.diagnose_selected_schemas",side_effect=diagnose):
             result=self.client.post("/api/diagnostics/oracle-schemas",json={"schemas":["RISK_DWH"]},headers=self.headers)
             self.assertTrue(result.json["ok"])
-            invalid=self.client.post("/api/diagnostics/oracle-schemas",json={"schemas":["NOT_LISTED"]},headers=self.headers)
-        self.assertEqual(invalid.status_code,400)
-        self.assertEqual(len(seen),1)
+            ignored=self.client.post("/api/diagnostics/oracle-schemas",json={"schemas":["NOT_LISTED"]},headers=self.headers)
+            empty=self.client.post("/api/diagnostics/oracle-schemas",json={},headers=self.headers)
+        self.assertEqual((ignored.status_code,empty.status_code),(200,200))
+        self.assertEqual([row[2] for row in seen],[["RISK_DWH"]]*3)
         self.assertEqual(seen[0][0],"test-user")
         self.assertNotIn("SECRET_SENTINEL",result.text)
         self.assertTrue(self.client.get("/api/connection").json["ok"])

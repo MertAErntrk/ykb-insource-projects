@@ -59,12 +59,28 @@ class LexiconTests(unittest.TestCase):
             "son 3 ay": (3, "ay"), "son üç ay": (3, "ay"), "last 3 months": (3, "ay"),
             "12M": (12, "ay"), "1Y": (1, "yil"), "6 aylık": (6, "ay"), "son ay": (1, "ay"),
             "last month": (1, "ay"), "son 30 gün": (30, "gun"), "last 2 weeks": (2, "hafta"),
-            "son on iki ay": (12, "ay"),
+            "son on iki ay": (12, "ay"), "LM": (1, "ay"), "LW": (1, "hafta"), "L2W": (2, "hafta"),
+            "L6M": (6, "ay"), "L12M": (12, "ay"), "W1W": (1, "hafta"), "W1M": (1, "ay"), "W3M": (3, "ay"),
+            "önceki 1 ay içerisinde": (1, "ay"), "son ayda": (1, "ay"), "son bir haftada": (1, "hafta"),
         }
         for text, expected in cases.items():
             self.assertEqual(self.lex.window(text), [expected], text)
         self.assertEqual(self.lex.window("YTD"), [(0, "ytd")])
         self.assertEqual(self.lex.window("kredi tutari"), [])
+
+    def test_excel_and_catalog_windows_share_tokens(self):
+        self.assertEqual(self.tokset("Giden_EFT_tut_LM"), {"giden", "eft", "tutar", "win:1:ay"})
+        self.assertEqual(self.tokset("TOTAL_EFT_TRX_AMT_TL_W1M"), {"toplam", "eft", "islem", "tutar", "tl", "win:1:ay"})
+        self.assertEqual(self.tokset("X_LW"), self.tokset("X_W1W"))
+
+    def test_channels_are_separate(self):
+        self.assertEqual(self.tokset("HVL"), {"havale"})
+        self.assertEqual(self.tokset("EFT"), {"eft"})
+        self.assertNotEqual(self.tokset("havale"), self.tokset("eft"))
+        self.assertEqual(self.tokset("western union"), self.tokset("WU"))
+        self.assertEqual(self.tokset("SWIFT"), {"swift"})
+        for text in ("TRF", "xfer", "para transferi", "money transfer"):
+            self.assertEqual(self.tokset(text), {"transfer"}, text)
 
     def test_son_alone_is_generic_token(self):
         self.assertIn("son", self.lex.tokens("son kullanma"))

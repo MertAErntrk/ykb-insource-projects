@@ -1,11 +1,13 @@
 """Catalog cache keeps only complete metadata snapshots and never raw credentials."""
 
+import hashlib
+import json
 import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from riskmatch.catalog_cache import CatalogCache, cache_key
+from riskmatch.catalog_cache import FORMAT_VERSION, CatalogCache, cache_key
 
 
 def snapshot(complete=True, marker="v1"):
@@ -27,6 +29,11 @@ class CatalogCacheTests(unittest.TestCase):
         self.assertEqual(key, cache_key("scott", "host:1521/svc", "PDB1", ["A", "B"]))
         self.assertNotEqual(key, cache_key("scott", "host:1521/svc", "PDB2", ["A", "B"]))
         self.assertNotEqual(key, cache_key("other", "host:1521/svc", "PDB1", ["A", "B"]))
+        self.assertEqual(FORMAT_VERSION, 2)
+        legacy = hashlib.sha256(json.dumps(
+            {"user": "scott", "dsn": "host:1521/svc", "container": "PDB1", "schemas": ["A", "B"]},
+            sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.assertNotEqual(key, legacy)
         self.assertRegex(key, r"^[0-9a-f]{64}$")
         self.assertNotIn("scott", key)
 
@@ -86,6 +93,19 @@ class CatalogCacheTests(unittest.TestCase):
                     text = handle.read()
                 for secret in ("PRIVATE_USER_SENTINEL", "PRIVATE_DSN_SENTINEL", "password"):
                     self.assertNotIn(secret, text)
+
+
+class CatalogKeyExclusionTests(unittest.TestCase):
+    def test_default_exclusion_rule_is_part_of_the_key(self):
+        from riskmatch.config import DEFAULT_EXCLUDE_OBJECTS
+        from riskmatch.pipeline import catalog_key
+        oracle = {"source_database": "EDW", "environment": "PROD", "container": "PDB1", "schemas": ["DM_CAD"]}
+        keys = {"user": "u", "dsn": "d"}
+        unset = catalog_key(oracle, keys)
+        self.assertEqual(unset, catalog_key(dict(oracle, exclude_objects=DEFAULT_EXCLUDE_OBJECTS), keys))
+        self.assertNotEqual(unset, catalog_key(dict(oracle, exclude_objects=[]), keys))
+        with patch("riskmatch.pipeline.DEFAULT_EXCLUDE_OBJECTS", [{"schema": "DM_CAD", "prefixes": ["TMP_"]}]):
+            self.assertNotEqual(unset, catalog_key(oracle, keys))
 
 
 if __name__ == "__main__":
