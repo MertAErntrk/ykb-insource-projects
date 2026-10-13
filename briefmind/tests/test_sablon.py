@@ -213,6 +213,7 @@ HARITA = {
                               "secildi": True}]},
     "birebir": {"geri_bildirimler": ["Sunum anlatımı net bulundu"], "anlasilanlar": ["Haftalık kısa görüşme yapılacak"]},
     "calistay": {"fikirler": [{"fikir": "QR ile ödeme", "tema": "Ödeme"}]},
+    "durum": {"konu_durumlari": [{"konu": "Rapor ekranı", "durum": "Rapor ekranı tamamlandı", "risk": ""}]},
 }
 
 
@@ -223,7 +224,7 @@ def _bos_ozet(**ek):
     return v
 
 
-@pytest.mark.parametrize("sablon", ["haftalik", "karar", "birebir", "calistay"])
+@pytest.mark.parametrize("sablon", ["haftalik", "karar", "birebir", "calistay", "durum"])
 def test_map_semasi_ve_promptu_sablona_gore(monkeypatch, sablon):
     sahte = SablonLLM(bolum=_bos_ozet(**HARITA[sablon]))
     monkeypatch.setattr(llm, "sor", sahte)
@@ -344,10 +345,16 @@ BOLUMLER = {
                            kararlar=["Sprint süresi iki hafta olacak"]),
                  _bos_ozet(fikirler=[{"fikir": "QR ile ödeme", "tema": "Diğer"},
                                      {"fikir": "Sesli asistan", "tema": "Kanal"}])],
+    "durum": [_bos_ozet(konular=["Rapor ekranı"], kararlar=[{"madde": "Sprint süresi iki hafta olacak", "konu": ""}],
+                        konu_durumlari=[{"konu": "Rapor ekranı", "durum": "Tasarım sürüyor", "risk": "Test ortamı yok"}]),
+              _bos_ozet(konular=["Rapor ekranı"], konu_durumlari=[{"konu": "rapor ekranı", "durum": "Rapor ekranı tamamlandı",
+                                                                   "risk": ""}],
+                        kararlar=[{"madde": "Rapor ekranı cuma yayına alınacak", "konu": "Rapor ekranı"}],
+                        acik_sorular=[{"madde": "Test ortamı ne zaman hazır olur?", "konu": "Rapor ekranı"}])],
 }
 
 
-@pytest.mark.parametrize("sablon", ["haftalik", "karar", "birebir", "calistay"])
+@pytest.mark.parametrize("sablon", ["haftalik", "karar", "birebir", "calistay", "durum"])
 def test_birlestir_yerel_ve_llm_listesi_sablon_alanlarini_birlestirir(monkeypatch, sablon):
     sahte = SablonLLM()
     monkeypatch.setattr(llm, "sor", sahte)
@@ -366,6 +373,13 @@ def test_birlestir_yerel_ve_llm_listesi_sablon_alanlarini_birlestirir(monkeypatc
     elif sablon == "birebir":
         assert "Sunum anlatımı net bulundu" in _bolum(md, "Geri bildirimler")
         assert "Haftalık kısa görüşme yapılacak" in _bolum(md, "Anlaşılanlar")
+    elif sablon == "durum":                                  # ayni konu iki bolumde: tek durum satiri, sonraki gecerli
+        kon = _bolum(md, "Konular")
+        assert kon.count("### Rapor ekranı") == 1 and "### Genel" in kon
+        assert "Durum: Rapor ekranı tamamlandı. Risk: Test ortamı yok." in kon and "Tasarım sürüyor" not in kon
+        rapor = kon.split("### Rapor ekranı\n", 1)[1].split("\n### ", 1)[0]
+        assert "- Rapor ekranı cuma yayına alınacak" in rapor and "- Test ortamı ne zaman hazır olur?" in rapor
+        assert "Sprint süresi iki hafta olacak" in kon.split("### Genel\n", 1)[1]
     else:
         fik = _bolum(md, "Fikirler")
         assert fik.count("QR ile ödeme") == 1 and "Kanal:" in fik
@@ -663,7 +677,7 @@ def _buyuk_baglam():
                             "; ".join(f"Terim{i}" for i in range(60)), gundem="Gündem maddesi " * 80)
 
 
-@pytest.mark.parametrize("sablon", ["genel", "haftalik", "karar", "birebir", "calistay"])
+@pytest.mark.parametrize("sablon", ["genel", "haftalik", "karar", "birebir", "calistay", "durum"])
 def test_map_istegi_parca_butcesiyle_pencereye_sigar(monkeypatch, sablon):
     sahte = SablonLLM(bolum=_bos_ozet(**HARITA.get(sablon, {})))
     monkeypatch.setattr(llm, "sor", sahte)
@@ -679,13 +693,15 @@ def test_map_istegi_parca_butcesiyle_pencereye_sigar(monkeypatch, sablon):
     assert c["max_tokens"] == llm.butce("bolum")
 
 
-@pytest.mark.parametrize("sablon", ["haftalik", "karar", "birebir", "calistay"])
+@pytest.mark.parametrize("sablon", ["haftalik", "karar", "birebir", "calistay", "durum"])
 def test_liste_ve_ozet_istekleri_pencereye_sigar(monkeypatch, sablon):
     alan, _, tur = llm.SABLON_ALANLARI[sablon][0]
     ornek = {"metin": lambda i, j: f"Madde {i}-{j} rapor ekranı kayıt {i * 10 + j} tamamlandı",
              "secenek": lambda i, j: {"secenek": f"Seçenek {i}-{j} kurulum {i * 10 + j}", "artilar": ["Hızlı kurulum"],
                                       "eksiler": ["Aylık maliyet yüksek"], "secildi": j == 0},
-             "fikir": lambda i, j: {"fikir": f"Fikir {i}-{j} kanal {i * 10 + j}", "tema": f"Tema {j % 3}"}}[tur]
+             "fikir": lambda i, j: {"fikir": f"Fikir {i}-{j} kanal {i * 10 + j}", "tema": f"Tema {j % 3}"},
+             "konu_durum": lambda i, j: {"konu": f"Proje {i}-{j}", "durum": f"Kayıt {i * 10 + j} tamamlandı",
+                                         "risk": f"Lisans {j} gecikebilir"}}[tur]
     bolumler = [dict(_bos_ozet(kararlar=[f"Karar {i} için onay {i + 100} verildi"],
                                aksiyonlar=[{"madde": f"İş {i} kayıt {i + 300} hazırlanacak", "sorumlu": SELIN,
                                             "tarih": "-"}]),
@@ -980,3 +996,348 @@ def test_soyad_siradan_kelime_olarak_gecince_kisi_sayilmaz():
 ])
 def test_sablon_tespit_siradan_kalip_ve_onek_tablosu(konu, govde, beklenen):
     assert llm.sablon_tespit(konu, govde)[0] == beklenen, (konu, govde, llm.sablon_tespit(konu, govde))
+
+
+# ================================================================ 9) durum sablonu ve konu etiketleri
+
+@pytest.mark.parametrize("konu, govde, beklenen", [
+    ("Durum değerlendirme", "", "durum"),
+    ("Proje durum değerlendirmesi", "", "durum"),
+    ("DURUM DEĞERLENDİRMESİ — DWH", "", "durum"),
+    ("Haftalık durum değerlendirmesi", "", "durum"),            # 'haftalik durum'dan once
+    ("Q4 status review", "", "durum"),
+    ("Proje gözden geçirmesi", "", "durum"),
+    ("Ürün sync", "Gündem: proje durum değerlendirmesi ve riskler", "durum"),     # davet metninde de guclu ipucu
+    ("Tedarikçi değerlendirmesi", "", "karar"),                  # zayif 'degerlendirme' yine karar
+    ("Proje durumu", "", "haftalik"),                            # mevcut tablo korunur
+    ("Ürün sunumu", "Proje durumu hakkında kısa bilgi.", "genel"),
+    ("Birebir durum değerlendirmesi", "", "birebir"),            # ozel tur once
+])
+def test_durum_sablonu_tespit_tablosu(konu, govde, beklenen):
+    sablon, neden = llm.sablon_tespit(konu, govde)
+    assert sablon == beklenen, (konu, govde, neden)
+
+
+def test_durum_sablonu_tanimi_sema_ve_prompt():
+    assert llm.sablon_etiketi("durum") == "Durum değerlendirme" and llm.sablon_adi("durum") == "durum"
+    assert llm.SABLON_ALANLARI["durum"] == (("konu_durumlari", "Konu durumları", "konu_durum"),)
+    sema = llm.bolum_semasi("durum")
+    oge = sema["properties"]["konu_durumlari"]["items"]
+    assert oge["required"] == ["konu", "durum", "risk"] and "konu_durumlari" in sema["required"]
+    assert all(v["type"] == "string" for v in oge["properties"].values())
+    s = llm.map_sistemi("durum")
+    assert s.startswith(llm.MAP_SISTEM) and "- konu_durumlari:" in s
+    assert llm._gorev_adi([{"role": "system", "content": s}]) == "bolum"
+    assert "konu_durumlari" in llm.liste_sistemi("durum") and llm._LISTE_EK["konu_durumlari"] in llm.liste_sistemi("durum")
+    # duz metin (liste girdisinin bicimi) nesneye doner; durumu da riski de bos olan atilir
+    assert llm.sablon_alani_normalize(["DWH | durum: yükleme bitti | risk: -", {"konu": "CRM", "durum": "", "risk": ""},
+                                       "Mobil: test sürüyor (?)"], "konu_durum") == [
+        {"konu": "DWH", "durum": "yükleme bitti", "risk": ""}, {"konu": "Mobil", "durum": "test sürüyor", "risk": ""}]
+
+
+def test_konu_semasi_anyof_yok_map_promptu_onek_korur():
+    for sema in (llm.BOLUM_SEMASI, llm.LISTE_SEMASI, llm.bolum_semasi("durum"), llm.liste_semasi("haftalik")):
+        assert "anyOf" not in json.dumps(sema)
+        for alan in ("kararlar", "acik_sorular"):
+            oge = sema["properties"][alan]["items"]
+            assert oge["type"] == "object" and oge["required"] == ["madde", "konu"]
+        aks = sema["properties"]["aksiyonlar"]["items"]
+        assert "konu" in aks["properties"] and "konu" not in aks["required"]          # aksiyonda istege bagli
+    assert llm.MAP_SISTEM.rstrip().endswith("transkriptte açık değilse 'konu' boş ('') kalır; tahmin etme.")
+    assert llm.MAP_SISTEM.startswith("Sen deneyimli bir toplantı not alıcısısın. Sana bir toplantının BİR bölümünün")
+    assert llm._gorev_adi([{"role": "system", "content": llm.MAP_SISTEM}]) == "bolum"
+    assert llm._gorev_adi([{"role": "system", "content": llm.liste_sistemi("durum")}]) == "liste"
+
+
+def test_normalize_ozet_duz_ve_nesne_ogeleri_konu_etiketleri():
+    o = llm.normalize_ozet({"ozet": "x", "konular": ["DWH projesi"],
+                            "kararlar": [{"madde": "Canlı geçiş kasımda", "konu": "DWH projesi"}, "Eski parça kararı",
+                                         "Modül kapatılacak [konu: CRM]", {"madde": "", "konu": "X"}],
+                            "acik_sorular": [{"madde": "Tarih netleşti mi?", "konu": ""}],
+                            "aksiyonlar": [{"madde": "Raporu hazırla", "sorumlu": AYSE, "tarih": "-", "konu": " DWH "},
+                                           {"madde": "Sunumu güncelle [konu: CRM]", "sorumlu": "", "tarih": ""},
+                                           {"madde": "Listeyi temizle", "sorumlu": KEMAL, "tarih": "-", "konu": ""}]})
+    assert o["kararlar"] == ["Canlı geçiş kasımda", "Eski parça kararı", "Modül kapatılacak"]      # hep duz metin
+    assert o["acik_sorular"] == ["Tarih netleşti mi?"]
+    assert o["konu_etiketleri"] == [{"tur": "karar", "madde": "Canlı geçiş kasımda", "konu": "DWH projesi"},
+                                    {"tur": "karar", "madde": "Modül kapatılacak", "konu": "CRM"}]
+    assert [a.get("konu") for a in o["aksiyonlar"]] == ["DWH", "CRM", None]
+    assert o["aksiyonlar"][1]["madde"] == "Sunumu güncelle" and "konu" not in o["aksiyonlar"][2]
+    # eski parca dosyasi (duz metin) ve kayitli ozetin yeniden normalize edilmesi: etiketler kaybolmaz
+    assert llm.normalize_ozet({"kararlar": ["a karar"]})["konu_etiketleri"] == []
+    assert llm.normalize_ozet(o)["konu_etiketleri"] == o["konu_etiketleri"]
+
+
+@pytest.mark.parametrize("konu, kanon, beklenen", [
+    ("DWH projesi", ["DWH projesi"], "DWH projesi"),
+    ("DWH", ["DWH projesi", "CRM"], "DWH projesi"),
+    ("DWH'nin", ["DWH projesi"], "DWH projesi"),
+    ("dwh projesinde", ["DWH projesi"], "DWH projesi"),
+    ("DWH projesi", ["DWH"], "DWH"),
+    ("CRM projesi", ["DWH projesi"], "CRM projesi"),             # yalniz 'proje' ortak: ayni konu degil
+    ("Proje", ["DWH projesi"], "Proje"),
+    ("Veri", ["Veri ambarı", "Veri kalitesi"], "Veri"),          # iki konuya ayni uzaklikta: secilmez
+    ("dwh", ["DWH projesi", "DWH takvimi"], "DWH projesi"),       # esitlikte Jaccard
+    ("  [konu: CRM] ", ["CRM"], "CRM"),
+    ("", ["CRM"], ""),
+    ("Genel", ["CRM"], ""),
+])
+def test_konu_kanonla_turkce_ekler_ve_belirsizlik(konu, kanon, beklenen):
+    assert llm.konu_kanonla(konu, kanon) == beklenen
+
+
+def test_konu_kanonu_ilk_yazim_kalir_konular_once():
+    bolumler = [{"konular": ["DWH projesi"], "konu_etiketleri": [{"tur": "karar", "madde": "a", "konu": "DWH"}],
+                 "aksiyonlar": [{"madde": "b", "konu": "CRM'in"}]},
+                {"konular": ["CRM", "Proje"], "konu_durumlari": [{"konu": "dwh projesinde", "durum": "x", "risk": ""}]}]
+    assert llm.konu_kanonu(llm.konu_adaylari(bolumler)) == ["DWH projesi", "CRM", "Proje"]
+    assert llm.konu_kanonu(["DWH projesi", "Uydurma proje"], kabul_fn=lambda k: "Uydurma" not in k) == ["DWH projesi"]
+
+
+def _konulu_bolumler():
+    return [llm.normalize_ozet({"ozet": "a", "konular": ["DWH projesi"],
+                                "kararlar": [{"madde": "DWH canlı geçişi kasımda yapılacak", "konu": "DWH projesi"}],
+                                "acik_sorular": [{"madde": "Lisans yenilemesi ne zaman netleşecek?", "konu": "DWH"}],
+                                "aksiyonlar": [{"madde": "DWH test raporunu hazırlamak", "sorumlu": KEMAL, "tarih": "-",
+                                                "konu": "DWH"}]}),
+            llm.normalize_ozet({"ozet": "b", "konular": ["CRM"],
+                                "kararlar": [{"madde": "CRM eski modülü kapatılacak", "konu": "CRM"},
+                                             {"madde": "Toplantılar iki haftada bir yapılacak", "konu": ""}],
+                                "aksiyonlar": [{"madde": "DWH test raporunu hazırlamak", "sorumlu": "belirsiz",
+                                                "tarih": "-"},
+                                               {"madde": "Kullanıcı kılavuzunu yazmak", "sorumlu": SELIN, "tarih": "-"}]})]
+
+
+def test_aksiyon_birlestir_konuyu_korur_tekille_doldurur():
+    assert llm._aksiyon_birlestir({"madde": "x", "konu": "DWH"}, {"madde": "x", "sorumlu": "belirsiz"})["konu"] == "DWH"
+    assert llm._aksiyon_birlestir({"madde": "x", "konu": "DWH"}, {"madde": "x", "konu": "CRM"})["konu"] == "CRM"
+    tek = llm.listeleri_tekille(_konulu_bolumler())["aksiyonlar"]
+    assert [(a["madde"], a.get("konu"), a["sorumlu"]) for a in tek] == [
+        ("DWH test raporunu hazırlamak", "DWH", KEMAL), ("Kullanıcı kılavuzunu yazmak", None, SELIN)]
+
+
+def test_konulari_tasi_cikti_maddesine_girdi_konusu_llm_konusu_yok_sayilir():
+    bolumler = _konulu_bolumler()
+    cikti = {"kararlar": ["DWH canlı geçişi kasımda yapılacak.", "CRM eski modülü kapatılacak (?)",
+                          "Toplantılar iki haftada bir yapılacak", "DWH ve CRM kararları birlikte verildi",
+                          "DWH canlı geçişi kasımda yapılacak; CRM eski modülü kapatılacak"],
+             "acik_sorular": ["Lisans yenilemesi ne zaman netleşecek?"],
+             "aksiyonlar": [{"madde": "DWH test raporu hazırlanacak", "sorumlu": KEMAL, "tarih": "-", "konu": "Uydurma"},
+                            {"madde": "Kullanıcı kılavuzunu yazmak", "sorumlu": SELIN, "tarih": "-", "konu": "CRM"}]}
+    v = llm._konulari_tasi(bolumler, cikti)
+    etiket = {e["madde"]: e["konu"] for e in v["konu_etiketleri"]}
+    assert etiket == {"DWH canlı geçişi kasımda yapılacak.": "DWH projesi", "CRM eski modülü kapatılacak (?)": "CRM",
+                      "Lisans yenilemesi ne zaman netleşecek?": "DWH projesi"}    # 'DWH' kanonik ada indi
+    # iki konudan birlesmis madde ve konusuz girdi: konu yok (Genel); LLM'in yazdigi konu kullanilmaz
+    assert [a.get("konu") for a in v["aksiyonlar"]] == ["DWH projesi", None]
+    assert cikti["aksiyonlar"][0]["konu"] == "Uydurma"                          # girdi listesi degismez
+    bul = llm.konu_bulucu(v)
+    assert bul("CRM eski modülü kapatılacak (?)", "karar") == "CRM" and bul("Toplantılar iki haftada bir yapılacak",
+                                                                             "karar") is None
+    # kanon disindaki konu (motor: transkriptte dayanaksiz) hic kullanilmaz
+    v = llm._konulari_tasi(bolumler, cikti, kanon=["CRM"])
+    assert {e["konu"] for e in v["konu_etiketleri"]} == {"CRM"} and [a.get("konu") for a in v["aksiyonlar"]] == [None, None]
+
+
+def test_birlestir_llm_yolu_konuyu_girdiden_tasir_ve_notta_gosterir(monkeypatch):
+    def liste(girdi):
+        v = yanki_liste(girdi)                                   # '[konu: X]' damgali satirlari geri verir
+        for a in v["aksiyonlar"]:
+            a["konu"] = "Uydurma proje"                           # karsit: her aksiyona uydurma konu
+        v["kararlar"] = [{"madde": x, "konu": "Uydurma proje"} for x in v["kararlar"]]
+        return v
+    sahte = SablonLLM(liste=liste)
+    monkeypatch.setattr(llm, "sor", sahte)
+    md = llm.birlestir(_konulu_bolumler(), "Toplantı: x", ilerleme=lambda m: None)
+    girdi = sahte.gorev("liste")[0]["girdi"]
+    assert "- [B1] DWH canlı geçişi kasımda yapılacak [konu: DWH projesi]" in girdi
+    assert "- [B1] DWH test raporunu hazırlamak [konu: DWH] — " in girdi
+    assert "- [B2] Toplantılar iki haftada bir yapılacak\n" in girdi                 # konusuz: damga yok
+    assert "Uydurma" not in md
+    assert "- DWH canlı geçişi kasımda yapılacak [konu: DWH projesi]\n" in md
+    assert "- Toplantılar iki haftada bir yapılacak\n" in md
+    assert "- Lisans yenilemesi ne zaman netleşecek? [konu: DWH projesi]\n" in md
+    assert llm.AKSIYON_BASLIGI in md and "| DWH test raporunu hazırlamak | " in md
+    satir = next(x for x in md.split("\n") if "DWH test raporunu" in x)
+    assert satir.rstrip().endswith("| - | DWH projesi |")                            # kaynak yok: '-', konu son sutun
+    assert next(x for x in md.split("\n") if "Kullanıcı kılavuzunu" in x).endswith("| - | - |")
+    tablo = {a["madde"]: a["konu"] for a in not_araclari.aksiyonlari_ayikla(md)}
+    assert tablo == {"DWH test raporunu hazırlamak": "DWH projesi", "Kullanıcı kılavuzunu yazmak": None}
+
+
+def test_not_markdown_konu_damgasi_kaynaktan_once_durum_duzeni():
+    listeler = {"kararlar": ["Canlı geçiş kasımda", "Toplantı sıklığı iki hafta"],
+                "aksiyonlar": [{"madde": "Test raporu", "sorumlu": KEMAL, "tarih": "-"}],
+                "acik_sorular": ["Veri taşıma ne zaman?"],
+                "konu_durumlari": [{"konu": "DWH projesi", "durum": "Yükleme bitti", "risk": "Lisans gecikebilir"},
+                                   {"konu": "CRM", "durum": "", "risk": "Veri taşıma belirsiz"}]}
+    konu = {"Canlı geçiş kasımda": "DWH projesi", "Veri taşıma ne zaman?": "CRM", "Test raporu": "DWH projesi"}
+    kaynak = lambda m, s=None: "10:00:04" if "Canlı" in m or "Yükleme" in m else None
+    md = llm.not_markdown({"ozet": "Özet.", "sonraki_adim": "-"}, {k: v for k, v in listeler.items()
+                                                                   if k != "konu_durumlari"},
+                          kaynak, konu_fn=lambda m, t: konu.get(m))
+    assert "- Canlı geçiş kasımda [konu: DWH projesi] ⏱10:00:04\n- Toplantı sıklığı iki hafta\n" in md
+    assert "## Açık sorular\n- Veri taşıma ne zaman? [konu: CRM]\n" in md
+    assert f"{llm.AKSIYON_BASLIGI}\n|---|---|---|---|---|---|\n| 1 | Test raporu | {KEMAL} | - | - | DWH projesi |" in md
+    # durum: konu konu; konusuz madde Genel'de; aksiyonlar tek duz tabloda
+    md = llm.not_markdown({"ozet": "Özet.", "sonraki_adim": "-"}, listeler, kaynak, sablon="durum",
+                          konu_fn=lambda m, t: konu.get(m))
+    assert md.split("## Aksiyonlar")[0].split("## Konular\n", 1)[1] == (
+        "\n### DWH projesi\nDurum: Yükleme bitti. Risk: Lisans gecikebilir. ⏱10:00:04\n"
+        "#### Kararlar\n- Canlı geçiş kasımda ⏱10:00:04\n"
+        "\n### CRM\nRisk: Veri taşıma belirsiz.\n#### Açık sorular\n- Veri taşıma ne zaman?\n"
+        "\n### Genel\n#### Kararlar\n- Toplantı sıklığı iki hafta\n\n")
+    assert "## Kararlar" not in md.replace("#### Kararlar", "") and md.count(llm.AKSIYON_BASLIGI) == 1
+    assert "## Konu durumları" not in md
+    # konu yok, madde yok: '## Konular' altinda '-'
+    bos = llm.not_markdown({"ozet": "Özet.", "sonraki_adim": "-"}, {"kararlar": [], "aksiyonlar": [],
+                                                                   "acik_sorular": []}, sablon="durum")
+    assert "## Konular\n-\n\n## Aksiyonlar\n-" in bos
+    assert llm.durum_satiri_ayir("Durum: Yükleme bitti (?). Risk: Lisans gecikebilir. ⏱10:00:04") == (
+        "Yükleme bitti (?)", "Lisans gecikebilir", "⏱10:00:04")
+    assert llm.durum_satiri_ayir("- Durum: x") is None
+
+
+def test_konu_bolumlerini_temizle_bos_bloklar_duser():
+    md = ("## Özet\nx\n\n## Konular\n\n### DWH projesi\nDurum: Yükleme bitti.\n#### Kararlar\n\n### CRM\n#### Kararlar\n"
+          "#### Açık sorular\n- Tarih ne?\n\n### Uydurma\n#### Kararlar\n-\n\n## Aksiyonlar\n-\n")
+    assert llm.konu_bolumlerini_temizle(md) == (
+        "## Özet\nx\n\n## Konular\n\n### DWH projesi\nDurum: Yükleme bitti.\n\n### CRM\n#### Açık sorular\n- Tarih ne?\n"
+        "\n## Aksiyonlar\n-\n")
+    assert llm.konu_bolumlerini_temizle("## Konular\n\n### A\n#### Kararlar\n\n## Aksiyonlar\n-\n") == \
+        "## Konular\n-\n\n## Aksiyonlar\n-\n"
+    genel = "## Kararlar\n- a\n\n## Aksiyonlar\n-\n"
+    assert llm.konu_bolumlerini_temizle(genel) == genel
+
+
+def test_madde_isaretle_ve_dayanak_konu_damgasini_siyirir():
+    assert motor_mod._madde_isaretle("- Rapor bitti [konu: DWH] ⏱10:00:01") == "- Rapor bitti (?) [konu: DWH] ⏱10:00:01"
+    assert motor_mod._madde_isaretle("- Rapor bitti [konu: DWH]") == "- Rapor bitti (?) [konu: DWH]"
+    assert motor_mod._madde_isaretle("- Rapor bitti ⏱10:00:01") == "- Rapor bitti (?) ⏱10:00:01"
+    assert motor_mod._madde_isaretle("- Rapor bitti (?) [konu: DWH]") == "- Rapor bitti (?) [konu: DWH]"
+    md = ("# T\n\n## Özet\nEkip konuştu.\n\n## Kararlar\n- Rapor ekranı tamamlandı [konu: Rapor ekranı] ⏱10:00:00\n"
+          "- Mobil uygulama mağazada yayına alındı [konu: Rapor ekranı]\n"
+          "- Test ortamı 750 sunucu ile kuruldu [konu: Test ortamı]\n\n## Aksiyonlar\n-\n\n## Açık sorular\n-\n")
+    yeni, atilan = motor_mod.dayanak_kontrolu(md, TRANSKRIPT)
+    assert "- Rapor ekranı tamamlandı [konu: Rapor ekranı] ⏱10:00:00" in yeni     # damga madde degeri sayilmaz
+    assert "Mobil uygulama" not in yeni and "Mobil uygulama mağazada yayına alındı" in atilan   # damgasiz govde atilir
+    assert "750 sunucu" not in yeni                                              # deger yalniz ⟨⟩ icinde
+    assert not [a for a in atilan if "konu:" in a]
+
+
+def test_dayanak_kontrolu_durum_satirini_parca_parca_denetler():
+    md = ("# T\n\n## Özet\nEkip konuştu.\n\n## Konular\n\n### Rapor ekranı\n"
+          "Durum: Rapor ekranı bu hafta tamamlandı. Risk: Mobil uygulama mağazadan kaldırıldı. ⏱10:00:00\n"
+          "#### Kararlar\n- Giriş sayfası bitti\n\n### Mobil\nDurum: Mobil uygulama mağazada yayına alındı.\n\n"
+          "### Test ortamı\nRisk: Test ortamı hâlâ hazır değil.\n\n## Aksiyonlar\n-\n\n## Bir sonraki adım\n-\n")
+    yeni, atilan = motor_mod.dayanak_kontrolu(md, TRANSKRIPT)
+    assert "Durum: Rapor ekranı bu hafta tamamlandı. ⏱10:00:00\n" in yeni         # dayanaksiz risk parcasi duser
+    assert "Mobil uygulama mağazadan kaldırıldı" in atilan
+    assert "### Mobil\n\n" in yeni and "yayına alındı" not in yeni               # satir tamamen duser
+    assert "Risk: Test ortamı hâlâ hazır değil." in yeni
+    son = llm.konu_bolumlerini_temizle(yeni)
+    assert "### Mobil" not in son and "### Rapor ekranı" in son and "- Giriş sayfası bitti" in son
+
+
+DURUM_SATIRLAR = [sat(1, "10:00:00", SELIN, "DWH projesinde veri yükleme işleri bitti, takvim yolunda."),
+                  sat(2, "10:00:10", KEMAL, "DWH tarafında lisans yenilemesi gecikebilir, bu bir risk."),
+                  sat(3, "10:00:20", AYSE, "Karar verdik, DWH canlı geçişi kasımda yapılacak."),
+                  sat(4, "10:00:30", KEMAL, "DWH test raporunu cuma ben hazırlarım.")]
+DURUM_HARITA = _bos_ozet(
+    konular=["DWH projesi", "Ekip motivasyonu"],
+    kararlar=[{"madde": "DWH canlı geçişi kasımda yapılacak", "konu": "DWH"}],
+    aksiyonlar=[{"madde": "DWH test raporunu cuma hazırlamak", "sorumlu": KEMAL, "tarih": "-", "konu": "DWH'nin"},
+                {"madde": "Takvimi yolunda tutmak", "sorumlu": SELIN, "tarih": "-", "konu": "Ekip motivasyonu"}],
+    konu_durumlari=[{"konu": "DWH projesi", "durum": "Veri yükleme işleri bitti, takvim yolunda",
+                     "risk": "Lisans yenilemesi gecikebilir"},
+                    {"konu": "Ekip motivasyonu", "durum": "Takvim yolunda", "risk": ""}])
+
+
+def test_motor_durum_notu_kanon_transkriptte_dayanakli_konu_fn(tmp_path, monkeypatch):
+    sahte = SablonLLM(bolum=DURUM_HARITA)
+    monkeypatch.setattr(llm, "sor", sahte)
+    m = _motor(tmp_path, "DWH durum değerlendirmesi", [DURUM_SATIRLAR])
+    md = m.notu_uret()
+    assert m.sablon == "durum" and sahte.gorev("bolum")[0]["sistem"] == llm.map_sistemi("durum")
+    assert m._konular == ["DWH projesi"]                     # 'Ekip motivasyonu' transkriptte yok: konu sayilmaz
+    assert re.findall(r"^### (.+)$", md, re.M) == ["DWH projesi"]
+    assert "Durum: Veri yükleme işleri bitti, takvim yolunda. Risk: Lisans yenilemesi gecikebilir." in md
+    assert "#### Kararlar\n- DWH canlı geçişi kasımda yapılacak" in md
+    tablo = {a["madde"]: a["konu"] for a in not_araclari.aksiyonlari_ayikla(md)}
+    assert tablo["DWH test raporunu cuma hazırlamak"] == "DWH projesi"
+    assert tablo.get("Takvimi yolunda tutmak", None) is None
+    assert m.konu_fn("DWH canlı geçişi kasımda yapılacak", "karar") == "DWH projesi"
+    assert m.konu_fn("Takvimi yolunda tutmak", "aksiyon") is None
+    # canli panel: konu kanonik adla, dayanaksiz konu yok
+    canli = m.canli_ozet(m.parca_oku(1)["ozet"], DURUM_SATIRLAR)
+    assert canli["konu_etiketleri"] == [{"tur": "karar", "madde": "DWH canlı geçişi kasımda yapılacak",
+                                         "konu": "DWH projesi"}]
+    assert [a.get("konu") for a in canli["aksiyonlar"]] == ["DWH projesi", None]
+    assert [x["konu"] for x in canli["konu_durumlari"]] == ["DWH projesi"]
+    assert llm.canli_konu_eki(canli, "DWH canlı geçişi kasımda yapılacak", "karar") == " [DWH projesi]"
+    assert llm.canli_konu_eki(canli, canli["aksiyonlar"][1]["madde"], "aksiyon") == ""
+    m.kapat()
+
+
+def test_motor_genel_notta_konu_damgasi_ve_onceki_baglama_kanon(tmp_path, monkeypatch):
+    harita = _bos_ozet(konular=["DWH projesi"], kararlar=[{"madde": "DWH canlı geçişi kasımda yapılacak",
+                                                           "konu": "DWH"}])
+    gorulen = []
+
+    def bolum_ozetle(blok, sira, baglam, onceki=None, **k):
+        gorulen.append(onceki)
+        return llm.normalize_ozet(harita)
+    monkeypatch.setattr(llm, "bolum_ozetle", bolum_ozetle)
+    monkeypatch.setattr(llm, "sor", SablonLLM(bolum=harita))
+    m = _motor(tmp_path, "Ürün ekibi toplantısı", [DURUM_SATIRLAR[:2], DURUM_SATIRLAR[2:]])
+    md = m.notu_uret()
+    assert m.sablon == "genel"
+    assert re.search(r"^- DWH canlı geçişi kasımda yapılacak \[konu: DWH projesi\] ⏱10:00:20$", md, re.M)
+    assert gorulen[1]["konular"] == ["DWH projesi"]                      # sonraki parcaya kanonik konu adi
+    m.kapat()
+
+
+def test_sablon_degistir_yakalama_surerken_nedeni_ve_logu(tmp_path):
+    loglar = []
+    m = motor_mod.Motor(str(tmp_path / "t"), "Ürün ekibi toplantısı", TARIH, katilimcilar=KISILER, duzelt=False,
+                        olay=lambda t, v: loglar.append(v) if t == "log" else None)
+    m.parca_no = 2
+    assert m.sablon_degistir("durum", neden="Başlat'ta elle seçildi") is True
+    meta = json.load(open(os.path.join(m.klasor, "meta.json"), encoding="utf-8"))
+    assert meta["sablon"] == "durum" and meta["sablon_neden"] == "Başlat'ta elle seçildi"
+    assert any("Genel → Durum değerlendirme; sonraki parçalar yeni şablonla özetlenir, önceki 2 parça" in x for x in loglar)
+    assert m.sablon_degistir("haftalik") is True and m.sablon_neden == "elle seçildi"
+    m.kapat()
+
+
+def test_seri_son_sablon_yalniz_elle_secildiyse(tmp_path, monkeypatch):
+    kok = tmp_path / "toplantilar"
+    monkeypatch.setattr(motor_mod, "KOK", str(kok))
+
+    def kayit(ad, baslik, tarih, sablon, neden):
+        k = kok / ad
+        k.mkdir(parents=True)
+        (k / "meta.json").write_text(json.dumps({"baslik": baslik, "tarih": tarih, "sablon": sablon,
+                                                 "sablon_neden": neden}), encoding="utf-8")
+    assert motor_mod.Motor.seri_son_sablon("DWH durum") is None                   # kok yok
+    kayit("2026-10-01_dwh", "DWH Durum", "2026-10-01", "durum", "Başlat'ta elle seçildi")
+    kayit("2026-10-02_crm", "CRM durum", "2026-10-02", "karar", "elle seçildi")
+    assert motor_mod.Motor.seri_son_sablon("DWH durum") == ("durum", "seri: 2026-10-01 toplantısında elle seçildi")
+    kayit("2026-10-08_dwh", "DWH durum", "2026-10-08", "haftalik", "otomatik: davet konusunda 'durum' geçiyor")
+    assert motor_mod.Motor.seri_son_sablon("DWH durum") is None                   # son toplanti otomatik secildi
+    kayit("2026-10-12_dwh", "DWH  durum", "2026-10-12", "karar", "elle seçildi")
+    assert motor_mod.Motor.seri_son_sablon("DWH durum") == ("karar", "seri: 2026-10-12 toplantısında elle seçildi")
+    assert motor_mod.Motor.seri_son_sablon("DWH durum", haric=str(kok / "2026-10-12_dwh")) is None
+    assert motor_mod.Motor.seri_son_sablon("") is None
+    # zincir: seri hafizasiyla secilen toplanti, elle secimin yapildigi ilk toplantinin tarihini tasir
+    kayit("2026-10-19_dwh", "DWH durum", "2026-10-19", "karar", "seri: 2026-10-12 toplantısında elle seçildi")
+    assert motor_mod.Motor.seri_son_sablon("DWH durum") == ("karar", "seri: 2026-10-12 toplantısında elle seçildi")
+
+
+def test_konu_adindaki_koseli_parantez_damgayi_bozmaz():
+    from metin import KONU_DAMGASI
+    assert llm.konu_temizle("DWH [faz 2]") == "DWH faz 2"
+    satir = "- Canlı geçiş" + llm.konu_damgasi("DWH [faz 2]") + " ⏱10:00:04"
+    m = KONU_DAMGASI.search(satir)
+    assert m and m.group(1) == "DWH faz 2"
+    assert KONU_DAMGASI.sub("", satir) == "- Canlı geçiş ⏱10:00:04"

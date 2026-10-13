@@ -15,13 +15,14 @@ import re
 
 import motor as motor_mod
 from kelime import normalize
-from metin import gorunen_ad, kesin_ad_mi
+from metin import KONU_DAMGASI, gorunen_ad, kesin_ad_mi
 
 BILGILENDIRME = ("Bilgi: Bu toplantıda BriefMind ile not alınmaktadır. Ses kaydedilmez; konuşmalar kurum içi "
                  "sistemlerde metne çevrilip özetlenir ve not katılımcılarla paylaşılır. Not alınmasını "
                  "istemeyen katılımcı lütfen belirtsin.")
 SATIR_TAVAN_SN = 15             # konusma payi: bir satirin sayilabilecegi en uzun sure (araya giren sessizlik)
 JIRA_BASLIKLAR = ["Summary", "Assignee", "Due Date", "Description", "Issue Type"]
+JIRA_ETIKET = "Labels"          # konu etiketi: yalniz en az bir aksiyonun konusu varsa son sutun olarak eklenir
 
 
 BIREBIR_TASLAK_KAPALI = ("Birebir görüşmede kişiye özel e-posta ve Jira taslağı varsayılan olarak kapalı (konuşulanlar "
@@ -40,11 +41,23 @@ def sablon_canli_satirlari(ozet):
     """Canli panel: dogrulanmis parca ozetindeki sablon maddeleri -> [(etiket, metin)] ('Fikir', 'Engel' ...)."""
     import llm
     etiket = {"ilerleme": "İlerleme", "engeller": "Engel", "gelecek_donem": "Gelecek dönem", "secenekler": "Seçenek",
-              "geri_bildirimler": "Geri bildirim", "anlasilanlar": "Anlaşılan", "fikirler": "Fikir"}
+              "geri_bildirimler": "Geri bildirim", "anlasilanlar": "Anlaşılan", "fikirler": "Fikir",
+              "konu_durumlari": "Konu durumu"}
+    alan_turu = dict(llm.ALAN_TURU)
+    alan_turu.setdefault("konu_durumlari", "konu_durum")      # durum sablonu (llm.SABLON_ALANLARI["durum"])
     satirlar = []
-    for alan, tur in llm.ALAN_TURU.items():
+    for alan, tur in alan_turu.items():
         for x in (ozet or {}).get(alan) or []:
-            if tur == "secenek":
+            if tur == "konu_durum":
+                if not isinstance(x, dict):
+                    metin = str(x)
+                else:
+                    metin = (x.get("konu") or "Genel").strip()
+                    if (x.get("durum") or "").strip():
+                        metin += f": {x['durum'].strip()}"
+                    if (x.get("risk") or "").strip():
+                        metin += f" (risk: {x['risk'].strip()})"
+            elif tur == "secenek":
                 metin = x.get("secenek", "") + {True: " — seçildi", "belirsiz": " — seçildi (?)"}.get(x.get("secildi"), "")
             elif tur == "fikir":
                 metin = f"{x.get('fikir', '')} ({x.get('tema') or 'Diğer'})"
@@ -121,7 +134,7 @@ def ara(sorgu, kok=None, en_fazla=200):
                     if all(w in _katla(satir) for w in kelimeler):
                         ts = re.search(r"⏱(\d{1,2}:\d{2}:\d{2})", satir)
                         sonuc.append({**ortak, "tur": "not", "ts": ts.group(1) if ts else "", "kim": "",
-                                      "metin": satir.strip().strip("|-# ")})
+                                      "metin": KONU_DAMGASI.sub("", satir).strip().strip("|-# ")})
         for s in transkript_satirlari(k):
             if all(w in _katla(s.get("text", "")) for w in kelimeler):
                 sonuc.append({**ortak, "tur": "transkript", "ts": s.get("ts", ""), "kim": gorunen_ad(s),
@@ -146,22 +159,58 @@ def sahip_coz(sorumlu, madde=""):
     return {"ad": ", ".join(adlar), "durum": "belirsiz" if isaretli else "kesin"}
 
 
+_AKSIYON_SUTUNLARI = {"madde": "madde", "sorumlu": "sorumlu", "tarih": "tarih", "kaynak": "kaynak", "konu": "konu"}
+_AKSIYON_KONUM = {"madde": 1, "sorumlu": 2, "tarih": 3, "kaynak": 4, "konu": 5}     # baslik satiri yoksa
+
+
+def _aksiyon_sutunlari(h):
+    """Aksiyon tablosunun baslik satiri -> {'madde': indeks, ...} (bilinen sutun adlari; sirasi serbest)."""
+    harita = {}
+    for i, x in enumerate(h):
+        ad = _AKSIYON_SUTUNLARI.get(_katla(x).strip())
+        if ad and ad not in harita:
+            harita[ad] = i
+    return harita if "madde" in harita else None
+
+
+def _konu_temizle(konu):
+    k = KONU_DAMGASI.sub("", konu or "").strip()
+    return None if k in ("", "-", "?") else k
+
+
 def aksiyonlari_ayikla(not_md):
-    """Nottaki '## Aksiyonlar' tablosu -> [{madde, sorumlu, tarih, kaynak, sahip}] (duzenlenmis notta da calisir).
-    sahip: sahip_coz(sorumlu, madde) -> {'ad', 'durum'}."""
-    aksiyonlar, bolum = [], ""
+    """Nottaki '## Aksiyonlar' tablosu -> [{madde, sorumlu, tarih, kaynak, konu, sahip}] (duzenlenmis notta da calisir).
+    Sutunlar baslik satirindan ADLA bulunur (eski 5 sutunlu ve yeni 6 sutunlu tablo; baslik yoksa eski konumlar).
+    konu: Konu hucresi ('-' / bos -> None). sahip: sahip_coz(sorumlu, madde) -> {'ad', 'durum'}."""
+    aksiyonlar, bolum, sutun = [], "", None
     for satir in not_md.splitlines():
         s = satir.strip()
         if s.startswith("#"):
-            bolum = s.lower()
+            bolum, sutun = s.lower(), None
             continue
         if "aksiyon" not in bolum or not s.startswith("|"):
             continue
         h = [x.strip() for x in s.strip("|").split("|")]
+        adlar = _aksiyon_sutunlari(h)
+        if (h and h[0] == "#") or (adlar and len(adlar) >= 3):     # baslik satiri: sutun adi -> indeks
+            sutun = adlar or sutun
+            continue
         if len(h) < 4 or h[0] in ("#", "") or set(h[0]) <= set("-: "):
             continue
-        aksiyonlar.append({"madde": h[1], "sorumlu": h[2], "tarih": h[3], "kaynak": h[4] if len(h) > 4 else "",
-                           "sahip": sahip_coz(h[2], h[1])})
+        yer = sutun or _AKSIYON_KONUM
+
+        def hucre(ad):
+            i = yer.get(ad)
+            return h[i] if i is not None and i < len(h) else ""
+        madde = hucre("madde")
+        damga = KONU_DAMGASI.search(madde)                      # maddenin icinde kalmis '[konu: X]' damgasi
+        konu = _konu_temizle(hucre("konu"))
+        if damga:
+            madde = KONU_DAMGASI.sub("", madde).strip()
+            konu = konu or _konu_temizle(damga.group(1))
+        sorumlu = hucre("sorumlu")
+        aksiyonlar.append({"madde": madde, "sorumlu": sorumlu, "tarih": hucre("tarih"), "kaynak": hucre("kaynak"),
+                           "konu": konu, "sahip": sahip_coz(sorumlu, madde)})
     return aksiyonlar
 
 
@@ -230,7 +279,8 @@ def kisiye_gore_yenile(not_md):
             sorumlu = sahip["ad"]
         else:
             sorumlu = f"{sahip['ad']} (?)" if sahip["ad"] else "belirsiz"
-        girdi.append({"madde": a["madde"], "sorumlu": sorumlu})
+        madde = a["madde"] + (f" [konu: {a['konu']}]" if a.get("konu") else "")      # kisi listesinde de konu gorunur
+        girdi.append({"madde": madde, "sorumlu": sorumlu})
     satirlar = _bolum_sil(not_md.split("\n"), llm.KISIYE_BASLIK)
     yeni = llm.kisiye_gore_satirlari(girdi)
     if yeni:
@@ -260,16 +310,22 @@ def kisiye_ozel_epostalar(not_md, baslik, tarih):
         ozet = m.group(1).strip()
     kesin = [dict(a, sorumlu=a["sahip"]["ad"]) for a in aks if a["sahip"]["durum"] == "kesin"]
     tarihler = {a["madde"]: a["tarih"] for a in aks}
+    konular = {a["madde"]: a.get("konu") for a in aks}
     epostalar = []
     for ad, isler in llm.kisi_bazli(kesin):
         if ad in ("belirsiz", "-", "?"):
             continue
         govde = [f"Merhaba {ad.split()[0]},", "", f"{tarih} tarihli \"{baslik}\" toplantısında sana düşen işler:", ""]
         govde += [f"- {x}" + (f" (tarih: {tarihler[x]})" if tarihler.get(x) not in (None, "", "-") else "")
-                  for x in isler]
+                  + (f" (konu: {konular[x]})" if konular.get(x) else "") for x in isler]
         govde += ["", "Toplantı özeti:", ozet or "-", "", "Tam not ekte ya da ortak klasörde."]
         epostalar.append((ad, f"Toplantı aksiyonların: {baslik} ({tarih})", "\n".join(govde)))
     return epostalar
+
+
+def _damga_goster(metin):
+    """Satirdaki '[konu: X]' damgasi Word'de okunur '(Konu: X)' olur (koseli damga disari sizmaz)."""
+    return KONU_DAMGASI.sub(lambda m: f" (Konu: {m.group(1).strip()})", metin)
 
 
 def word_kaydet(not_md, yol):
@@ -294,12 +350,16 @@ def word_kaydet(not_md, yol):
         tablo = None
         if s.startswith("# "):
             belge.add_heading(s[2:], level=0)
+        elif s.startswith("#### "):
+            belge.add_heading(s[5:], level=4)                   # durum sablonu: '#### Kararlar' / '#### Açık sorular'
+        elif s.startswith("### "):
+            belge.add_heading(s[4:], level=3)                   # durum sablonu: '### <Konu>'
         elif s.startswith("## "):
             belge.add_heading(s[3:], level=1)
         elif s.startswith(("- ", "* ")):
-            belge.add_paragraph(s[2:], style="List Bullet")
+            belge.add_paragraph(_damga_goster(s[2:]), style="List Bullet")
         elif s:
-            belge.add_paragraph(s)
+            belge.add_paragraph(_damga_goster(s))
     belge.save(yol)
     return yol
 
@@ -353,19 +413,27 @@ def konusma_payi_metni(paylar, belirsiz=0):
     return "Konuşma payı: " + ", ".join(parcalar)
 
 
+def konu_etiketi(konu):
+    """Konu -> Jira etiketi (Labels): kelime-guvenli ASCII, bosluk '-' ('Veri Ambarı' -> 'veri-ambari'). Bos konu ''."""
+    m = _katla(KONU_DAMGASI.sub("", konu or ""))
+    return re.sub(r"[^a-z0-9]+", "-", m).strip("-")
+
+
 def jira_csv(aksiyonlar, yol, proje=""):
     """N9: aksiyonlari Jira 'Import from CSV' (Planner'a da aktarilabilen) CSV'ye yazar: UTF-8 BOM'lu (Excel
     Turkce karakterleri bozmasin), basliklar Summary, Assignee, Due Date, Description, Issue Type.
     proje: toplantinin adi ve tarihi ('Strateji (2026-09-23)'), Description'a yazilir. Tarih yalnizca
     YYYY-MM-DD ise ve '(?)' tasimiyorsa Due Date'e girer (belirsiz tarih Description'a yazilir). Assignee YALNIZ sahip durumu kesin ise dolar ('Ad (?)' ve 'belirsiz' bos
     kalir, Description'a 'sahibi belirsiz' yazilir); birden cok sorumlu varsa ilki Assignee, hepsi Description'da.
+    Konu: en az bir aksiyonun konusu varsa son sutun 'Labels' (konu_etiketi; konusuz satirda bos) eklenir.
     Dondurur: yazilan satir sayisi. (REST entegrasyonu yok.)"""
     satir_sayisi = 0
+    etiketli = any(konu_etiketi(a.get("konu")) for a in aksiyonlar)
     with open(yol, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(JIRA_BASLIKLAR)
+        w.writerow(JIRA_BASLIKLAR + ([JIRA_ETIKET] if etiketli else []))
         for a in aksiyonlar:
-            madde = (a.get("madde") or "").strip()
+            madde = KONU_DAMGASI.sub("", a.get("madde") or "").strip()
             if not madde or madde == "-":
                 continue
             sahip = _sahip(a)
@@ -387,6 +455,9 @@ def jira_csv(aksiyonlar, yol, proje=""):
             elif len(adlar) > 1:
                 aciklama += " · sorumlular: " + ", ".join(adlar)
             atanan = adlar[0] if adlar and sahip["durum"] == "kesin" else ""
-            w.writerow([madde, atanan, tarih.group(0) if tarih else "", aciklama, "Task"])
+            satir = [madde, atanan, tarih.group(0) if tarih else "", aciklama, "Task"]
+            if etiketli:
+                satir.append(konu_etiketi(a.get("konu")))
+            w.writerow(satir)
             satir_sayisi += 1
     return satir_sayisi

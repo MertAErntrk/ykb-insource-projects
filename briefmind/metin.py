@@ -4,6 +4,8 @@ metin.py — metin karsilastirma yardimcilari (llm.py ve motor.py ortak kullanir
 import difflib
 import re
 
+KONU_DAMGASI = re.compile(r"\s*\[konu:\s*([^\]]+)\]")   # nottaki '[konu: X]' damgasi (tek regex)
+
 
 def _kelimeler(metin):
     m = (metin or "").replace("İ", "i").replace("I", "ı").lower()

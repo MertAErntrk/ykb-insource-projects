@@ -111,6 +111,10 @@ class Pencere(QtWidgets.QMainWindow):
         self.kesinti_isi = None              # onceki oturumun STT kesinti kuyrugu (KesintiDevamIsi)
         self._arka_isler = []                # taslak/kullanici adi gibi kisa ArkaIs'ler (referans tutulur)
         self._adaylar = []
+        self._tur_elle = None                # Tür kutusunda ELLE secilen (slug(baslik), sablon); ayni baslikta otomatik ezmez
+        self._tur_kaynak = "otomatik"        # kutudaki degerin kaynagi: "otomatik" | "seri" (seri hafizasi) | "elle"
+        self._tur_neden = ""                 # kutudaki degerin nedeni (tooltip)
+        self._tur_bekleyen = None            # yakalama sirasinda motor henuz yokken secilen: motor baglaninca uygulanir
         self._not_kilit = False              # not uretilirken Baslat kapali (yeni toplanti eski nota baglanmasin); TamamlamaIsi.finished'te acilir
         self._not_sonuc_geldi = False        # TamamlamaIsi bitti/hata sinyali verdi mi (finished'te sessiz olum ayrimi)
         self._yeniden_kilit = False          # Gecmis -> Yeniden ozetle suruyor (YenidenOzetlemeIsi.finished'te acilir)
@@ -253,6 +257,18 @@ class Pencere(QtWidgets.QMainWindow):
         sol.addLayout(ust)
         sol.addWidget(self.alt_bilgi)
         h.addLayout(sol, 1)
+        # toplanti turu (not sablonu): Baslat'tan ONCE davetten otomatik dolar, toplanti sirasinda da degistirilebilir
+        tur = QtWidgets.QVBoxLayout()
+        tur.addWidget(QtWidgets.QLabel("Tür", objectName="alt_bilgi"))
+        self.tur_secici = QtWidgets.QComboBox(objectName="tur_secici")
+        self.tur_secici.addItem("Otomatik", llm.SABLON_OTOMATIK)
+        for anahtar, (etiket, _) in llm.SABLONLAR.items():
+            self.tur_secici.addItem(etiket, anahtar)
+        self.tur_secici.setMinimumWidth(170)
+        self.tur_secici.activated.connect(self._tur_secildi)             # yalniz kullanici secimi (programatik degil)
+        tur.addWidget(self.tur_secici)
+        h.addLayout(tur)
+        h.addSpacing(16)
         self.sayac = QtWidgets.QLabel("00:00", objectName="sayac")
         h.addWidget(self.sayac)
         h.addSpacing(16)
@@ -450,13 +466,134 @@ class Pencere(QtWidgets.QMainWindow):
             self.k_sablon.setToolTip(neden)
             self.not_sablon.setCurrentIndex(max(0, self.not_sablon.findData(sablon)))
             self.not_sablon.setToolTip(f"{neden}. İstersen değiştir: not yeni şablonla yeniden üretilir.")
+            if self._tur_yakalamada():              # canli toplanti: Tür kutusu motorun gercek sablonunu gosterir
+                self._tur_uygula(sablon, neden, "elle" if neden.endswith("elle seçildi") else "otomatik")
         else:
-            self.k_sablon.deger.setText("—")
+            self._tur_karti()                       # motor yok: kart Tür kutusundaki (Baslat'a hazir) oneriyi gosterir
         self._sablon_secici_uygula()
         izin, aciklama = not_araclari.taslak_izni(sablon, self.ayar)
         for b, ipucu in ((self.b_kisi, self.KISI_IPUCU), (self.b_jira, self.JIRA_IPUCU)):
             b.setEnabled(izin)
             b.setToolTip(ipucu if izin else aciklama)
+
+    # ---------------------------------------------------------------- Tür kutusu (Baslat'tan once toplanti turu)
+    def _tur_yakalamada(self):
+        """Toplanti yakalaniyor ve motor bagli: Tür kutusu motorun sablonunu yansitir, secim motor.sablon_degistir'e gider."""
+        return bool(self.motor is not None and getattr(self.motor, "sablon", None)
+                    and (self._yakalama_acik or self._yakalama_suruyor()))
+
+    def _tur_anahtar(self, baslik):
+        """Elle secimin bagli oldugu baslik anahtari; baslik henuz yoksa None (bekleyen elle secim: ilk cozulen basliga
+        uygulanir). slug('') 'toplanti' oldugu icin bos baslik ayrica tutulur."""
+        baslik = (baslik or "").strip()
+        return motor_mod.slug(baslik) if baslik else None
+
+    def _tur_oner_ayrintili(self, baslik, ctx):
+        """(sablon, neden, kaynak): seri hafizasi > ayarda sabit sablon > davetten tespit; ipucu yoksa Otomatik (emin
+        olunamayan sey kesin gosterilmez)."""
+        ctx = ctx or {}
+        seri = getattr(Motor, "seri_son_sablon", None)           # Motor.seri_son_sablon (baslik) -> (sablon, neden) | None
+        if callable(seri) and baslik:
+            try:
+                bulunan = seri(baslik)
+            except Exception as e:
+                self.log(f"! seri şablon hafızası okunamadı: {e!r}")
+                bulunan = None
+            if bulunan and bulunan[0] in llm.SABLONLAR:
+                return bulunan[0], bulunan[1] or "aynı seride son toplantıda elle seçilmişti", "seri"
+        govde = " ".join(x for x in (ctx.get("gundem"), (ctx.get("davet") or {}).get("govde")) if x)    # Motor ile ayni
+        sablon, neden = llm.sablon_sec(self.ayar.get("not_sablonu", llm.SABLON_OTOMATIK), baslik, govde)
+        if sablon == "genel" and neden.startswith("otomatik"):
+            return llm.SABLON_OTOMATIK, neden + "; Başlat'ta ya da toplantı sırasında seçebilirsin", "otomatik"
+        return sablon, neden, "otomatik"
+
+    def _tur_oner(self, baslik, ctx):
+        """Baslik + davetten onerilen toplanti turu -> (sablon, neden); sablon 'otomatik' olabilir."""
+        return self._tur_oner_ayrintili(baslik, ctx)[:2]
+
+    def _tur_uygula(self, sablon, neden, kaynak="otomatik"):
+        """Kutuyu programatik ayarlar (sinyal yok); tooltip = neden; yakalama disinda Canli kart da ayni."""
+        i = self.tur_secici.findData(sablon)
+        self.tur_secici.setCurrentIndex(max(0, i))
+        self.tur_secici.setToolTip(neden)
+        self._tur_neden, self._tur_kaynak = neden, kaynak
+        if not self._tur_yakalamada():          # yakalamada kartı _sablon_goster (motorun sablonu) yazar
+            self._tur_karti()
+
+    def _tur_karti(self):
+        sablon = self.tur_secici.currentData()
+        self.k_sablon.deger.setText(self.tur_secici.currentText() if sablon else "—")
+        self.k_sablon.setToolTip(self._tur_neden)
+
+    def _tur_yenile(self, baslik, ctx):
+        """Secili / yazili basliga gore kutuyu doldurur; AYNI baslik icin elle secilen ezilmez."""
+        baslik = (baslik or "").strip()
+        anahtar = self._tur_anahtar(baslik)
+        if self._tur_elle and self._tur_elle[0] is None and anahtar is not None:
+            # baslik yokken secilen tur: ilk cozulen basliga (takvim secimi / Baslat'ta Teams-takvim) baglanir, ezilmez
+            # (elle 'Otomatik' = davetten secilsin: bekleyen secim duser, oneri gosterilir)
+            if self._tur_elle[1] == llm.SABLON_OTOMATIK:
+                self._tur_elle = None
+            else:
+                self._tur_elle = (anahtar, self._tur_elle[1])
+                self.log(f"Tür: başlık yokken seçilen '{llm.sablon_etiketi(self._tur_elle[1])}' '{baslik}' "
+                         "toplantısına uygulandı")
+        if self._tur_elle and self._tur_elle[0] == anahtar:
+            sablon = self._tur_elle[1]
+            neden = ("Başlat'ta davetten otomatik seçilir" if sablon == llm.SABLON_OTOMATIK
+                     else "Başlat'ta elle seçildi")
+            self._tur_uygula(sablon, neden, "elle")
+            return
+        sablon, neden, kaynak = self._tur_oner_ayrintili(baslik, ctx)
+        self._tur_uygula(sablon, neden, kaynak)
+
+    def _tur_secici_uygula(self, durum=None):
+        """Kutu yalniz not uretilirken (ya da yeniden ozetleme Baslat'i da kapatiyorken) kapali; yakalamada ACIK."""
+        d = durum or self._durum()
+        acik = not self._kapaniyor and d != "not_uretiliyor" and not (d == "yeniden_ozetleniyor"
+                                                                      and not self._izinler(d)["baslat"])
+        if self.tur_secici.isEnabled() != acik:
+            self.tur_secici.setEnabled(acik)
+
+    def _tur_secildi(self, i):
+        """Kullanici turu elle degistirdi. Yakalama oncesi: bu baslik icin hatirlanir, Baslat'ta motora gider. Yakalama
+        sirasinda: motor.sablon_degistir (sonraki parcalar yeni sablonla; onceki parcalar not uretilirken yeniden ozetlenir;
+        not burada URETILMEZ)."""
+        sablon = self.tur_secici.itemData(i)
+        baslik = self.baslik.text().strip()
+        if self._yakalama_acik or self._yakalama_suruyor():
+            if sablon == llm.SABLON_OTOMATIK:        # toplanti baslamis: 'otomatik' anlamsiz, gercek sablona don
+                self.log("Tür: toplantı sürerken Otomatik seçilemez; bir tür seç")
+                self._sablon_goster()
+                return
+            self._tur_elle = (self._tur_anahtar(baslik), sablon)
+            if self.motor is None or not getattr(self.motor, "sablon", None):
+                self._tur_bekleyen = sablon          # motor henuz kurulmadi: baglaninca uygulanir
+                self._tur_uygula(sablon, "Başlat'ta elle seçildi", "elle")
+                return
+            if not self.motor.sablon_degistir(sablon):
+                self._sablon_goster()
+                return
+            self.log(f"Not şablonu: {llm.sablon_etiketi(sablon)} (toplantı sırasında elle seçildi)")
+            self._sablon_goster()
+            return
+        self._tur_elle = (self._tur_anahtar(baslik), sablon)
+        if sablon == llm.SABLON_OTOMATIK:
+            self._tur_uygula(sablon, "Başlat'ta davetten otomatik seçilir", "elle")
+        else:
+            self._tur_uygula(sablon, "Başlat'ta elle seçildi", "elle")
+
+    def _tur_yakalama_kwargs(self):
+        """YakalamaIsi'ne giden sablon kwargs'i (paylasilan ayar'a yazilmaz). Yalniz elle secilmis ya da seri hafizasindan
+        gelen kesin tur gider; digerinde bos (bugunku yol: Motor ayardan / davetten secer)."""
+        sablon = self.tur_secici.currentData()
+        if sablon not in llm.SABLONLAR:
+            return {}
+        if self._tur_kaynak == "elle":
+            return {"sablon": sablon, "sablon_neden": "Başlat'ta elle seçildi"}
+        if self._tur_kaynak == "seri":
+            return {"sablon": sablon, "sablon_neden": self._tur_neden}      # kutudaki ile motorun kullandigi ayni olsun
+        return {}
 
     def _sablon_secilebilir(self, durum=None):
         """Not sayfasi secicisi yalniz 'bos' durumda (calisan yakalama / not uretimi / yeniden ozetleme ortasinda sablon
@@ -745,6 +882,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.b_g_bos.setEnabled(silinebilir)
         self.b_not_uret.setEnabled(iz["uygula"] and self._not_uret_aday and self.motor is not None)
         self._sablon_secici_uygula(d)
+        self._tur_secici_uygula(d)
         self.b_sor.setEnabled(iz["sor"])
         self.soru.setEnabled(iz["sor"])
         self.b_kaydet.setEnabled(iz["kaydet"])
@@ -917,6 +1055,8 @@ class Pencere(QtWidgets.QMainWindow):
         self.toplanti_secici.setEditText(a["baslik"])
         self.alt_bilgi.setText(f"{a['baslangic']:%H:%M}–{a['bitis']:%H:%M} · "
                                + ", ".join(a["katilimcilar"][:6]) + (" …" if len(a["katilimcilar"]) > 6 else ""))
+        if not (self._yakalama_acik or self._yakalama_suruyor() or self._baslat_bekliyor):
+            self._tur_yenile(a["baslik"], a)         # tur davetten (ya da seri hafizasindan) dolar; elle secilen ezilmez
 
     def _toplanti_bilgisi(self, sonuc):
         """O an KATILINAN toplantiyi belirler: Teams penceresindeki ad + takvimden eslesen kayit (sonuc: takvim_sorgula
@@ -1039,6 +1179,8 @@ class Pencere(QtWidgets.QMainWindow):
                                    + (" …" if len(ctx["katilimcilar"]) > 6 else ""))
         else:
             self.alt_bilgi.setText("Takvim bilgisi yok; katılımcılar altyazıdan öğrenilecek.")
+        self._tur_yenile(baslik, ctx)        # tur Baslat'ta kesinlesir (elle secilen ezilmez)
+        self._tur_bekleyen = None
         self.akis.clear()
         self._akis_satirlari = []
         self.stt_serit.hide()
@@ -1072,7 +1214,7 @@ class Pencere(QtWidgets.QMainWindow):
         self.motor = None                # onceki toplantinin motoru yeni yakalamaya karismasin
         self._sablon_goster()            # sablon motor baglaninca (davetten) gelir
         isi = YakalamaIsi(baslik, ctx, self.terimler, self.a_duzelt.isChecked(),
-                          self.a_otobitir.value(), self.ayar)
+                          self.a_otobitir.value(), self.ayar, **self._tur_yakalama_kwargs())
         self.is_ = isi
         self._yakalama_acik = True
         self._bitiriliyor = False
@@ -1090,6 +1232,9 @@ class Pencere(QtWidgets.QMainWindow):
     def _motoru_bagla(self, isi):
         if isi is self.is_ and getattr(isi, "motor", None) is not None:
             self.motor = isi.motor
+            bekleyen, self._tur_bekleyen = self._tur_bekleyen, None
+            if bekleyen and bekleyen in llm.SABLONLAR and self.motor.sablon_degistir(bekleyen):
+                self.log(f"Not şablonu: {llm.sablon_etiketi(bekleyen)} (toplantı sırasında elle seçildi)")
             self._sablon_goster()
 
     def bitir(self):
@@ -1235,10 +1380,13 @@ class Pencere(QtWidgets.QMainWindow):
                 self.log(f"✔ parça {v['sira']}: {len(o['kararlar'])} karar, {len(o['aksiyonlar'])} aksiyon, {v['duzeltme']} düzeltme")
                 if o.get("ozet"):
                     self.canli_not.addItem(f"Bölüm {v['sira']}: {o['ozet']}")
-                for k in o["kararlar"]:
-                    self.canli_not.addItem(f"Karar: {k}")
+                for k in o["kararlar"]:              # konu eki: dogrulanmis ozetin kanonik konusu (yoksa ek yok)
+                    self.canli_not.addItem(f"Karar: {k}{llm.canli_konu_eki(o, k, 'karar')}")
                 for a in o["aksiyonlar"]:
-                    self.canli_not.addItem(f"Aksiyon: {a['madde']}  — {a['sorumlu']}, {a['tarih']}")
+                    self.canli_not.addItem(f"Aksiyon: {a['madde']}{llm.canli_konu_eki(o, a['madde'], 'aksiyon')}"
+                                           f"  — {a['sorumlu']}, {a['tarih']}")
+                for q in o.get("acik_sorular") or []:
+                    self.canli_not.addItem(f"Soru: {q}{llm.canli_konu_eki(o, q, 'soru')}")
                 for etiket, metin in not_araclari.sablon_canli_satirlari(o):
                     self.canli_not.addItem(f"{etiket}: {metin}")
                 self.canli_not.scrollToBottom()
@@ -1560,20 +1708,24 @@ class Pencere(QtWidgets.QMainWindow):
         md = [f"# Parça {no} — {p_['baslangic']}–{p_['bitis']} (~{p_['token']} token, kapanış: {p_['neden']})"]
         o = p_.get("ozet")
         if o:
+            o = llm._konulu_bolum(o)                 # eski / ham parca: {madde, konu} ogeleri duz metne + konu_etiketleri
+            konu = llm.konu_bulucu(o)
             if o.get("ozet"):
                 md.append("## Özet")
                 md.append(o["ozet"])
             md.append("## Konular")
             md += [f"- {x}" for x in o.get("konular", [])] or ["- —"]
             md.append("## Kararlar")
-            md += [f"- {x}" for x in o.get("kararlar", [])] or ["- —"]
+            md += [f"- {x}{llm.konu_damgasi(konu(x, 'karar'))}" for x in o.get("kararlar", [])] or ["- —"]
             md.append("## Aksiyonlar")
-            md.append("| # | Madde | Sorumlu | Tarih |")
-            md.append("|---|---|---|---|")
-            md += [f"| {i + 1} | {a['madde']} | {a['sorumlu']} | {a['tarih']} |" for i, a in enumerate(o.get("aksiyonlar", []))]
+            md.append(llm.AKSIYON_BASLIGI)           # notla ayni baslik (Konu son sutun; parcada kaynak zamani yok)
+            md.append("|---|---|---|---|---|---|")
+            md += [f"| {i + 1} | {a['madde']} | {a['sorumlu']} | {a['tarih']} | - | "
+                   f"{llm.konu_temizle(konu(a['madde'], 'aksiyon')) or '-'} |"
+                   for i, a in enumerate(o.get("aksiyonlar", []))]
             if o.get("acik_sorular"):
                 md.append("## Açık sorular")
-                md += [f"- {x}" for x in o["acik_sorular"]]
+                md += [f"- {x}{llm.konu_damgasi(konu(x, 'soru'))}" for x in o["acik_sorular"]]
             if o.get("belirsiz_terimler"):
                 md.append("## Belirsiz terimler")
                 md += [f"- {x}" for x in o["belirsiz_terimler"]]

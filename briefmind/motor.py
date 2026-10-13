@@ -51,7 +51,7 @@ import terim as terim_mod
 import uzun as uzun_mod
 from kelime import normalize
 from konusmaci import Konusmaci
-from metin import ad_geciyor, cift_yonlu_benzerlik, gorunen_ad, kesin_ad_mi, tr_kucuk
+from metin import KONU_DAMGASI, ad_geciyor, cift_yonlu_benzerlik, gorunen_ad, kesin_ad_mi, tr_kucuk
 from metin import nota_girer as metin_nota_girer
 from stt import CIZELGE_PUANI, hal_esik       # CIZELGE_PUANI: tek sabit stt.py'de (0.3)
 
@@ -241,12 +241,15 @@ def _hucre_isaretle(satir, indeks, ek=" (?)"):
 
 
 def _madde_isaretle(satir, ek=" (?)"):
-    """Madde satirinin sonuna (kaynak isareti ⏱.. varsa onun oncesine) belirsizlik isareti ekler."""
-    if ek.strip() in satir:
+    """Madde satirinin sonuna belirsizlik isareti ekler; damgalar varsa ILKININ oncesine: '- madde (?) [konu: X] ⏱ts'
+    (konu damgasi ve kaynak isareti maddenin parcasi degildir)."""
+    if ek.strip() in KONU_DAMGASI.sub("", satir):
         return satir
-    i = satir.find(_ISARET)
-    if i > 0:
-        return satir[:i].rstrip() + ek + " " + satir[i:]
+    k = KONU_DAMGASI.search(satir)
+    yerler = [i for i in (satir.find(_ISARET), k.start() if k else -1) if i > 0]
+    if yerler:
+        i = min(yerler)
+        return satir[:i].rstrip() + ek + " " + satir[i:].lstrip()
     return satir.rstrip() + ek
 
 
@@ -331,6 +334,22 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
                 continue
             yeni.append(_madde_isaretle(satir) if karar and karar[0] else satir)
             continue
+        durum = llm.durum_satiri_ayir(cizgisiz) if bolum.startswith("### ") else None
+        if durum is not None:
+            # durum sablonu konu satiri ('Durum: X. Risk: Y. ⏱ts'): durum ve risk ayri madde gibi denetlenir
+            parca = []
+            for metin in durum[:2]:
+                govde = re.sub(r"\s*\(\?\)\s*$", "", metin).strip()
+                karar = madde_dayanagi(govde, dizin) if llm.madde_dolu(govde) else None
+                if karar == "at":
+                    atilan.append(govde)
+                    parca.append("")
+                else:
+                    parca.append(f"{govde} (?)" if (karar and karar[0]) or govde != metin else metin)
+            yeni_satir = llm.durum_satiri(*parca)
+            if yeni_satir:
+                yeni.append(satir[:len(satir) - len(satir.lstrip())] + yeni_satir + (f" {durum[2]}" if durum[2] else ""))
+            continue
         aday = None
         tablo = False
         if ("karar" in bolum or "aksiyon" in bolum or "soru" in bolum) and cizgisiz.startswith(("-", "*", "|")):
@@ -357,7 +376,8 @@ def dayanak_kontrolu(not_md, transkript, esik=0.34, ozet_kaynak=None):
         if aday is None:
             yeni.append(satir)
             continue
-        aday = _KAYNAK_DAMGASI.sub(" ", aday).strip()      # kaynak damgasi (⏱HH:MM:SS) maddenin degeri degildir
+        # kaynak damgasi (⏱HH:MM:SS) ve konu damgasi ([konu: X]) maddenin degeri degildir
+        aday = KONU_DAMGASI.sub(" ", _KAYNAK_DAMGASI.sub(" ", aday)).strip()
         karar = madde_dayanagi(aday, dizin, soru="soru" in bolum)
         if karar is None:
             yeni.append(satir)
@@ -954,6 +974,8 @@ class Motor:
         self.uzun_gec = 0                    # ... kapanmis parcada (parca yeniden ozetlenir)
         self._bitiyor = False
         self._uretim_suruyor = False         # notu_uret / yeniden_ozetle calisiyor: sablon_degistir reddeder
+        self._konular = []                   # kanonik konu listesi (parca ozetlerinden; transkriptte dayanagi olanlar)
+        self._konu_havuzu = []               # [(tur, madde, konu)]: parca ozetlerinin maddeleri (konu_fn eslesmesi)
         self._goc = False                    # Motor.yukle: surumsuz satirlar okunurken goc eder
         self.stt_kesik = False               # STT kesintisi (isler: SesServisi.stt_durumu)
         self._stt_eksik = []                 # ses servisinin hic cozulemeyecek araliklari [[bas, bit]]
@@ -1061,9 +1083,10 @@ class Motor:
         with open(yol, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=1)
 
-    def sablon_degistir(self, sablon):
-        """Arayuz (Canli / Not secicisi, istege bagli): toplantinin sablonu elle degisir, meta.json'a yazilir. Baska
-        sablonla ozetlenmis parcalar notu_uret'te yeni sablonla yeniden ozetlenir. Dondurur: degisti mi."""
+    def sablon_degistir(self, sablon, neden="elle seçildi"):
+        """Arayuz (Canli 'Tür' kutusu / Not secicisi): toplantinin sablonu elle degisir, meta.json'a yazilir; yakalama
+        surerken de cagrilabilir: sonraki parcalar yeni sablonla ozetlenir, baska sablonla ozetlenmis onceki parcalar
+        notu_uret'te yeniden ozetlenir (log bunu soyler). neden: meta.json 'sablon_neden'. Dondurur: degisti mi."""
         sablon = llm.sablon_adi(sablon)
         if sablon == self.sablon:
             return False
@@ -1073,7 +1096,7 @@ class Motor:
         if self.transkript_silindi():        # konusma yok: yeni sablonla ozetlenemez, eski ozetler bozulmasin
             self.log("Not şablonu değiştirilmedi: konuşma verisi saklama süresiyle silinmiş (not ve özetler korunur)")
             return False
-        eski, self.sablon, self.sablon_neden = self.sablon, sablon, "elle seçildi"
+        eski, self.sablon, self.sablon_neden = self.sablon, sablon, neden or "elle seçildi"
         durum = None
         try:
             with open(os.path.join(self.klasor, "meta.json"), encoding="utf-8") as f:
@@ -1081,8 +1104,45 @@ class Motor:
         except Exception:
             pass
         self.meta_yaz(durum or "devam")
-        self.log(f"Not şablonu elle değişti: {llm.sablon_etiketi(eski)} → {llm.sablon_etiketi(sablon)}")
+        ek = ""
+        if self.parca_no:
+            ek = (f"; sonraki parçalar yeni şablonla özetlenir, önceki {self.parca_no} parça not üretilirken yeniden "
+                  f"özetlenir")
+        self.log(f"Not şablonu elle değişti: {llm.sablon_etiketi(eski)} → {llm.sablon_etiketi(sablon)}{ek}")
         return True
+
+    @staticmethod
+    def seri_son_sablon(baslik, kok=None, haric=None):
+        """Seri hafizasi (Canli 'Tür' kutusu): ayni slug(baslik) ile kaydedilmis SON toplantinin sablonu, yalniz o toplantida
+        elle secildiyse (meta.json 'sablon_neden' 'elle' iceriyor). Dondurur (sablon, neden) | None. haric: atlanacak klasor
+        (acik toplantinin kendisi)."""
+        kok = kok or KOK
+        seri = slug(baslik)
+        if not baslik or not os.path.isdir(kok):
+            return None
+        haric = os.path.realpath(haric) if haric else None
+        adaylar = []
+        for ad in os.listdir(kok):
+            k = os.path.join(kok, ad)
+            if not os.path.isdir(k) or (haric and os.path.realpath(k) == haric):
+                continue
+            try:
+                with open(os.path.join(k, "meta.json"), encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(meta, dict) or slug(meta.get("baslik") or "") != seri:
+                continue
+            adaylar.append((str(meta.get("tarih") or ""), ad, meta))
+        if not adaylar:
+            return None
+        tarih, _, meta = max(adaylar, key=lambda x: (x[0], x[1]))
+        neden = str(meta.get("sablon_neden") or "")
+        if meta.get("sablon") not in llm.SABLONLAR or "elle" not in tr_kucuk(neden):
+            return None
+        if tr_kucuk(neden).startswith("seri:"):
+            return meta["sablon"], neden          # zincir: elle secimin yapildigi ilk toplantinin tarihi korunur
+        return meta["sablon"], f"seri: {tarih} toplantısında elle seçildi"
 
     def transkript_silindi(self):
         """Saklama suresi bu toplantinin konusma verisini sildi mi (meta.json 'transkript_silindi')? Diskten okunur: acik
@@ -2092,11 +2152,24 @@ class Motor:
             return madde_dayanagi(_KAYNAK_DAMGASI.sub(" ", str(madde or "")).strip(), dizin, soru=soru) if denetle else None
 
         o = dict(ozet)
+        # konu: parcanin etiketi, kanonik ada indirgenmis ve transkriptte dayanakli (yoksa gosterilmez)
+        try:
+            kanon = self._konu_kanonu()[0]
+        except Exception:
+            kanon = []
+        etiket = llm._etiket_sozlugu(ozet)
+
+        def konu_al(madde, tur, ham=None):
+            k = llm.konu_kanonla(ham if ham is not None else etiket.get((tur, llm.normalize_bosluk(madde)), ""), kanon)
+            return k if k in kanon else ""
+        konu_etiketleri = []
         kararlar = []
         for k in ozet.get("kararlar") or []:
             karar = karar_ver(k)
             if karar != "at":
                 kararlar.append(_madde_isaretle(str(k)) if karar and karar[0] else k)
+                if konu_al(k, "karar"):
+                    konu_etiketleri.append({"tur": "karar", "madde": kararlar[-1], "konu": konu_al(k, "karar")})
         aksiyonlar = []
         for a in sorumlu_dogrula(ozet.get("aksiyonlar") or [], sat, self.ben, katilimcilar=self._kisi_katilimcilari()):
             karar = karar_ver(a.get("madde"))
@@ -2107,9 +2180,16 @@ class Motor:
             if karar and karar[1] and a["sahip"]["durum"] == "kesin":
                 a["sahip"] = dict(a["sahip"], durum="belirsiz")
                 a["sorumlu"] = ", ".join(f"{x.strip()} (?)" for x in a["sahip"]["ad"].split(",") if x.strip())
+            konu = konu_al(a.get("madde"), "aksiyon", a.get("konu") or "")
+            a.pop("konu", None)
+            if konu:
+                a["konu"] = konu
             aksiyonlar.append(a)
         o["kararlar"], o["aksiyonlar"] = kararlar, aksiyonlar
         o["acik_sorular"] = [q for q in ozet.get("acik_sorular") or [] if karar_ver(q, soru=True) != "at"]
+        konu_etiketleri += [{"tur": "soru", "madde": q, "konu": konu_al(q, "soru")} for q in o["acik_sorular"]
+                            if konu_al(q, "soru")]
+        o["konu_etiketleri"] = konu_etiketleri
         supheli = " ".join(str(s.get("text") or "") for s in satirlar if not nota_girer(s))
         zemin = _DegerZemini(dizin, supheli)
 
@@ -2127,6 +2207,12 @@ class Motor:
             for x in ozet.get(alan) or []:
                 if tur == "metin":
                     x = madde_denetle(x)
+                elif tur == "konu_durum":
+                    # durum / risk ayri denetlenir; konu kanonik ve dayanakli degilse gosterilmez
+                    durum = madde_denetle(x.get("durum")) if llm.madde_dolu(x.get("durum")) else ""
+                    risk = madde_denetle(x.get("risk")) if llm.madde_dolu(x.get("risk")) else ""
+                    konu = konu_al("", "", x.get("konu") or "")
+                    x = {"konu": konu, "durum": durum or "", "risk": risk or ""} if konu and (durum or risk) else None
                 else:
                     anahtar = "secenek" if tur == "secenek" else "fikir"
                     m = madde_denetle(x.get(anahtar))
@@ -2259,6 +2345,47 @@ class Motor:
             return None
         return (self.parca_oku(sira - 1).get("ozet") or {}).get("konular") or None
 
+    ONCEKI_KONU_TAVAN = 15               # sonraki parcaya verilen kanonik konu adi (en son gorulenler)
+
+    def _parca_ozetleri(self, kadar=None):
+        """1..kadar (verilmezse hepsi) parcanin ozetleri (okunamayan / ozetsiz parca atlanir)."""
+        ozetler = []
+        for no in range(1, (self.parca_no if kadar is None else min(kadar, self.parca_no)) + 1):
+            try:
+                o = self.parca_oku(no).get("ozet")
+            except Exception:
+                continue
+            if o:
+                ozetler.append(o)
+        return ozetler
+
+    def _konulari_kur(self, bolumler=None, satirlar=None):
+        """Kanonik konu listesi (Motor._konular) ve madde havuzu (konu_fn) parca ozetlerinden (_konu_kanonu); not uretimi
+        cagirir. Dondurur: kanonik liste."""
+        kanon, havuz = self._konu_kanonu(bolumler, satirlar)
+        self._konular, self._konu_havuzu = kanon, havuz
+        return kanon
+
+    def _konu_kanonu(self, bolumler=None, satirlar=None):
+        """Parca ozetlerinin madde etiketleri, konu durumlari ve 'konular' basliklari llm.konu_kanonu ile tek yazima
+        indirgenir ('DWH projesi' / 'DWH'). Konu YALNIZ transkriptte (⟨⟩ disi, supheli satir haric) dayanagi varsa listeye
+        girer: ayirt edici koklerinin en az yarisi gecmeli (uydurma konu notta bolum acmaz). Durum degistirmez (canli ozet
+        arka planda da cagirir). Dondurur (kanonik liste, madde havuzu)."""
+        bolumler = self._parca_ozetleri() if bolumler is None else bolumler
+        if satirlar is None:
+            satirlar = [x for x in self.tum_satirlar() if nota_girer(x)]
+        zemin = llm._konu_kokleri(sarmal_sil(" ".join(satir_metni(x) for x in satirlar)), ayirt=False)
+
+        def dayanakli(konu):
+            kk = llm._konu_kokleri(konu)
+            return bool(kk) and 2 * len(kk & zemin) >= len(kk)
+        return llm.konu_kanonu(llm.konu_adaylari(bolumler), kabul_fn=dayanakli), llm.konu_havuzu(bolumler)
+
+    def konu_fn(self, madde, tur=None):
+        """Not maddesinin konusu (karar | soru | aksiyon): parca maddelerine eslesme (llm.konu_eslestir; birlestirmedeki
+        _konulari_tasi ile ayni kural) + kanonik listeye indirgeme; kanonda yoksa ya da belirsizse None."""
+        return llm.konu_eslestir(madde, tur, self._konu_havuzu, self._konular) or None
+
     def _onceki_baglam(self, sira):
         """Parca ortusmesi (MIMARI_v3 §6): onceki parcanin konulari + SON 6 satiri + cevapsiz kalan maddeleri
         (~400 token). llm.bolum_ozetle bunu yalniz baglam olarak verir; sinirdaki karar / cumle iki parcaya bolunup
@@ -2273,7 +2400,10 @@ class Motor:
         satirlar = []
         for s in [x for x in veri.get("satirlar") or [] if nota_girer(x)][-llm.ONCEKI_SATIR:]:
             satirlar.append(blok_metni([s]))
-        bag = llm.onceki_baglam_hazirla(ozet.get("konular"), [x for x in satirlar if x.strip()], ozet.get("acik_sorular"))
+        # konu etiketi tutarliligi: onceki TUM parcalarin kanonik konu adlari (model ayni konuya yeni ad vermesin)
+        konular = llm.konu_kanonu(llm.konu_adaylari(self._parca_ozetleri(sira - 1)))[-self.ONCEKI_KONU_TAVAN:]
+        bag = llm.onceki_baglam_hazirla(konular or ozet.get("konular"), [x for x in satirlar if x.strip()],
+                                        ozet.get("acik_sorular"))
         return bag if (bag["konular"] or bag["satirlar"] or bag["acik"]) else None
 
     @staticmethod
@@ -2568,13 +2698,18 @@ class Motor:
         transkript = self.transkript_metni()
         satirlar = [s for s in self.tum_satirlar() if nota_girer(s)]      # supheli (halusinasyon) satir kaynak/sahip olmaz
         kaynak_fn = kaynak_bulucu(satirlar)
+        konular = self._konulari_kur(bolumler, satirlar)              # kanonik, transkriptte dayanakli konular
+        uydurma = [k for k in llm.konu_kanonu(llm.konu_adaylari(bolumler)) if llm.konu_kanonla(k, konular) not in konular]
+        if uydurma:
+            self.log(f"  ! transkriptte dayanağı olmayan {len(uydurma)} konu etiketi kullanılmadı: "
+                     f"{', '.join(k[:40] for k in uydurma[:5])}")
         asamalar = {"Kararlar ve aksiyonlar birleştiriliyor": 1, "Özet paragrafı yazılıyor": 2}
         not_md = f"# {self.baslik} — {self.tarih.isoformat()}\n\n" + llm.birlestir(
             bolumler, self.baglam(transkript), self.log, kaynak_fn=kaynak_fn, sablon=sablon,
             katilimcilar=self.katilimcilar,
             aksiyon_fn=lambda aks: self._aksiyonlari_kesinlestir(aks, satirlar),
             liste_fn=lambda v: self._sablon_listeleri(v, satirlar, sablon),
-            adim_fn=lambda m: self.adim(m, asamalar.get(m), 4))
+            adim_fn=lambda m: self.adim(m, asamalar.get(m), 4), konular=konular, konu_fn=self.konu_fn)
         self.adim("Dayanak kontrolü", 3, 4)
         bolum_ozetleri = "\n".join(b.get("ozet", "") for b in bolumler)
         not_md, atilan = dayanak_kontrolu(not_md, transkript, ozet_kaynak=bolum_ozetleri)
@@ -2584,6 +2719,7 @@ class Motor:
         not_md, olaylar = not_son_denetim(not_md, transkript, self.katilimcilar, supheli)
         for olay in olaylar:
             self.log(f"  ! {olay}")
+        not_md = llm.konu_bolumlerini_temizle(not_md)        # durum sablonu: maddesi kalmayan konu bolumu yazilmaz
         if eksik:
             # sessizce eksik not yerine okuyana hangi araligin notta olmadigini soyle
             not_md = not_md.rstrip("\n") + "\n\n## Eksik bölümler\n" + "\n".join(

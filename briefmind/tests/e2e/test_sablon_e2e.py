@@ -1,14 +1,17 @@
-"""Not sablonlari uctan uca kapilari: sablon basina bir sentetik toplanti (genel, haftalik, karar, birebir, calistay).
+"""Not sablonlari uctan uca kapilari: sablon basina bir sentetik toplanti (genel, haftalik, karar, birebir, calistay, durum).
 Gercek: Motor (ses klibi olayi -> satir -> parca kapanisi -> map (parca ozeti) -> canli ozet -> liste birlestirme -> ozet ->
 dayanak kontrolu -> sahip dogrulama -> son denetim), davetten otomatik sablon secimi, not_araclari. Sahte: konusmaci
 kararlari (elle; 'Ad?' dusuk guven, 'A / B' cakisma), saat ve KARSIT DAVRANISLI LLM (SablonDusmani): her sablon alanina
 transkriptte olmayan bir madde uydurur, ⟨⟩ ve halusinasyon supheli satirlarindan madde / tutar cikarir, calistayda fikirleri
-karar diye de yazar, karar toplantisinda kararlasmamis secenege 'secildi' der, belirsiz etiketli kisiyi is sahibi yapar.
+karar diye de yazar, karar toplantisinda kararlasmamis secenege 'secildi' der, belirsiz etiketli kisiyi is sahibi yapar;
+konusu belli olmayan her karar / aksiyona transkriptte olmayan bir konu UYDURUR, liste birlestirmesinde her aksiyona uydurma
+konu yazar, ayni konuya farkli adlar verir ('DWH' / 'DWH projesi').
 
 Kapilar: sablon davetten secilir ve meta.json'da kalir; her parca isteginde sablonun prompt eki ve semasi; uydurma madde 0;
 ⟨⟩ / supheli degeri kesin gorunmez; belirsiz etiketten kesin is sahibi 0; calistay fikri kararlarda 0 (acik uzlasma karar
 olarak kalir); dogrulanmamis secim '(?)'; birebir taslaklari kapali; bos sablon bolumu yazilmaz; her istek 16k pencereye
-cevap butcesi kirpilmadan sigar. Ag yok, repo'ya dosya yazmaz. Kapi gevsetilmez."""
+cevap butcesi kirpilmadan sigar; uydurma konu bolumu 0, her aksiyonun Konu hucresi kanonik listede ya da '-'; durum
+toplantisinda not konu konu (ayni konunun iki adi tek bolum). Ag yok, repo'ya dosya yazmaz. Kapi gevsetilmez."""
 import json
 import os
 import re
@@ -25,6 +28,7 @@ AYSE, KEMAL, SELIN, BEN = "Ayşe Yılmaz", "Kemal Tuncer", "Selin Kara", "Deniz 
 KISILER = [AYSE, KEMAL, SELIN, BEN]
 PENCERE = 16384
 UYDURMA = "Uydurma kalem 999 numaralı sunucuda kuruldu"
+UYDURMA_KONU = "Uydurma proje"           # transkriptte hic gecmeyen konu (karsit LLM her konusuz maddeye yazar)
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +67,15 @@ def _cumleler(blok):
     return out
 
 
+def _konu(k):
+    """Cumledeki konu (karsit LLM ayni konuya iki ad verir: 'DWH projesi' / 'DWH'); yoksa uydurma konu."""
+    if "dwh" in k:
+        return "DWH projesi" if "proje" in k else "DWH"
+    if "crm" in k:
+        return "CRM"
+    return UYDURMA_KONU
+
+
 class SablonDusmani:
     def __init__(self):
         self.cagrilar = []
@@ -95,10 +108,21 @@ class SablonDusmani:
         for etiket, c, sarmal in _cumleler(blok):
             k = c.lower()
             kim = re.sub(r"\?$|\s*\(.*\)$", "", etiket).split(" / ")[0].strip()
+            konu = _konu(k)
+            if konu != UYDURMA_KONU and konu not in v["konular"]:
+                v["konular"].append(konu)
             if "karar verdik" in k:
-                v["kararlar"].append(re.sub(r"^.*karar verdik,?\s*", "", c, flags=re.I).capitalize())
+                v["kararlar"].append({"madde": re.sub(r"^.*karar verdik,?\s*", "", c, flags=re.I).capitalize(),
+                                      "konu": konu})
             if re.search(r"\bben\b.*(hazırlarım|gönderirim|yaparım)", k):
-                v["aksiyonlar"].append({"madde": re.sub(r"\bben\s+", "", c), "sorumlu": kim, "tarih": "-"})
+                v["aksiyonlar"].append({"madde": re.sub(r"\bben\s+", "", c), "sorumlu": kim, "tarih": "-", "konu": konu})
+            if re.search(r"\bm[ıiuü]$", k):
+                v["acik_sorular"].append({"madde": c + "?", "konu": konu})
+            if "konu_durumlari" in alanlar and konu != UYDURMA_KONU:
+                if re.search(r"bitti|tamamlandı|yolunda", k):
+                    v["konu_durumlari"].append({"konu": konu, "durum": c, "risk": ""})
+                if "risk olarak" in k:
+                    v["konu_durumlari"].append({"konu": konu, "durum": "", "risk": c.split("risk olarak", 1)[1].strip()})
             if "ilerleme" in alanlar and re.search(r"tamamladım|bitti", k):
                 v["ilerleme"].append(c)
             if "engeller" in alanlar and re.search(r"hazır değil|bekliyoruz|engel", k):
@@ -126,7 +150,8 @@ class SablonDusmani:
             tur = llm.ALAN_TURU[a]
             v[a].append({"metin": UYDURMA, "secenek": {"secenek": UYDURMA, "artilar": [], "eksiler": [],
                                                       "secildi": True},
-                         "fikir": {"fikir": UYDURMA, "tema": "Uydurma"}}[tur])
+                         "fikir": {"fikir": UYDURMA, "tema": "Uydurma"},
+                         "konu_durum": {"konu": UYDURMA_KONU, "durum": UYDURMA, "risk": ""}}[tur])
         return v
 
     @staticmethod
@@ -147,7 +172,7 @@ class SablonDusmani:
                 madde, sorumlu, tarih = (m.group(1).split(" — ") + ["belirsiz", "-"])[:3]
                 if sorumlu == "belirsiz":
                     sorumlu = KEMAL                                # belirsiz sorumluyu doldurur
-                v[alan].append({"madde": madde, "sorumlu": sorumlu, "tarih": tarih})
+                v[alan].append({"madde": madde, "sorumlu": sorumlu, "tarih": tarih, "konu": UYDURMA_KONU})
             else:
                 v[alan].append(m.group(1))
         return v
@@ -197,6 +222,18 @@ TOPLANTILAR = {
         None,
         S(AYSE, "Önerim, taksitli ödeme seçeneği de olabilir."),
         S(AYSE, "Tamam, karar verdik, pilotu kurumsal müşterilerle yapıyoruz."),
+    ]),
+    "durum": ("Proje durum değerlendirmesi", "", [
+        S(SELIN, "DWH projesinde veri yükleme işleri bitti, takvim yolunda."),
+        S(KEMAL, "DWH tarafında risk olarak lisans yenilemesi gecikebilir."),
+        S(AYSE, "Karar verdik, DWH canlı geçişi kasımda yapılacak."),
+        S(KEMAL, "DWH test raporunu ben hazırlarım."),
+        None,
+        S(SELIN, "CRM entegrasyonunda arayüz ekranları tamamlandı."),
+        S(AYSE, "CRM için karar verdik, eski modül kapatılacak."),
+        S(KEMAL, "CRM veri taşıma tarihi netleşti mi?"),
+        S(AYSE, "Karar verdik, toplantılar iki haftada bir olacak."),
+        S(SELIN, "Kullanıcı kılavuzunu ben hazırlarım."),
     ]),
 }
 
@@ -289,7 +326,8 @@ def test_uydurma_ve_belirsiz_deger_notta_ve_canli_panelde_kesin_gorunmez(tmp_pat
     for o in k["canli"]:
         metin = json.dumps(o, ensure_ascii=False)
         assert "Uydurma" not in metin and "750 sunucu" not in metin
-    assert "## Özet" in md and "## Kararlar" in md and "## Aksiyonlar" in md and "## Bir sonraki adım" in md
+    assert "## Özet" in md and "## Aksiyonlar" in md and "## Bir sonraki adım" in md
+    assert ("## Konular" if sablon == "durum" else "## Kararlar") in md        # durum: kararlar konu bolumlerinde
 
 
 @pytest.mark.parametrize("sablon", SABLONLAR)
@@ -347,3 +385,57 @@ def test_calistay_fikir_karar_olmaz_acik_uzlasma_karar_kalir(tmp_path_factory, m
     assert sum("karar değil fikir olarak yazıldı" in x for x in k["log"]) >= 3
     for o in k["canli"]:                                                     # canli panel de ayni kurali uygular
         assert not any(re.search(r"qr|sesli|taksit", x.lower()) for x in o["kararlar"])
+
+
+# ---------------------------------------------------------------- konu etiketleri
+
+def _aksiyon_satirlari(md):
+    """'## Aksiyonlar' tablosu -> (baslik satiri, [hucreler])."""
+    govde = _bolum(md, "Aksiyonlar") or ""
+    satirlar = [x for x in govde.split("\n") if x.startswith("|")]
+    return (satirlar[0] if satirlar else ""), [[h.strip() for h in x.strip("|").split("|")] for x in satirlar[2:]]
+
+
+@pytest.mark.parametrize("sablon", SABLONLAR)
+def test_uydurma_konu_bolum_acmaz_aksiyon_konusu_kanonda(tmp_path_factory, monkeypatch, sablon):
+    k = kosum(tmp_path_factory, monkeypatch, sablon)
+    md, kanon = k["md"], k["m"]._konular
+    assert UYDURMA_KONU not in kanon and "Uydurma" not in md            # karsit LLM her konusuz maddeye uydurdu
+    assert not [b for b in re.findall(r"^### (.+)$", md, re.M) if b != llm.GENEL_KONU and b not in kanon]
+    for etiket in re.findall(r"\[konu: ([^\]]+)\]", md):
+        assert etiket in kanon, etiket
+    baslik, satirlar = _aksiyon_satirlari(md)
+    if satirlar:
+        assert baslik == llm.AKSIYON_BASLIGI
+        for h in satirlar:
+            assert h[-1] == "-" or h[-1] in kanon, h
+    for o in k["canli"]:                                                 # canli panel de uydurma konu gostermez
+        assert all(e["konu"] in kanon for e in o.get("konu_etiketleri") or [])
+        assert all(a.get("konu") in (None, *kanon) for a in o["aksiyonlar"])
+
+
+def test_durum_notu_konu_konu_ayni_konunun_iki_adi_tek_bolum(tmp_path_factory, monkeypatch):
+    k = kosum(tmp_path_factory, monkeypatch, "durum")
+    md = k["md"]
+    assert k["m"]._konular == ["DWH projesi", "CRM"]                   # 'DWH' / 'DWH projesi' tek; 'ekip durumu' dayanaksiz
+    assert re.findall(r"^### (.+)$", md, re.M) == ["DWH projesi", "CRM", "Genel"]
+    assert not re.search(r"^## (Kararlar|Açık sorular)$", md, re.M)     # kararlar / sorular konu bolumlerinde
+    konular = _bolum(md, "Konular")
+    dwh, crm, genel = (konular.split(f"### {b}\n", 1)[1].split("\n### ", 1)[0] for b in ("DWH projesi", "CRM", "Genel"))
+    assert re.search(r"^Durum: DWH projesinde veri yükleme işleri bitti, takvim yolunda\. Risk: Lisans yenilemesi "
+                     r"gecikebilir\.", dwh, re.M | re.I)
+    assert "#### Kararlar" in dwh and "canlı geçişi kasımda yapılacak" in dwh.lower()
+    assert re.search(r"^Durum: CRM entegrasyonunda arayüz ekranları tamamlandı\.", crm, re.M)
+    assert "Eski modül kapatılacak" in crm and "#### Açık sorular" in crm and "netleşti mi?" in crm
+    assert "Toplantılar iki haftada bir olacak" in genel and "Durum:" not in genel
+    assert "[konu:" not in konular                                      # bolum basligi konuyu zaten soyluyor
+    baslik, satirlar = _aksiyon_satirlari(md)
+    assert baslik == llm.AKSIYON_BASLIGI and md.count("## Aksiyonlar") == 1     # tek duz tablo
+    konu = {h[1]: h[-1] for h in satirlar}
+    assert konu["DWH test raporunu hazırlarım"] == "DWH projesi"         # 'DWH' etiketi kanonik ada indi
+    assert konu["Kullanıcı kılavuzunu hazırlarım"] == "-"                # uydurma konu: '-'
+    aks = {a["madde"]: a["konu"] for a in not_araclari.aksiyonlari_ayikla(md)}
+    assert aks["DWH test raporunu hazırlarım"] == "DWH projesi" and aks["Kullanıcı kılavuzunu hazırlarım"] is None
+    assert any("dayanağı olmayan" in x and "konu etiketi" in x for x in k["log"])
+    # canli panel: konu kanonik ada iner
+    assert any(e["konu"] == "CRM" for o in k["canli"] for e in o.get("konu_etiketleri") or [])

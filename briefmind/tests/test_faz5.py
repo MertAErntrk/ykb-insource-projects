@@ -381,9 +381,10 @@ class SahteYakalamaIsi(QtCore.QThread):
     hata = QtCore.pyqtSignal(str)
     olusturulan = []
 
-    def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None):
+    def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None, sablon=None, sablon_neden=None):
         super().__init__()
         self.baslik, self.motor = baslik, None
+        self.sablon, self.sablon_neden, self.ayar = sablon, sablon_neden, ayar      # Baslat'ta secilen tur (C1)
         self.durdurma = []
         self._dur = KAPI.olay(f"dur-{id(self)}")                # KAPI.hepsini_birak() ile serbest kalir
         self.bitis_sirasinda_calisiyor = None
@@ -1582,3 +1583,335 @@ def test_ayar_faz3_faz6_anahtarlari_varsayilan_kapali(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     v = ayar_mod.ayar_oku()
     assert v["uzun_pencere"] is False and v["ses_izi"] is False
+
+
+# =============================================================== C1: Tür kutusu (Baslat'tan once toplanti turu)
+
+def _aday(baslik, govde=""):
+    import datetime as dt
+    bas = dt.datetime.now()
+    return {"baslik": baslik, "katilimcilar": ["Ayşe Demir"], "gundem": "", "baslangic": bas,
+            "bitis": bas + dt.timedelta(minutes=30), "davet": {"govde": govde, "ekler": []}}
+
+
+def _davet_sec(p, baslik, govde=""):
+    """Takvimden gelmis gibi: aday listesi + secim (currentIndexChanged -> _toplanti_secildi)."""
+    p._adaylar = [_aday(baslik, govde)]
+    p.toplanti_secici.blockSignals(True)
+    p.toplanti_secici.clear()
+    p.toplanti_secici.addItem(baslik, p._adaylar[0])
+    p.toplanti_secici.blockSignals(False)
+    p.toplanti_secici.setCurrentIndex(0)
+    p._toplanti_secildi(0)
+
+
+def _tur_sec_elle(p, anahtar):
+    i = p.tur_secici.findData(anahtar)
+    p.tur_secici.setCurrentIndex(i)
+    p._tur_secildi(i)                                        # activated sinyalinin yaptigi (yalniz kullanici secimi)
+
+
+@pytest.fixture
+def tur(pencere, monkeypatch):
+    """Seri hafizasi kapali (motor.seri_son_sablon yoksa da var olsa da test ayni)."""
+    import app
+    monkeypatch.setattr(app.Motor, "seri_son_sablon", staticmethod(lambda baslik: None), raising=False)
+    return pencere
+
+
+def test_tur_kutusu_secenekleri_ve_adi(pencere):
+    import llm
+    p = pencere
+    assert p.tur_secici.objectName() == "tur_secici"
+    veriler = [p.tur_secici.itemData(i) for i in range(p.tur_secici.count())]
+    assert veriler[0] == llm.SABLON_OTOMATIK and veriler[1:] == list(llm.SABLONLAR)
+    assert p.tur_secici.itemText(0) == "Otomatik"
+    assert [p.tur_secici.itemText(i) for i in range(1, p.tur_secici.count())] == [e for e, _ in llm.SABLONLAR.values()]
+
+
+def test_tur_kutusu_davet_basligindan_dolar_ve_tooltip_neden(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    assert p.tur_secici.currentData() == "haftalik"
+    assert "haftalik" in p.tur_secici.toolTip() and p.tur_secici.toolTip().startswith("otomatik")
+    assert p.k_sablon.deger.text() == p.tur_secici.currentText() and p.k_sablon.toolTip() == p.tur_secici.toolTip()
+    _davet_sec(p, "Kahve")                                    # ipucu yok: Genel diye kesinlestirilmez, Otomatik kalir
+    assert p.tur_secici.currentData() == "otomatik" and "ipucu yok" in p.tur_secici.toolTip()
+
+
+def test_tur_kutusu_davet_govdesinden_dolar(tur):
+    p = tur
+    _davet_sec(p, "Mimari görüşme", "Gündem: proje durum değerlendirmesi ve riskler")
+    import llm
+    beklenen = llm.sablon_tespit("Mimari görüşme", "Gündem: proje durum değerlendirmesi ve riskler")[0]
+    assert (p.tur_secici.currentData() == beklenen) or (beklenen == "genel" and p.tur_secici.currentData() == "otomatik")
+
+
+def test_tur_ayarda_sabit_sablon_oncelikli(tur):
+    p = tur
+    p.ayar["not_sablonu"] = "karar"
+    _davet_sec(p, "Haftalık Mimari")
+    assert p.tur_secici.currentData() == "karar" and p.tur_secici.toolTip() == "ayarda sabit şablon"
+
+
+def test_tur_seri_hafizasi_ayardan_ve_davetten_once_gelir(pencere, monkeypatch):
+    import app
+    gelen = []
+    monkeypatch.setattr(app.Motor, "seri_son_sablon",
+                        staticmethod(lambda baslik: (gelen.append(baslik), ("birebir", "aynı seride son toplantıda elle seçilmişti"))[1]),
+                        raising=False)
+    p = pencere
+    _davet_sec(p, "Haftalık Mimari")
+    assert gelen == ["Haftalık Mimari"] and p.tur_secici.currentData() == "birebir"
+    assert p.tur_secici.toolTip() == "aynı seride son toplantıda elle seçilmişti"
+    # seri hafizasi kesindir: motora da AYNI sablon gider (kutu ile motor ayrismaz)
+    p.baslat()
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon == "birebir" and isi.sablon_neden == "aynı seride son toplantıda elle seçilmişti"
+
+
+def test_tur_seri_hafizasi_hata_verirse_davetten_devam(pencere, monkeypatch):
+    import app
+
+    def bozuk(baslik):
+        raise RuntimeError("uydurma")
+    monkeypatch.setattr(app.Motor, "seri_son_sablon", staticmethod(bozuk), raising=False)
+    p = pencere
+    _davet_sec(p, "Haftalık Mimari")
+    assert p.tur_secici.currentData() == "haftalik"
+
+
+def test_tur_elle_secim_otomatigi_ezer_ve_ayni_baslikta_korunur(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    _tur_sec_elle(p, "karar")
+    assert p.tur_secici.currentData() == "karar" and p.tur_secici.toolTip() == "Başlat'ta elle seçildi"
+    _davet_sec(p, "Haftalık Mimari")                          # ayni baslik yeniden secildi / takvim yenilendi
+    assert p.tur_secici.currentData() == "karar"
+    _davet_sec(p, "Kahve")                                    # baska toplanti: elle secim oraya tasinmaz
+    assert p.tur_secici.currentData() == "otomatik"
+    _davet_sec(p, "Haftalık Mimari")
+    assert p.tur_secici.currentData() == "karar"              # ilk basliga donunce hala elle secilen
+
+
+def test_tur_baslat_elle_secilen_yakalama_kwargs_ve_ayar_kirlenmez(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    _tur_sec_elle(p, "calistay")
+    ayar_once = dict(p.ayar)
+    _baslat_adayli(p)
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon == "calistay" and isi.sablon_neden == "Başlat'ta elle seçildi"
+    assert p.ayar.get("not_sablonu") == ayar_once.get("not_sablonu")      # paylasilan ayar'a yazilmadi
+    assert "sablon" not in isi.ayar and "sablon_neden" not in isi.ayar
+
+
+def test_tur_baslat_otomatik_oneri_bugunku_yol_kwargs_yok(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    assert p.tur_secici.currentData() == "haftalik"           # otomatik onerildi, elle secilmedi
+    _baslat_adayli(p)
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon is None and isi.sablon_neden is None
+
+
+def test_tur_elle_otomatik_secimi_de_kwargs_gondermez(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    _tur_sec_elle(p, "otomatik")
+    assert p.tur_secici.currentData() == "otomatik"
+    _baslat_adayli(p)
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon is None and isi.sablon_neden is None
+
+
+def test_tur_baslat_elle_yazilan_baslikta_davetsiz_oneri(tur):
+    p = tur
+    p.toplanti_secici.setEditText("Karar Toplantısı Tedarik")        # takvimsiz, elle yazildi
+    p.a_ben.setText("Deneme Kisi")
+    p.baslat()
+    assert p.tur_secici.currentData() == "karar"
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon is None                                         # otomatik oneri: motor ayni sonucu kendi bulur
+
+
+def _baslat_adayli(p):
+    p.a_ben.setText("Deneme Kisi")
+    p.baslat()
+    assert SahteYakalamaIsi.olusturulan
+
+
+class _TurMotor(SahteMotor):
+    """Yakalama sirasindaki motor: sablon_degistir cagrilarini kaydeder (gercek Motor.sablon_degistir ayni imza)."""
+    def __init__(self, klasor):
+        super().__init__(klasor)
+        self.sablon, self.sablon_neden, self.cagrilar, self.logla = "haftalik", "otomatik: davet konusunda 'haftalik' geçiyor", [], []
+
+    def sablon_degistir(self, sablon):
+        self.cagrilar.append(sablon)
+        if sablon == self.sablon:
+            return False
+        self.sablon, self.sablon_neden = sablon, "elle seçildi"
+        return True
+
+    def transkript_silindi(self):
+        return False
+
+
+def test_tur_yakalama_sirasinda_degisim_sablon_degistir_cagirir_not_uretmez(tur, monkeypatch):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    _baslat_adayli(p)
+    assert p._durum() == "yakalaniyor"
+    assert p.tur_secici.isEnabled()                           # yakalamada kutu ACIK
+    p.is_.motor = _TurMotor(p.klasor_yolu)
+    p._motoru_bagla(p.is_)
+    assert p.motor is p.is_.motor and p.tur_secici.currentData() == "haftalik"
+    uretildi = []
+    monkeypatch.setattr(p, "_not_uret", lambda *a, **k: uretildi.append(1))
+    p.not_md = "## Eski not"
+    _tur_sec_elle(p, "durum")
+    assert p.motor.cagrilar == ["durum"] and p.motor.sablon == "durum"
+    assert p.tur_secici.currentData() == "durum" and p._durum() == "yakalaniyor"
+    assert uretildi == []                                     # not yakalama sirasinda uretilmez
+    assert p.k_sablon.deger.text() == p.tur_secici.currentText()
+
+
+def test_tur_yakalama_sirasinda_otomatik_secilemez_gercek_sablona_doner(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    _baslat_adayli(p)
+    p.is_.motor = _TurMotor(p.klasor_yolu)
+    p._motoru_bagla(p.is_)
+    _tur_sec_elle(p, "otomatik")
+    assert p.motor.cagrilar == [] and p.tur_secici.currentData() == "haftalik"
+
+
+def test_tur_yakalama_basinda_motor_yokken_secim_motor_baglaninca_uygulanir(tur):
+    p = tur
+    _davet_sec(p, "Haftalık Mimari")
+    _baslat_adayli(p)
+    assert p.motor is None
+    _tur_sec_elle(p, "birebir")                               # motor henuz kurulmadi
+    assert p.tur_secici.currentData() == "birebir" and p._tur_bekleyen == "birebir"
+    p.is_.motor = _TurMotor(p.klasor_yolu)
+    p._motoru_bagla(p.is_)
+    assert p.motor.cagrilar == ["birebir"] and p.tur_secici.currentData() == "birebir" and p._tur_bekleyen is None
+
+
+def test_tur_kutusu_yalniz_not_uretilirken_kapali(tur, qapp):
+    p = tur
+    assert p._durum() == "bos" and p.tur_secici.isEnabled()
+    _baslat(p, qapp)
+    assert p._durum() == "yakalaniyor" and p.tur_secici.isEnabled()
+    p.is_.motor = SahteMotor(p.klasor_yolu)
+    p.bitir()
+    KAPI.birak("yakalama-kapanis")
+    assert _bekle(qapp, lambda: p._durum() == "not_uretiliyor")
+    assert not p.tur_secici.isEnabled()
+    KAPI.birak("not")
+    assert _bekle(qapp, lambda: p._durum() == "bos")
+    assert p.tur_secici.isEnabled()
+
+
+def test_tur_kutusu_not_sayfasi_secici_kurali_degismez(tur):
+    p = tur
+    p.motor = _TurMotor(p.klasor_yolu)
+    p._durum_uygula()
+    assert p.not_sablon.isEnabled()                           # 'bos' durumda acik
+    p.motor.cagrilar.clear()
+    p._yakalama_acik = True                                   # yakalama: Not sayfasi seçicisi kapali, Tür kutusu acik
+    p._durum_uygula()
+    assert not p.not_sablon.isEnabled() and p.tur_secici.isEnabled()
+    p._yakalama_acik = False
+    p._durum_uygula()
+
+
+# ---- bulgu: baslik yokken elle secilen tur ilk cozulen basliga uygulanir (sessizce ezilmez)
+
+def test_tur_basliksiz_elle_secim_sonra_takvimden_toplanti_secilince_korunur(tur):
+    p = tur
+    p.toplanti_secici.setEditText("")
+    _tur_sec_elle(p, "karar")                                 # once tur, sonra toplanti
+    assert p.tur_secici.currentData() == "karar"
+    _davet_sec(p, "Haftalık Mimari")                          # davet 'haftalik' onerirdi: elle secim ezilmez
+    assert p.tur_secici.currentData() == "karar" and p.tur_secici.toolTip() == "Başlat'ta elle seçildi"
+    _davet_sec(p, "Kahve")                                    # artik basliga bagli: baska toplantiya tasinmaz
+    assert p.tur_secici.currentData() == "otomatik"
+    _davet_sec(p, "Haftalık Mimari")
+    assert p.tur_secici.currentData() == "karar"
+    _baslat_adayli(p)
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon == "karar" and isi.sablon_neden == "Başlat'ta elle seçildi"
+
+
+def test_tur_basliksiz_elle_secim_baslik_baslatta_takvimden_gelince_motora_gider(tur, monkeypatch):
+    p = tur
+    p.toplanti_secici.setEditText("")
+    _tur_sec_elle(p, "karar")
+    monkeypatch.setattr(p, "_toplanti_bilgisi", lambda sonuc: ("Haftalık Mimari", {}))      # Teams / takvimden
+    monkeypatch.setattr(p, "_takvim_getir", lambda devam, bekle=False: True)                # sorgu: elle bitirilir
+    monkeypatch.setattr(p, "_tek_atim", lambda *a, **k: None)
+    p.a_ben.setText("Deneme Kisi")
+    p.baslat()
+    assert p._baslat_bekliyor and not SahteYakalamaIsi.olusturulan
+    p._baslat_takvimle({})                                    # takvim sorgusu bitti: baslik Teams / takvimden
+    assert p.baslik.text() == "Haftalık Mimari" and p.tur_secici.currentData() == "karar"
+    isi = SahteYakalamaIsi.olusturulan[-1]
+    assert isi.sablon == "karar" and isi.sablon_neden == "Başlat'ta elle seçildi"
+
+
+def test_tur_basliksiz_elle_otomatik_secimi_davet_onerisini_engellemez(tur):
+    p = tur
+    p.toplanti_secici.setEditText("")
+    _tur_sec_elle(p, "otomatik")
+    _davet_sec(p, "Haftalık Mimari")                          # 'Otomatik' = davetten secilsin
+    assert p.tur_secici.currentData() == "haftalik"
+
+
+# ---- bulgu: canli panel ve parca gorunumu konu gosterir
+
+def test_canli_panel_karar_aksiyon_soru_satirlarinda_konu_eki(pencere):
+    p = pencere
+    p.canli_not.clear()
+    o = {"ozet": "", "kararlar": ["CRM geçişi ertelendi", "Bütçe onaylandı (?)"],
+         "aksiyonlar": [{"madde": "Test planı hazırla", "sorumlu": "Ayşe Demir", "tarih": "Cuma", "konu": "CRM"},
+                        {"madde": "Sunum güncelle", "sorumlu": "belirsiz", "tarih": "-"}],
+         "acik_sorular": ["Lisans kim öder?"],
+         "konu_etiketleri": [{"tur": "karar", "madde": "CRM geçişi ertelendi", "konu": "CRM"},
+                             {"tur": "soru", "madde": "Lisans kim öder?", "konu": "Bütçe"}]}
+    p.olay("parca_ozetlendi", {"sira": 1, "ozet": o, "duzeltme": 0})
+    satirlar = [p.canli_not.item(i).text() for i in range(p.canli_not.count())]
+    assert "Karar: CRM geçişi ertelendi [CRM]" in satirlar
+    assert "Karar: Bütçe onaylandı (?)" in satirlar                       # konusu yok: ek uydurulmaz
+    assert "Aksiyon: Test planı hazırla [CRM]  — Ayşe Demir, Cuma" in satirlar
+    assert "Aksiyon: Sunum güncelle  — belirsiz, -" in satirlar
+    assert "Soru: Lisans kim öder? [Bütçe]" in satirlar
+
+
+def test_parca_gorunumu_konu_damgasi_ve_not_aksiyon_basligi(pencere, tmp_path, monkeypatch):
+    import app
+    import llm
+    p = pencere
+    k = tmp_path / "toplanti"
+    (k / "parcalar").mkdir(parents=True)
+    parca = {"baslangic": "10:00", "bitis": "10:10", "token": 100, "neden": "sure", "satirlar": [],
+             "ozet": {"ozet": "", "konular": ["CRM"],
+                      "kararlar": [{"madde": "CRM geçişi ertelendi", "konu": "CRM"}, "Eski düz karar"],
+                      "aksiyonlar": [{"madde": "Test planı hazırla", "sorumlu": "Ayşe Demir", "tarih": "Cuma",
+                                      "konu": "CRM"},
+                                     {"madde": "Sunum güncelle", "sorumlu": "belirsiz", "tarih": "-"}],
+                      "acik_sorular": [{"madde": "Lisans kim öder?", "konu": ""}]}}
+    (k / "parcalar" / "parca_001.json").write_text(json.dumps(parca, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(p, "_secili_klasor", lambda: str(k))
+    gorulen = []
+    monkeypatch.setattr(app, "md_to_html", lambda md: (gorulen.append(md), "")[1])
+    it = QtWidgets.QListWidgetItem("Parça 1")
+    it.setData(QtCore.Qt.UserRole, 1)
+    p._parca_secildi(it)
+    md = gorulen[-1]
+    assert "- CRM geçişi ertelendi [konu: CRM]" in md and "- Eski düz karar\n" in md
+    assert llm.AKSIYON_BASLIGI in md and "| # | Madde | Sorumlu | Tarih |\n" not in md
+    assert "| 1 | Test planı hazırla | Ayşe Demir | Cuma | - | CRM |" in md
+    assert "| 2 | Sunum güncelle | belirsiz | - | - | - |" in md
+    assert "- Lisans kim öder?\n" in md                                   # konusuz soru: damga yok

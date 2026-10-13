@@ -87,7 +87,7 @@ python app.py
 | `stt_ipucu` | (varsayılan `true`) Whisper'a prompt olarak katılımcı adları ve serinin en çok 20 terimi gider; düşük sesli kliplere gitmez. Ayarlar'dan açılıp kapatılır |
 | `stt_repetition_penalty` | (varsayılan boş) Boşken STT'ye gönderilmez; sayı (ör. `1.1`) yazılırsa `repetition_penalty` olarak gider. Deneme amaçlı |
 | `stt_proxy` | (isteğe bağlı, varsayılan `true`) `false` yapılırsa STT'ye Windows proxy'si atlanarak doğrudan bağlanılır. STT'de sık `10053` bağlantı kopması görülürse denenir. |
-| `not_sablonu` | `genel` / `haftalik` / `karar` / `birebir` / `calistay` (Ayarlar → Not şablonu) |
+| `not_sablonu` | `otomatik` / `genel` / `haftalik` / `karar` / `birebir` / `calistay` / `durum` (Ayarlar → Not şablonu; Canlı ekrandaki "Tür" kutusu toplantı başına bunu geçer) |
 | `saklama_gun` | Toplantı tarihinden bu kadar gün sonra konuşma içeren her veri silinir: transkript, düzeltme günlüğü, parça satırları, `olcum/` (klip wav, ham STT, okumalar, `kesinti/`), ses dosyaları, `rag_dizin.npz`, replay çıktıları, `.yedek-*`; `llm_log.jsonl`'den serbest metin alanları çıkarılır. `not.md`, `meta.json` ve parça özetleri kalır. Notu üretilmemiş (yarım/hata) toplantılar da tarihe göre temizlenir; yalnız o an bir işin (kayıt, not üretimi, yeniden özetleme, soru) çalıştığı toplantı atlanır ve sonraki turda denenir (yalnız açık/görüntülenen toplantı korunmaz). Konuşma verisi silinmiş toplantının notu yeniden üretilmez ve şablonu değiştirilemez (transkript olmadan doğrulanamaz); not ve parça özetleri olduğu gibi kalır. Açılışta, her saat ve ayar kaydedilince çalışır; Olaylar'a yalnız sayılar yazılır. `0` kapalı (Ayarlar → Transkript saklama süresi) |
 | `embed_url` | (isteğe bağlı) Embedding servisi (OpenAI uyumlu `POST /v1/embeddings`, gövde `{"input": [...]}`). Doluysa "Toplantıya sor" hibrit arama yapar: kelime (BM25) + anlam (vektör), RRF ile birleştirilir. Boşsa ya da servis hata verirse yalnızca kelime araması. Servisin yollarını bulmak için: `python tools\servis_kesfet.py <adres>` |
 | `embed_boyut` / `embed_key` / `embed_proxy` | Vektör boyutu (varsayılan `1024`; 4096'lık Qwen3-Embedding vektörü kırpılıp normalize edilir), anahtar (gerekirse), Windows proxy'si |
@@ -148,7 +148,10 @@ Kimsenin cihaz ayarlaması gerekmez; kulaklıkla, dizüstü hoparlör/mikrofonuy
 ## Kullanım
 
 1. Teams toplantısına gir (altyazı açık olsun; kapalıysa uygulama Alt+Shift+C ile açmayı dener).
-2. **Başlat** — üstteki listeden toplantı seçilir (takvimden, Teams penceresine göre otomatik).
+2. **Başlat** — üstteki listeden toplantı seçilir (takvimden, Teams penceresine göre otomatik). Yanındaki **Tür** kutusu
+   davetten otomatik dolar (aynı başlıklı serinin son toplantısında tür elle seçildiyse o kullanılır; neden kutunun
+   ipucunda yazar). İstersen Başlat'tan önce ya da toplantı sırasında değiştir: sonraki parçalar yeni türle özetlenir,
+   öncekiler not üretilirken yeniden özetlenir. Türler: Genel, Haftalık durum, Karar, Birebir, Çalıştay, Durum değerlendirme.
 3. Konuşmalar klip klip Canlı sekmesine düşer; konuşmacı önce "beklemede…" görünür, altyazı çizelgesi o anı
    kapsayınca (en geç 15 sn) yerleşir. Güven 0,7'nin altındaysa ad "Ad?" yazılır, kimse yoksa "Bilinmeyen".
    Klip içinde konuşmacı değiştiyse klip en sessiz noktadan ikiye kesilip yeniden çözülür; kesilemezse "A → B".
@@ -201,6 +204,11 @@ Kalıcı altyazı için Teams: … → Ayarlar → Erişilebilirlik → *Toplant
   Planner: CSV Excel'de açılıp görevler kopyalanır. Doğrudan Jira'ya kayıt açılmaz (kimlik bilgisi gerekmez).
 - **Konuşma payı:** Geçmiş sekmesinde bir toplantı seçilince üstte "Konuşma payı: Selin %38, Emre %27, …"
   (satırın süresi = sonraki satıra kadar, en fazla 15 sn). Nota yazılmaz; `meta.json` → `konusma_paylari`.
+- **Konu etiketleri:** her karar, aksiyon ve açık soru konuşulan konuya (proje) bağlanır: maddede `[konu: X]`, aksiyon
+  tablosunda son sütun **Konu**, Jira CSV'de `Labels`. Konu yalnız transkriptte geçiyorsa kullanılır (uydurma konu notta
+  bölüm açmaz); aynı konunun farklı yazımları tek ada indirilir; konusuz maddeler etiketsiz kalır.
+- **Durum değerlendirme:** not `## Konular` altında konu konu gruplanır (`### <Konu>`: durum ve risk cümlesi, kararlar,
+  açık sorular; konusuzlar `### Genel`); aksiyonlar tek tabloda kalır.
 - **Şablon ve saklama süresi:** Ayarlar → Not şablonu, Transkript saklama süresi (açılışta, saatte bir ve ayar kaydedilince uygulanır; ses ve ölçüm kayıtları dahil).
 - **Bilgilendirme:** Canlı sekmesi → "Katılımcıları bilgilendir" metni panoya kopyalar; Teams sohbetine yapıştırın.
 

@@ -156,10 +156,11 @@ class YakalamaIsi(QtCore.QThread):
     DONGU_YAVAS_SN = 10.0                   # okuma periyodu 2*OKUMA_ARALIK'i bu kadar sn asarsa bir kez log
     ALTYAZI_DENEME_SN = 8                   # altyazi acma denemeleri: 8, 16 sn
 
-    def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None):
+    def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None, sablon=None, sablon_neden=None):
         super().__init__()
         self.baslik, self.ctx, self.terimler, self.duzelt, self.otobitir = baslik, ctx, terimler, duzelt, otobitir
         self.ayar = ayar or {}
+        self.sablon, self.sablon_neden = sablon, sablon_neden     # Baslat'ta secilen tur (None: ayar / otomatik, bugunku yol)
         self.motor = None
         self.ses_servisi = None
         self._dur = False
@@ -269,13 +270,14 @@ class YakalamaIsi(QtCore.QThread):
             self.olay.emit("log", f"! kaynak '{self.ayar.get('kaynak')}' artık yok, ses kullanılıyor "
                                   "(altyazı metni yalnız 'altyazi_yedek' açıkken ve STT yokken girer)")
         katilimcilar = list(self.ctx.get("katilimcilar") or [])
+        secilen = {"sablon_neden": self.sablon_neden} if self.sablon and self.sablon_neden else {}   # Baslat'ta secilen tur
         self.motor = Motor(klasor, self.baslik, tarih, self.terimler, katilimcilar,
                            self.ctx.get("gundem", ""), duzelt=self.duzelt, davet=self.ctx.get("davet"),
                            olay=lambda t, v: self.olay.emit(t, v),
                            kaynak="ses", ben=outlook.ben_adi(self.ayar),   # ayar bossa Outlook/Windows tam adi
-                           sablon=self.ayar.get("not_sablonu", "otomatik"),    # otomatik: davet konusu/metninden
+                           sablon=self.sablon or self.ayar.get("not_sablonu", "otomatik"),    # otomatik: davet konusu/metninden
                            esikler=self.ayar.get("esikler"),
-                           altyazi_yedek=bool(self.ayar.get("altyazi_yedek", False)))
+                           altyazi_yedek=bool(self.ayar.get("altyazi_yedek", False)), **secilen)
         self.olay.emit("log", f"Klasör: {klasor}")
         try:                                              # davet + onceki not terimleri bu serinin havuzuna (prompt icin)
             self.motor.terimleri_hazirla()

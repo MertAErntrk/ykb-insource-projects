@@ -126,3 +126,156 @@ def test_toplantiya_soru_ilgili_bolumu_secer(monkeypatch):
     cevap = llm.toplantiya_sor("MVP prototipini kim hazırlayacak?", bolumler, "Toplantı: x")
     assert "Selin Kara" in cevap and "MVP prototipini" in goren["icerik"]
     assert "Kampanya takvimi" not in goren["icerik"]
+
+
+# ---------- C3: konu etiketleri (KC3: Konu sutunu HER ZAMAN sonda, '[konu: X]' damgasi) ----------
+NOT_ALTI_SUTUN = """# Haftalık — 2026-10-12
+
+## Özet
+Özet.
+
+## Kararlar
+- Bütçe onaylandı [konu: Veri Ambarı] ⏱10:02:00
+- Takvim kaydı [konu: Yapay Zekâ] ⏱10:09:10
+
+## Aksiyonlar
+| # | Madde | Sorumlu | Tarih | Kaynak | Konu |
+|---|---|---|---|---|---|
+| 1 | Şemayı hazırlamak | Selin Kara | 2026-10-20 | ⏱10:02:00 | Veri Ambarı |
+| 2 | Model karşılaştırmak | Emre Sancak (?) | - | ⏱10:05:30 | Yapay Zekâ |
+| 3 | Yedek planı yazmak | belirsiz | - | - | - |
+"""
+NOT_ESKI_BES_SUTUN = """## Aksiyonlar
+| # | Madde | Sorumlu | Tarih | Kaynak |
+|---|---|---|---|---|
+| 1 | Şemayı hazırlamak | Selin Kara | 2026-10-20 | ⏱10:02:00 |
+"""
+
+
+def test_aksiyon_ayikla_konu_sutunu_adla():
+    aks = not_araclari.aksiyonlari_ayikla(NOT_ALTI_SUTUN)
+    assert [a["konu"] for a in aks] == ["Veri Ambarı", "Yapay Zekâ", None]       # '-' -> None
+    assert aks[0]["madde"] == "Şemayı hazırlamak" and aks[0]["kaynak"] == "⏱10:02:00"
+    assert aks[1]["sahip"]["durum"] == "belirsiz" and aks[2]["sahip"]["durum"] == "yok"
+
+
+def test_aksiyon_ayikla_eski_bes_sutun_ve_basliksiz():
+    aks = not_araclari.aksiyonlari_ayikla(NOT_ESKI_BES_SUTUN)
+    assert len(aks) == 1 and aks[0]["konu"] is None and aks[0]["kaynak"] == "⏱10:02:00"
+    basliksiz = "## Aksiyonlar\n| 1 | İş A | Selin Kara | 2026-10-20 | ⏱10:02:00 | Veri Ambarı |\n| 2 | İş B | Emre | - |\n"
+    aks = not_araclari.aksiyonlari_ayikla(basliksiz)
+    assert [a["madde"] for a in aks] == ["İş A", "İş B"] and aks[0]["konu"] == "Veri Ambarı" and aks[1]["konu"] is None
+    assert aks[1]["kaynak"] == ""
+
+
+def test_aksiyon_ayikla_sutun_sirasi_serbest_ve_damga_siyrilir():
+    md = ("## Aksiyonlar\n| # | Konu | Madde | Sorumlu | Tarih |\n|---|---|---|---|---|\n"
+          "| 1 | Bütçe | Teklif almak [konu: Satın alma] | Selin Kara | - |\n"
+          "| 2 | - | Rapor yazmak [konu: Satın alma] | Selin Kara | - |\n")
+    aks = not_araclari.aksiyonlari_ayikla(md)
+    assert aks[0]["madde"] == "Teklif almak" and aks[0]["konu"] == "Bütçe"        # Konu hucresi damgadan once gelir
+    assert aks[1]["madde"] == "Rapor yazmak" and aks[1]["konu"] == "Satın alma"   # hucre bos -> damga
+
+
+def test_durum_sablonu_tek_duz_aksiyon_tablosu():
+    md = """# Durum — 2026-10-12
+
+## Konular
+### Veri Ambarı
+Durum: Şema tamam. Risk: Takvim sıkışık.
+#### Kararlar
+- Şema onaylandı ⏱10:02:00
+### Genel
+#### Açık sorular
+- Bütçe kimde?
+
+## Aksiyonlar
+| # | Madde | Sorumlu | Tarih | Kaynak | Konu |
+|---|---|---|---|---|---|
+| 1 | Şemayı yayınlamak | Selin Kara | - | ⏱10:02:00 | Veri Ambarı |
+| 2 | Bütçeyi sormak | Emre Sancak | - | - | - |
+"""
+    aks = not_araclari.aksiyonlari_ayikla(md)
+    assert [a["madde"] for a in aks] == ["Şemayı yayınlamak", "Bütçeyi sormak"]
+    assert [a["konu"] for a in aks] == ["Veri Ambarı", None]
+    assert not_araclari.aksiyon_sirasini_yenile(md).count("| 1 |") == 1
+
+
+def test_kisiye_gore_yenile_konuyu_gosterir_ve_adi_korur():
+    md = ("## Aksiyonlar\n| # | Madde | Sorumlu | Tarih | Kaynak | Konu |\n|---|---|---|---|---|---|\n"
+          "| 1 | A işi | Selin Kara | - | - | Veri Ambarı |\n| 2 | B işi | Selin Kara | - | - | - |\n"
+          "| 3 | C işi | Emre Sancak | - | - | Yapay Zekâ |\n| 4 | D işi | Emre Sancak | - | - | - |\n")
+    yeni = not_araclari.kisiye_gore_yenile(md)
+    assert "## Aksiyonlar" in yeni and "## Kişiye göre iş listesi" in yeni
+    assert "- Selin Kara (2): A işi [konu: Veri Ambarı]; B işi" in yeni
+    assert "C işi [konu: Yapay Zekâ]" in yeni
+    assert [a["konu"] for a in not_araclari.aksiyonlari_ayikla(yeni)] == ["Veri Ambarı", None, "Yapay Zekâ", None]
+    # ikinci kez calistirmak bolumu cogaltmaz
+    assert not_araclari.kisiye_gore_yenile(yeni).count("## Kişiye göre iş listesi") == 1
+
+
+def test_jira_labels_konu_slug(tmp_path):
+    aks = not_araclari.aksiyonlari_ayikla(NOT_ALTI_SUTUN)
+    yol = tmp_path / "a.csv"
+    assert not_araclari.jira_csv(aks, str(yol), "Haftalık (2026-10-12)") == 3
+    import csv
+    with open(yol, encoding="utf-8-sig", newline="") as f:
+        satirlar = list(csv.reader(f))
+    assert satirlar[0][-1] == "Labels" and satirlar[0][:5] == not_araclari.JIRA_BASLIKLAR
+    assert [s[-1] for s in satirlar[1:]] == ["veri-ambari", "yapay-zeka", ""]       # ASCII, bosluk -> '-', bos serbest
+    assert all(" " not in s[-1] for s in satirlar[1:])
+    assert satirlar[1][1] == "Selin Kara" and satirlar[2][1] == ""                  # sahip kurali degismez
+    assert not_araclari.konu_etiketi("Satın Alma / Tedarik") == "satin-alma-tedarik"
+
+
+def test_jira_konu_yoksa_eski_baslik(tmp_path):
+    aks = not_araclari.aksiyonlari_ayikla(NOT_ESKI_BES_SUTUN)
+    yol = tmp_path / "b.csv"
+    not_araclari.jira_csv(aks, str(yol))
+    ilk = yol.read_text(encoding="utf-8-sig").splitlines()[0]
+    assert ilk == "Summary,Assignee,Due Date,Description,Issue Type"                # konu yoksa sutun eklenmez
+
+
+def test_word_baslik_seviyeleri_ve_damga(tmp_path):
+    md = ("# Durum\n\n## Konular\n### Veri Ambarı\nDurum: İyi. Risk: Yok.\n#### Kararlar\n- Şema onaylandı\n"
+          "#### Açık sorular\n- Bütçe kimde? [konu: Veri Ambarı] ⏱10:02:00\n\n## Aksiyonlar\n"
+          "| # | Madde | Sorumlu | Tarih | Kaynak | Konu |\n|---|---|---|---|---|---|\n"
+          "| 1 | Şema | Selin Kara | - | - | Veri Ambarı |\n")
+    yol = not_araclari.word_kaydet(md, str(tmp_path / "d.docx"))
+    import docx
+    belge = docx.Document(yol)
+    seviye = {p.text: p.style.name for p in belge.paragraphs if p.style.name.startswith("Heading")}
+    assert seviye["Konular"] == "Heading 1" and seviye["Veri Ambarı"] == "Heading 3"
+    assert seviye["Kararlar"] == "Heading 4" and seviye["Açık sorular"] == "Heading 4"
+    metin = "\n".join(p.text for p in belge.paragraphs)
+    assert "[konu:" not in metin and "Bütçe kimde? (Konu: Veri Ambarı) ⏱10:02:00" in metin
+    assert len(belge.tables) == 1 and [c.text for c in belge.tables[0].rows[0].cells][-1] == "Konu"
+
+
+def test_epostada_konu_gorunur():
+    e = not_araclari.kisiye_ozel_epostalar(NOT_ALTI_SUTUN, "Haftalık", "2026-10-12")
+    assert [x[0] for x in e] == ["Selin Kara"]
+    assert "- Şemayı hazırlamak (tarih: 2026-10-20) (konu: Veri Ambarı)" in e[0][2]
+
+
+def test_ara_konu_damgasini_gostermez(tmp_path):
+    k = _klasor(tmp_path)
+    (k / "not.md").write_text(NOT_ALTI_SUTUN, encoding="utf-8")
+    sonuc = [x for x in not_araclari.ara("bütçe onaylandı", kok=str(tmp_path / "toplantilar")) if x["tur"] == "not"]
+    assert sonuc and "[konu:" not in sonuc[0]["metin"] and sonuc[0]["ts"] == "10:02:00"
+
+
+def test_sablon_canli_satirlari_konu_durumlari():
+    satirlar = not_araclari.sablon_canli_satirlari(
+        {"konu_durumlari": [{"konu": "Veri Ambarı", "durum": "Şema tamam", "risk": "Takvim sıkışık"},
+                            {"konu": "", "durum": "Genel akış iyi", "risk": ""}]})
+    assert satirlar == [("Konu durumu", "Veri Ambarı: Şema tamam (risk: Takvim sıkışık)"),
+                        ("Konu durumu", "Genel: Genel akış iyi")]
+    assert not_araclari.sablon_canli_satirlari({"konu_durumlari": []}) == []
+    assert not_araclari.sablon_canli_satirlari({}) == []                        # diger sablonlar etkilenmez
+
+
+def test_konu_damgasi_tek_regex():
+    from metin import KONU_DAMGASI
+    assert KONU_DAMGASI.sub("", "Karar [konu: Veri Ambarı] ⏱10:02:00") == "Karar ⏱10:02:00"
+    assert KONU_DAMGASI.search("x [konu:  Yapay Zekâ ]").group(1).strip() == "Yapay Zekâ"
