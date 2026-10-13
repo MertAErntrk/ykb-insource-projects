@@ -29,3 +29,5 @@ test.wav
 servis_kesfet_cikti.txt
 servis_kesfet_llm_cikti.txt
 stt_kesfet_cikti.txt
+# oturum devir notu: yerel calisma notu, repoya girmez
+docs/DEVIR_NOTU.md

@@ -308,6 +308,12 @@ class Pencere(QtWidgets.QMainWindow):
         self.kapsama_serit.setWordWrap(True)
         self.kapsama_serit.hide()
         sol.addWidget(self.kapsama_serit)
+        self._kapsama_serit_metni = self.kapsama_serit.text()
+        self.atama_serit = QtWidgets.QLabel("Konuşmacı atanamıyor — altyazı okunuyor ama konuşmalarla eşleşmiyor; "
+                                            "panel yeniden aranıyor, gecikme yeniden ölçülüyor.", objectName="uyari")
+        self.atama_serit.setWordWrap(True)
+        self.atama_serit.hide()
+        sol.addWidget(self.atama_serit)
         self.akis = QtWidgets.QTextBrowser()
         self.akis.setOpenExternalLinks(False)
         sol.addWidget(self.akis, 1)
@@ -1037,6 +1043,7 @@ class Pencere(QtWidgets.QMainWindow):
         self._akis_satirlari = []
         self.stt_serit.hide()
         self.kapsama_serit.hide()
+        self.atama_serit.hide()
         self.ses_serit.hide()
         self._ses_uyarilari = {}
         self.mik_etiket.hide()
@@ -1120,7 +1127,11 @@ class Pencere(QtWidgets.QMainWindow):
         ek = ""
         if v.get("kaynak") == "altyazi-yedek":
             ek = ' <span style="color:#94A3B8;font-size:10px">[altyazıdan, düşük güven]</span>'
-        elif v.get("supheli"):                      # halusinasyon supheli: soluk, nota girmez
+        elif v.get("supheli_neden") == "cizelge":   # altyazi canliyken etkinlik yok: soluk ama nota 'Bilinmeyen' girer
+            ek = (' <span style="color:#94A3B8;font-size:10px" title="Altyazı canlıyken bu aralıkta etkinlik yok; '
+                  'nota Bilinmeyen olarak girer">[şüpheli — Bilinmeyen girer]</span>')
+            metin = f'<span style="color:#94A3B8" title="Altyazı canlıyken etkinlik yok; nota Bilinmeyen olarak girer">{metin}</span>'
+        elif v.get("supheli"):                      # icsel halusinasyon supheli: soluk, nota girmez
             ek = ' <span style="color:#94A3B8;font-size:10px">[şüpheli — nota girmez]</span>'
             metin = f'<span style="color:#94A3B8">{metin}</span>'
         return f'<span style="color:#94A3B8;font-size:11px">{ts}</span> {kim_html}{ek}: {metin}'
@@ -1194,7 +1205,20 @@ class Pencere(QtWidgets.QMainWindow):
                 self.ses_serit.setText(metin)
                 self.ses_serit.setVisible(bool(metin))
         elif tip == "kapsama":                        # konusmaci bilgisi 60 sn'den uzun yok / geri geldi
-            self.kapsama_serit.setVisible(not (v or {}).get("var", True))
+            v = v or {}
+            mesaj = v.get("mesaj")                    # neden: panel_donuk / okuma_yok / altyazi kapali
+            self.kapsama_serit.setText(f"Konuşmacı bilgisi yok — {mesaj}; konuşmacılar 'Bilinmeyen' yazılıyor."
+                                       if mesaj and not v.get("var", True) else self._kapsama_serit_metni)
+            self.kapsama_serit.setVisible(not v.get("var", True))
+        elif tip == "atama":                          # son 2 dk'da kapsamali kararlarin >= %60'i '?' / duzeldi
+            oran = (v or {}).get("oran")
+            if not (v or {}).get("var", True) and (v or {}).get("mesaj"):      # olcut: soru | kesin_az | gecikme
+                self.atama_serit.setText(str(v["mesaj"]) + ".")
+            elif not (v or {}).get("var", True) and isinstance(oran, (int, float)):
+                self.atama_serit.setText(f"Konuşmacı atanamıyor — altyazı okunuyor ama konuşmalarla eşleşmiyor "
+                                         f"(son 2 dk %{int(round(oran * 100))} Bilinmeyen); panel yeniden aranıyor, "
+                                         "gecikme yeniden ölçülüyor.")
+            self.atama_serit.setVisible(not (v or {}).get("var", True))
         elif tip == "log":
             self.log(v)
             if "yakalama başladı" in str(v) and self.baslangic is None:

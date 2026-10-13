@@ -10,7 +10,10 @@ Akis (Faz 1-2, docs/MIMARI_v3.md §3-5):
                               degisiklik YOK] -> ozet (kapanis bekleyen kararlari en fazla KAPANIS_BEKLE_SN bekler)
        bitir()             -> bekleyen kararlar zorlanir, son parcayi kapatir, ozetleri bekler, terim ogrenmesi
                               (terim.TerimHavuzu.ogren), belirsizler() listesini verir (onay akisi YOK)
-       notu_uret()         -> birlestirme -> sorumlu dogrulama -> dayanak kontrolu -> not.md (supheli satirlar girmez)
+       notu_uret()         -> birlestirme -> sorumlu dogrulama -> dayanak kontrolu -> not.md (icsel supheli satirlar girmez;
+                              zaman cizelgesi suphesi 'cizelge' icerigi dusurmez: nota 'Bilinmeyen:' etiketiyle girer)
+       kancalar (isler/yakalayici): son_loopback_ses() (panel canliligi), olay_kaydet(mesaj, **ek) (log + olaylar.jsonl),
+                              yeniden_bul_fn (atama basarisizsa panel yeniden aranir; kontrol() -> _atama_denetle)
        yeniden_ozetle()    -> (Gecmis) TUM parcalar yeniden duzeltme (yalniz 'raw'i olan satirlar) + ozet
        ses_olayi(uzun)     -> Faz 3 (config uzun_pencere): uzun pencere metni klip satirina (raw/text; raw_kisa = kisa metin,
                               uyusmayan kelimeler 'belirsiz', notta ⟨⟩); konusmaci degismez. Parca kapanisi sonucu en fazla
@@ -22,7 +25,8 @@ Disk (toplantilar/<tarih>_<slug>/): meta.json, altyazi.jsonl (satir v2 + {'gunce
 olay(tip, veri) geri cagrisi: "satir" (yeni satir, konusmaci beklemede), "satir_guncelle" (satirin tamami + "gorunen":
        konusmaci karari geldi), "satir_sil" ({"id", "neden"}: yanki klibi atildi), "satir_degistir" ({"eski_id",
        "yeni": [satir, ...]}: yeniden kesilen klibin satiri parcalariyla degisti), "altyazi_izi" (canli altyazi
-       gorunumu; transkripte girmez), "kapsama" ({"var", "bas"}: konusmaci bilgisi 60 sn'den uzun yok / geri geldi),
+       gorunumu; transkripte girmez), "kapsama" ({"var", "bas"[, "neden", "mesaj"]}: konusmaci bilgisi 60 sn'den uzun yok / geri geldi),
+       "atama" ({"var", "oran", "bas"}: son 2 dk'da kapsamali kararlarin >= %60'i '?' / duzeldi),
        "stt_bosluk", "parca_kapandi", "parca_ozetlendi", "log",
        "adim" ({"metin", "no", "toplam"}: not uretiminin/yeniden ozetlemenin o anki asamasi; arayuz seridi)
 Gosterim: konusmaci adi her yuzeyde metin.gorunen_ad ile yazilir ("Ad?", "Bilinmeyen", "A / B (aynı anda)").
@@ -48,7 +52,8 @@ import uzun as uzun_mod
 from kelime import normalize
 from konusmaci import Konusmaci
 from metin import ad_geciyor, cift_yonlu_benzerlik, gorunen_ad, kesin_ad_mi, tr_kucuk
-from stt import hal_esik
+from metin import nota_girer as metin_nota_girer
+from stt import CIZELGE_PUANI, hal_esik       # CIZELGE_PUANI: tek sabit stt.py'de (0.3)
 
 KOK = "toplantilar"
 SURUM = 2                       # satir veri modeli (MIMARI_v3 §3); surumsuz kayitlar yuklenirken goc eder
@@ -64,7 +69,16 @@ UZUN_BEKLE_SN = 20              # Faz 3: parca kapanisi kapsadigi araligin uzun 
 GEC_KESIM_TAVAN = 500           # suresi dolmus (parcasi eksik) kesimlerde gec parca icin tutulan en fazla kayit
 OZET_YENI_SN = 10               # kapanmis parcaya gec satir girdiyse yeniden ozet bu kadar sessizlikten sonra
 KAPSAMA_UYARI_SN = 60           # konusmaci bilgisi (altyazi cizelgesi) bu kadar yoksa arayuz uyarir
-CIZELGE_PUANI = 0.6             # stt.halusinasyon_puani cizelge kurali agirligi (testte stt ile esitligi sinanir)
+ATAMA_PENCERE_SN = 120          # atama denetimi: son bu kadar sn'nin loopback kararlari
+ATAMA_EN_AZ = 10                # ... en az bu kadar kapsamali karar ve
+ATAMA_ORAN = 0.60               # ... en az bu payi '?' ise uyari (CIZELGE_PUANI: stt.py ile tek sabit, testte esitligi sinanir)
+ATAMA_TEMIZ_ORAN = 0.30         # '?' payi bunun altina inerse uyari kalkar
+ATAMA_KESIN_ORAN = 0.30         # M2: kapsamali kararlarin kesin ad payi bunun altindaysa uyari ('kesin_az': yanlis adlarla
+                                #     dolu cokuste '?' payi dusuk kalir); kesin pay bunun 2 katina cikinca kalkar
+ATAMA_GECIKME_SN = 10.0         # konusmaci dogrulanmis L'yi supheli (capraz ilinti farkli gecikme) bildirip bu kadar
+                                #     surerse uyari (gecikme sicradi: kararlar 'Ad?', L yeniden olculuyor)
+ATAMA_YAPISAL = ("capa_az", "kisa", "L_basamak", "L_supheli", "L_onaysiz", "eksik", "bosluk", "kaba", "gec", "mad")
+                                # ... kesin_az olcutunde sayilmayan (yapisal / gecici tavanli) karar nedenleri
 YEDEK_GUVEN = 0.6               # altyazi yedegi satirinin spk_guven'i (gosterim 'Ad?', sahip uretmez)
 ESKI_GUVEN = 0.5                # v2 oncesi kayitlarin spk_guven'i (goc)
 KLIP_TAVAN = 5000               # klip_no -> satir eslemesinde tutulan en fazla kayit
@@ -762,6 +776,8 @@ def _ts(epoch):
 
 def _konusan(s):
     """Transkriptte yazilan konusmaci: gosterim kurali (+ altyazi yedegi isareti)."""
+    if s.get("supheli_neden") == "cizelge":
+        return "Bilinmeyen"                              # konusmaci karari ne olursa olsun: cizelge suphesi etiket zorlar
     ad = gorunen_ad(s)
     if s.get("kaynak") == "altyazi-yedek":
         ad += " (altyazıdan, düşük güven)"
@@ -769,9 +785,11 @@ def _konusan(s):
 
 
 def nota_girer(s):
-    """Satir nota / ozete / dayanaga girer mi? Halusinasyon supheli satirlar girmez (canlı ekranda soluk gorunur,
-    transkriptte kalir); altyazi yedegi 'supheli' isaretlidir ama bilincli olarak '(altyazıdan, düşük güven)' ile girer."""
-    return not (s.get("supheli") and s.get("kaynak") != "altyazi-yedek")
+    """Satir nota / ozete / dayanaga girer mi? Icsel halusinasyon supheli ('ic') satirlar girmez (canlı ekranda soluk
+    gorunur, transkriptte kalir); altyazi yedegi 'supheli' isaretlidir ama bilincli olarak '(altyazıdan, düşük güven)'
+    ile girer. Zaman cizelgesi suphesi ('cizelge': altyazi canliyken etkinlik yok) icerigi dusurmez: nota girer, yalniz
+    'Bilinmeyen' etiketiyle (sahip / kesin ad uretmez). Kural metin.nota_girer'de (rag.py ayni kurali kullanir)."""
+    return metin_nota_girer(s)
 
 
 SARMAL_AC, SARMAL_KAPA = "⟨", "⟩"      # belirsiz metin isareti: karar/aksiyon/sayi/tarih bunun icinden uretilmez
@@ -828,7 +846,8 @@ def satir_metni(s):
 
 def blok_metni(satirlar):
     """Transkript blogu (LLM girdisi, dayanak kontrolu): her satir 'gorunen_ad: metin'. Ardisik ayni konusmaci
-    tek satirda birlesir. cakisma satirlari ⟨⟩ icinde; supheli (halusinasyon) satirlar girmez."""
+    tek satirda birlesir. cakisma satirlari ⟨⟩ icinde; supheli (icsel halusinasyon) satirlar girmez, cizelge suphesi
+    olanlar 'Bilinmeyen:' etiketiyle girer."""
     birlesik = []
     for s in satirlar:
         if not nota_girer(s):
@@ -943,6 +962,14 @@ class Motor:
         self._yedek_son = {}                 # (konusmaci, metin) -> altyazi yedegi satir id'si (buyuyen satir)
         self._kapsama_yok_bas = None
         self._kapsama_uyarildi = False
+        self._atama_halka = OrderedDict()    # klip_no -> (karar ani, '?' mi, kapsama): son ATAMA_PENCERE_SN loopback kararlari
+        self._atama_uyarildi = False         # B5: 'konusmaci atanamiyor' uyarisi acik
+        self._atama_son = None               # son uyari / yeniden deneme ani (ATAMA_PENCERE_SN beklenir)
+        self._atama_olcut = None             # acik uyarinin olcutu: soru | kesin_az | gecikme
+        self._gecikme_supheli_bas = None     # konusmaci durum()['L_supheli'] ilk gorulme ani
+        self.yeniden_bul_fn = None           # isler: Yakalayici.yeniden_bul() -> atama basarisizsa panel yeniden aranir
+        self._lb_ses_bit = None              # son loopback klibinin sesli bitisi (epoch): yakalayici panel canliligi icin
+        self._lb_sesli = []                  # K1b: suzgeci gecen (supheli olmayan) loopback kliplerinin [bas, bit] araliklari
         self.ses_olay_sayisi = 0             # gelen klip/bosluk olayi (isler: 'yakalama basladi')
         self.havuz = cf.ThreadPoolExecutor(max_workers=paralel())
         self.isler = []
@@ -966,6 +993,43 @@ class Motor:
     # ---------- olay/log ----------
     def log(self, m):
         self._olay("log", m)
+
+    def olay_kaydet(self, mesaj, **ek):
+        """Log (Olaylar paneli) + olaylar.jsonl: {"tur": "log", "kaynak": "yakalayici", "mesaj", **ek}. Yakalayici
+        (log_fn) ve atama denetimi kullanir; alan metin icermez (ad / konusma yok). Hata yutulur."""
+        self.log(mesaj)
+        kayit = {"tur": "log", "kaynak": "yakalayici", "mesaj": str(mesaj)}
+        kayit.update(ek)
+        self._konusmaci_olayi(kayit)
+
+    def son_loopback_ses(self):
+        """Son loopback klibinin SESLI bitisi (epoch) | None: yakalayici bu aralikta hoparlorde konusma var mi diye
+        bakar (altyazi paneli donmus mu?). Klip olayi yolunda (ses_olayi) guncellenir; yalniz icsel halusinasyon
+        suzgecini gecen (supheli olmayan, hal_ic < hal_at) klipler sayilir (K1b)."""
+        return self._lb_ses_bit
+
+    def loopback_konusma_sn(self, bas_epoch):
+        """K1b: bas_epoch'tan bu yana hoparlorde SESLI loopback konusmasi (sn; suzgeci gecen kliplerin birlesimi).
+        Yakalayici panel donukluguna karar verirken tek kisa halusinasyon klibiyle degil, >= DONUK_SES_SN konusmayla
+        tetiklenir."""
+        try:
+            bas = float(bas_epoch)
+        except (TypeError, ValueError):
+            return 0.0
+        top, ux, uy = 0.0, None, None
+        for a, b in self._lb_sesli:
+            a, b = max(a, bas), b
+            if b <= a:
+                continue
+            if ux is None or a > uy:
+                if ux is not None:
+                    top += uy - ux
+                ux, uy = a, b
+            elif b > uy:
+                uy = b
+        if ux is not None:
+            top += uy - ux
+        return round(top, 3)
 
     def adim(self, metin, no=None, toplam=None):
         """Uzun islerin (not uretimi, yeniden ozetleme) asamasi: arayuz ilerleme seridine yazar."""
@@ -1156,6 +1220,19 @@ class Motor:
             self.log("  · geçersiz klip olayı atlandı")
             return None
         akis = olay.get("akis") or "loopback"
+        hal_ic = olay.get("hal_puani")
+        hal_ic = float(hal_ic) if isinstance(hal_ic, (int, float)) and not isinstance(hal_ic, bool) else 0.0
+        if (akis == "loopback" and (olay.get("text") or "").strip() and not olay.get("supheli")
+                and hal_ic < hal_esik(self._hal_esikler, "hal_at")):
+            # K1/K1b: son_loopback_ses() / loopback_konusma_sn(): yalniz icsel suzgeci gecen klip (halusinasyon klibi
+            # sessiz panelde sahte 'donuk' tetiklemesin)
+            self._lb_ses_bit = max(self._lb_ses_bit or 0.0, bit)
+            if self._lb_sesli and bas < self._lb_sesli[-1][0]:
+                self._lb_sesli.append([bas, bit])
+                self._lb_sesli.sort()
+            else:
+                self._lb_sesli.append([bas, bit])
+            del self._lb_sesli[:-400]
         # kesinti sonrasi gec cozulen klip: ayni araligin boslugu artik eksik degil
         self._bosluklar = [x for x in self._bosluklar if not (x[0] == akis and x[1] < bit + 0.5 and x[2] > bas - 0.5)]
         self.konusmaci.klip_ekle(dict(olay, klip_no=no, akis=akis, bas=bas, bit=bit))
@@ -1185,14 +1262,17 @@ class Motor:
     def _yeni_satir(self, klip_no, akis, bas, bit, raw, ts=None, supheli=False, kaynak="ses", hal_puani=None,
                     rms=None):
         """text = raw: duzeltme parca kapaninca duzelt.duzelt kapisindan gecer (metne kor degisiklik yok).
-        hal_puani/rms: ses.py halusinasyon puani ve sesli aralik RMS'i (cizelge kuraliyla yeniden puanlama icin)."""
+        hal_puani/rms: ses.py halusinasyon puani ve sesli aralik RMS'i; hal_puani satirda hal_ic olarak da saklanir
+        (cizelge kurali yalniz hal_puani'ni oynatir, hal_ic degismez)."""
         self._satir_no += 1
         satir = {"surum": SURUM, "id": self._satir_no, "klip_no": klip_no, "akis": akis,
                  "bas": round(bas, 3), "bit": round(bit, 3), "ts": ts or _ts(bas), "raw": raw, "text": raw,
                  "speaker": "?", "spk_guven": 0.0, "adaylar": [], "devir": False, "cakisma": False,
                  "supheli": supheli, "belirsiz": [], "duzeltmeler": [], "kaynak": kaynak, "durum": "beklemede"}
         if isinstance(hal_puani, (int, float)) and not isinstance(hal_puani, bool):
-            satir["hal_puani"] = round(float(hal_puani), 4)
+            satir["hal_puani"] = satir["hal_ic"] = round(float(hal_puani), 4)    # hal_ic: ses.py icsel puani (silme yalniz bundan)
+        if supheli and kaynak == "ses":
+            satir["supheli_neden"] = "ic"
         if isinstance(rms, (int, float)) and not isinstance(rms, bool):
             satir["rms"] = round(float(rms), 5)
         return satir
@@ -1339,28 +1419,58 @@ class Motor:
         except (TypeError, ValueError, IndexError):
             return None
 
+    @staticmethod
+    def _hal_ic(satir):
+        """Satirin icsel halusinasyon puani (ses.py): hal_ic, yoksa ilk hal_puani; yoksa 0."""
+        for ad in ("hal_ic", "hal_puani"):
+            v = satir.get(ad)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+        return 0.0
+
     def _cizelge_puanla(self, satir, k):
-        """Atama sonrasi halusinasyon yeniden puani (MIMARI_v3 §4 'cizelge kurali'): altyazi saglikliyken klip
-        araliginda hic etkinlik yoksa +0.6. Dondurur 'at' (>= hal_at) | 'supheli' (>= hal_supheli) | None.
-        Yalniz ses klipleri (kaynak 'ses'); ses.py cizelge_fn verilmediginden taban puan kurali icermez."""
-        if satir.get("kaynak") != "ses" or satir.get("cizelge_etkin") is False or self.cizelge_etkin(k) is not False:
-            return None                                  # (ikinci karar -- bolunemedi vb. -- puani tekrar artirmaz)
-        taban = satir.get("hal_puani")
-        taban = float(taban) if isinstance(taban, (int, float)) and not isinstance(taban, bool) else 0.0
-        puan = round(min(1.0, taban + CIZELGE_PUANI), 4)
-        satir["hal_puani"], satir["cizelge_etkin"] = puan, False
-        if puan >= hal_esik(self._hal_esikler, "hal_at"):
+        """Atama sonrasi halusinasyon yeniden puani (cizelge kurali). SILME yalniz icsel puandan (hal_ic >= hal_at):
+        zaman cizelgesi klibi asla silmez. Cizelge suphesi ('supheli_neden' = 'cizelge') ancak sunlarin hepsinde:
+        karar cizelge_canli (altyazi canli, panel donuk degil, klip altyazi zamanindan sonra degismis), cizelge_etkin
+        False (aralikta etkinlik yok), hal_ic >= hal_cizelge_taban ve hal_ic + CIZELGE_PUANI >= hal_supheli. Kapsama
+        yok / panel_donuk kararlari (cizelge_etkin None) asla supheli yapmaz. Etkinlik sonradan gelirse (gec yukseltme)
+        cizelge suphesi kalkar, hal_puani = hal_ic, cizelge_etkin anahtari silinir.
+        Dondurur 'at' | dict (kalici alanlara eklenecek degisiklik; {} ise yok) | None (ses klibi degil)."""
+        if satir.get("kaynak") != "ses":
+            return None
+        ic = self._hal_ic(satir)
+        if ic >= hal_esik(self._hal_esikler, "hal_at"):
             return "at"
-        if puan >= hal_esik(self._hal_esikler, "hal_supheli"):
-            satir["supheli"] = True
-            return "supheli"
-        return None
+        etkin = self.cizelge_etkin(k)
+        if etkin is True:                                # gec yukseltme: altyazida etkinlik bulundu
+            if satir.get("cizelge_etkin") is not False:
+                return {}
+            satir.pop("cizelge_etkin", None)
+            degisim = {"cizelge_etkin": None}
+            if satir.get("supheli_neden") == "cizelge":
+                satir["supheli"], satir["hal_puani"] = False, round(ic, 4)
+                satir.pop("supheli_neden", None)
+                degisim.update(supheli=False, supheli_neden=None, hal_puani=round(ic, 4))
+            return degisim
+        if (etkin is not False or satir.get("cizelge_etkin") is False or not k.get("cizelge_canli")
+                or k.get("neden") in ("panel_donuk", "kapsama_yok")):
+            return {}                                    # (ikinci karar -- bolunemedi vb. -- tekrar saymaz)
+        satir["cizelge_etkin"] = False
+        degisim = {"cizelge_etkin": False}
+        if (not satir.get("supheli") and ic >= hal_esik(self._hal_esikler, "hal_cizelge_taban")
+                and ic + CIZELGE_PUANI >= hal_esik(self._hal_esikler, "hal_supheli")):
+            puan = round(min(1.0, ic + CIZELGE_PUANI), 4)
+            satir.update(supheli=True, supheli_neden="cizelge", hal_puani=puan)
+            degisim.update(supheli=True, supheli_neden="cizelge", hal_puani=puan, speaker="?", spk_guven=0.0,
+                           devir=False, cakisma=False)
+        return degisim
 
     def _karar_uygula(self, k):
         satir = self._klip_satir.get(k.get("klip_no"))
         if satir is None or satir["id"] in self._silinen:
             return
         yer = self._satir_bul(satir["id"])
+        self._atama_kaydet(k)
         hal = None if k.get("at") else self._cizelge_puanla(satir, k)
         if k.get("at") or hal == "at":
             neden = (k.get("neden") or "yanki") if k.get("at") else "halusinasyon"
@@ -1384,11 +1494,13 @@ class Motor:
                 "adaylar": [list(a) for a in (k.get("adaylar") or [])], "devir": bool(k.get("devir")),
                 "cakisma": bool(k.get("cakisma")), "kimlik_turu": k.get("kimlik_turu"),
                 "kapsama": bool(k.get("kapsama", True)), "spk_neden": k.get("neden"), "durum": "karar"}
+        if hal:
+            alan.update(hal)                             # cizelge_etkin / supheli (cizelge) / hal_puani degisimleri
         satir.update(alan)
-        if hal is not None:                              # cizelge kurali satiri supheli yapti: kalici + canli soluk
-            alan.update(supheli=satir["supheli"], hal_puani=satir["hal_puani"], cizelge_etkin=False)
-            self.log(f"  · şüpheli klip ({satir['ts']}): altyazıda etkinlik yok, halüsinasyon puanı "
-                     f"{satir['hal_puani']:.2f}; nota girmez")
+        for ad in [a for a, v in alan.items() if v is None and a in ("cizelge_etkin", "supheli_neden")]:
+            satir.pop(ad, None)                          # kalkan alanlar bellekte anahtar olarak da silinir
+        if hal and hal.get("supheli_neden") == "cizelge":    # altyazi canliyken etkinlik yok: nota 'Bilinmeyen' girer
+            self.log(f"  · şüpheli klip ({satir['ts']}): altyazı canlıyken etkinlik yok; nota Bilinmeyen olarak girer")
         if kesin_ad_mi(satir) and satir["speaker"] not in self.katilimcilar:
             self.katilimcilar.append(satir["speaker"])   # "?", "Ad?", birlesik adlar, oda/genel girmez
         if yer is None:
@@ -1600,9 +1712,13 @@ class Motor:
         return out
 
     def _kapsama_denetle(self, simdi):
-        """Konusmaci kapsamasi (altyazi okumasi) KAPSAMA_UYARI_SN'den uzun yoksa arayuze 'kapsama' olayi."""
+        """Konusmaci kapsamasi (altyazi okumasi) KAPSAMA_UYARI_SN'den uzun yoksa arayuze 'kapsama' olayi. Mesaj
+        konusmaci durumunun nedenine gore: panel_donuk (panel degismiyor), okuma_yok (okuma dongusu duraklamis),
+        digerleri (altyazi kapali / panel bulunamadi)."""
         try:
-            var = bool(self.konusmaci.durum().get("kapsama"))
+            d = self.konusmaci.durum()
+            var = bool(d.get("kapsama"))
+            neden = d.get("neden")
         except Exception:
             return
         if var:
@@ -1616,9 +1732,99 @@ class Motor:
             self._kapsama_yok_bas = simdi
         elif not self._kapsama_uyarildi and simdi - self._kapsama_yok_bas > KAPSAMA_UYARI_SN:
             self._kapsama_uyarildi = True
-            self._olay("kapsama", {"var": False, "bas": self._kapsama_yok_bas})
-            self.log("! Konuşmacı bilgisi yok: Teams altyazısı kapalı ya da okunamıyor — konuşmacılar "
-                     "'Bilinmeyen' yazılır")
+            if neden == "panel_donuk":
+                mesaj = "Teams altyazı paneli güncellenmiyor (pencere küçültülmüş/arka planda olabilir)"
+            elif neden == "okuma_yok":
+                mesaj = "altyazı okuma döngüsü duraklıyor"
+            else:
+                mesaj = "Teams altyazısı kapalı ya da okunamıyor"
+            self._olay("kapsama", {"var": False, "bas": self._kapsama_yok_bas, "neden": neden, "mesaj": mesaj})
+            self.log(f"! Konuşmacı bilgisi yok: {mesaj} — konuşmacılar 'Bilinmeyen' yazılır")
+
+    def _atama_kaydet(self, k):
+        """B5: loopback kararlarinin halkasi (klip_no -> (an, '?' mi, kapsama)); gec guncelleme ayni klibi degistirir."""
+        if k.get("at") or (k.get("akis") or "loopback") != "loopback" or k.get("klip_no") is None:
+            return
+        ek = set(str(k.get("neden") or "").split("+")[1:])
+        yapisal = bool(ek & set(ATAMA_YAPISAL)) or k.get("neden") in ("panel_donuk", "kapsama_yok")
+        kesin = kesin_ad_mi({"speaker": k.get("speaker"), "spk_guven": k.get("spk_guven"),
+                             "kimlik_turu": k.get("kimlik_turu")})
+        self._atama_halka[k["klip_no"]] = (saat.simdi(), (k.get("speaker") or "?") == "?", bool(k.get("kapsama", True)),
+                                           kesin, yapisal)
+        self._atama_halka.move_to_end(k["klip_no"])
+        while len(self._atama_halka) > 2000:
+            self._atama_halka.popitem(last=False)
+
+    def _atama_denetle(self, simdi):
+        """B5 atama basarisizligi: son ATAMA_PENCERE_SN'de >= ATAMA_EN_AZ kapsamali loopback kararinin >= %60'i '?'
+        (olcut 'soru': altyazi okunuyor ama konusmalarla eslesmiyor) ya da M2: kesin ad payi < ATAMA_KESIN_ORAN (olcut
+        'kesin_az': yanlis / belirsiz adlarla dolu cokuste '?' payi dusuk kalir) ya da konusmaci L'yi >= ATAMA_GECIKME_SN
+        supheli bildiriyor (olcut 'gecikme': capraz ilinti farkli gecikme goruyor) -> BIR KEZ 'atama' olayi + log, panel
+        yeniden aratilir (yeniden_bul_fn) ve gecikme yeniden olculur (konusmaci.L_yeniden_olc); hala bozuksa
+        ATAMA_PENCERE_SN sonra yeniden denenir. Uyari olcutune gore kalkar: '?' payi < %30 / kesin pay >= 2 x
+        ATAMA_KESIN_ORAN / L suphesi bitti."""
+        for no in [n for n, v in self._atama_halka.items() if simdi - v[0] > ATAMA_PENCERE_SN]:
+            del self._atama_halka[no]
+        kapsamali = [v for v in self._atama_halka.values() if v[2]]
+        n = len(kapsamali)
+        oran = (sum(1 for v in kapsamali if v[1]) / float(n)) if n else 0.0
+        # M2 kesin_az: yapisal tavanli (isinma, kisa klip, bosluk / kaba bant, L basamagi ...) kararlar disinda
+        temiz = [v for v in kapsamali if len(v) > 4 and not v[4]]
+        n_temiz = len(temiz)
+        kesin_oran = (sum(1 for v in temiz if v[3]) / float(n_temiz)) if n_temiz else 1.0
+        try:
+            L_supheli = bool(self.konusmaci.durum().get("L_supheli"))
+        except Exception:
+            L_supheli = False
+        if L_supheli:
+            if self._gecikme_supheli_bas is None:
+                self._gecikme_supheli_bas = simdi
+        else:
+            self._gecikme_supheli_bas = None
+        olcut = None
+        if n >= ATAMA_EN_AZ and oran >= ATAMA_ORAN:
+            olcut = "soru"
+        elif n_temiz >= ATAMA_EN_AZ and kesin_oran < ATAMA_KESIN_ORAN:
+            olcut = "kesin_az"
+        elif self._gecikme_supheli_bas is not None and simdi - self._gecikme_supheli_bas >= ATAMA_GECIKME_SN:
+            olcut = "gecikme"
+        sogumus = self._atama_son is None or simdi - self._atama_son >= ATAMA_PENCERE_SN
+        if self._atama_uyarildi and olcut is None and self._temiz_mi(n, oran, kesin_oran, L_supheli):
+            self._atama_uyarildi, self._atama_olcut = False, None
+            self._olay("atama", {"var": True, "oran": round(oran, 3), "kesin_oran": round(kesin_oran, 3), "bas": None})
+            self.log("konuşmacı ataması düzeldi")
+        elif olcut is not None and sogumus:
+            ilk_kez = not self._atama_uyarildi
+            self._atama_uyarildi, self._atama_son, self._atama_olcut = True, simdi, olcut
+            if olcut == "soru":
+                mesaj = (f"! Konuşmacı atanamıyor: altyazı okunuyor ama konuşmalarla eşleşmiyor "
+                         f"(son 2 dk %{int(round(oran * 100))} Bilinmeyen) — panel yeniden aranıyor, gecikme "
+                         "yeniden ölçülüyor")
+            elif olcut == "kesin_az":
+                mesaj = (f"! Konuşmacı ataması belirsiz: son 2 dk kararların yalnız %{int(round(kesin_oran * 100))}'i "
+                         "kesin — panel yeniden aranıyor, gecikme yeniden ölçülüyor")
+            else:
+                mesaj = ("! Altyazı gecikmesi değişmiş olabilir: konuşmacılar 'Ad?' yazılıyor — panel yeniden aranıyor, "
+                         "gecikme yeniden ölçülüyor")
+            self._olay("atama", {"var": False, "oran": round(oran, 3), "kesin_oran": round(kesin_oran, 3), "bas": simdi,
+                                 "olcut": olcut, "mesaj": mesaj.lstrip("! ")})
+            self.olay_kaydet(mesaj, kaynak="motor", olay="atama", olcut=olcut, oran=round(oran, 3),
+                             kesin_oran=round(kesin_oran, 3), karar_sayisi=n, tekrar=not ilk_kez)
+            for ad, fn in (("panel yeniden arama", self.yeniden_bul_fn),
+                           ("gecikme yeniden ölçümü", getattr(self.konusmaci, "L_yeniden_olc", None))):
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception as e:
+                        self.log(f"  ! {ad} başarısız: {e!r}")
+
+    def _temiz_mi(self, n, oran, kesin_oran, L_supheli):
+        """Acik atama uyarisi olcutune gore kalkar mi?"""
+        if self._atama_olcut == "kesin_az":
+            return kesin_oran >= 2.0 * ATAMA_KESIN_ORAN
+        if self._atama_olcut == "gecikme":
+            return not L_supheli
+        return n > 0 and oran < ATAMA_TEMIZ_ORAN
 
     def _bekliyor_mu(self, s):
         return s.get("durum") == "beklemede"
@@ -1633,6 +1839,7 @@ class Motor:
             for ust in [u for u, k in self._kesimler.items() if simdi >= k["son"]]:
                 self._kesim_tamamla(ust)
             self._kapsama_denetle(simdi)
+            self._atama_denetle(simdi)
             if self._ozet_kirli:
                 self._ozetleri_yenile(simdi)
             if self._kapanis is not None:
@@ -2180,7 +2387,7 @@ class Motor:
             for s in veri.get("satirlar") or []:
                 baglam = f"{gorunen_ad(s)}: {s.get('text', '')}"[:200]
                 kayit = {"ts": s.get("ts"), "satir": s.get("id"), "parca": no, "baglam": baglam}
-                if s.get("supheli") and s.get("kaynak") != "altyazi-yedek":
+                if not nota_girer(s):                  # icsel supheli (cizelge suphesi nota Bilinmeyen girer, asagida)
                     cikti.append(dict(kayit, tur="supheli", metin=(s.get("text") or "")[:80]))
                     son_konusmaci = None
                     continue

@@ -950,7 +950,7 @@ class SahteTerimler:
 class SahteYakalayici:
     isi = None
 
-    def __init__(self, katilimcilar=(), okuma_fn=None):
+    def __init__(self, katilimcilar=(), okuma_fn=None, **kw):
         self.hazir = False
 
     def oku(self):

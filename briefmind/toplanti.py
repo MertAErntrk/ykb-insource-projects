@@ -151,7 +151,12 @@ def komut_basla(a):
               davet=ctx.get("davet"))
     m.terimleri_hazirla()                        # davet + onceki not terimleri Whisper prompt'u icin havuza
     servis = ses_servisi_kur(m, ayar, klasor)
-    y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=m.okuma_ekle)
+    y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=m.okuma_ekle,
+                   ses_var_fn=getattr(m, "son_loopback_ses", None),
+                   ses_sure_fn=getattr(m, "loopback_konusma_sn", None),
+                   log_fn=getattr(m, "olay_kaydet", None) or (lambda mesaj, **ek: print(mesaj, flush=True)))
+    if hasattr(y, "yeniden_bul"):
+        m.yeniden_bul_fn = y.yeniden_bul         # atama basarisizsa motor paneli yeniden aratir (isler.py ile ayni)
     print(f"Klasör: {klasor}\nTeams'te altyazı bekleniyor (pencere arkada kalabilir, küçültme). Bitirmek için Ctrl+C.")
 
     ekran_okuyucu(True)
@@ -193,6 +198,7 @@ def komut_basla(a):
             except Exception as e:
                 print(f"! ses servisi durdurulamadı: {e!r}")
         m.yeniden_kes_fn = None                   # ses durdu: bitiste devir bolunmez ('A → B')
+        m.yeniden_bul_fn = None
     for satir in y.bitir():
         m.altyazi_satiri(satir)
     tamamla(m, a.outlook, ctx.get("katilimcilar"))

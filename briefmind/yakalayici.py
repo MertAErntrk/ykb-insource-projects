@@ -30,6 +30,11 @@ GUNCELLEME_SN = 90           # ayni konusmacinin bu kadar yeni satiri buyur/duze
 GUNCELLEME_SATIR = 3         # ... ve yalnizca o konusmacinin son bu kadar satiri icin
 SIRA_BEKLE = 10              # ustteki buyuyen satir alttaki kararli satirlari en fazla bu kadar okuma bekletir
 BENZER_ORAN = 0.9            # Teams'in sonradan duzelttigi satir (SequenceMatcher) esigi
+PANEL_DONUK_SN = 12          # panel bu kadar sn DEGISMEDI ve hoparlorde konusma var -> donuk (eski/bayat oge): yeniden bul
+DONUK_SES_PAYI = 1.0         # donuk: son loopback konusma bitisi >= son degisim - bu pay (degisimden sonra da konusma var)
+DONUK_SES_SN = 5.0           # ... ses_sure_fn varsa: son degisimden sonra en az bu kadar sesli loopback konusmasi (K1b: tek
+                             #     kisa halusinasyon klibi sessiz panelde donuk saydirmaz)
+YENIDEN_BUL_SN = 30          # panel ogesi bu aralikla agactan yeniden bulunup runtime id'si karsilastirilir
 AD_ESIGI = 3                 # sezgisel (katilimci listesinde olmayan) ad, bu kadar AYRI satirda gorulunce bilinen ad olur
                              # (canli gorunumde once '?'; okuma olayina ad oldugu gibi gider, hayalet kurali konusmaci.py)
 
@@ -39,16 +44,57 @@ def ekran_okuyucu(acik):
     user32.SystemParametersInfoW(SPI_SETSCREENREADER, 1 if acik else 0, None, 0)
 
 
-def _grup_bul():
-    """Altyazi grubunu ve bulundugu pencerenin basligini dondurur: (grup, pencere_basligi)."""
+def _grup_bul_ayrintili():
+    """Altyazi grubu, bulundugu ust pencere ve basligi: (grup, pencere, baslik). Bulunamazsa (None, None, "")."""
     for w in auto.GetRootControl().GetChildren():
         ad = (w.Name or "").lower()
         if not any(k in ad for k in PENCERE_ANAHTAR):
             continue
         for c, _ in auto.WalkControl(w, includeTop=False, maxDepth=45):
             if c.ControlTypeName == "GroupControl" and (c.Name or "").strip().lower() in GRUP_ADLARI:
-                return c, (w.Name or "")
-    return None, ""
+                return c, w, (w.Name or "")
+    return None, None, ""
+
+
+def _grup_bul():
+    """Altyazi grubunu ve bulundugu pencerenin basligini dondurur: (grup, pencere_basligi).
+    (Testler ve Yakalayici bu adi cagirir/yamar; ayrintili sonuc icin _grup_bul_ayrintili.)"""
+    grup, _, baslik = _grup_bul_ayrintili()
+    return grup, baslik
+
+
+def _rid(oge):
+    """UIA ogesinin runtime id'si (yeniden cizilince degisir) -> tuple | None (desteklenmiyorsa/hatada None).
+    uiautomation.Control'de COM ogesi .Element'tedir; sahte/sarmal nesnelerde dogrudan GetRuntimeId olabilir."""
+    for ad in ("Element", None):
+        try:
+            kaynak = getattr(oge, ad) if ad else oge
+            r = kaynak.GetRuntimeId()
+            if r is not None:
+                return tuple(r)
+        except Exception:
+            continue
+    return None
+
+
+def _pencere_handle(grup):
+    """Altyazi grubunun ust pencere handle'i (int) | 0."""
+    try:
+        return int(grup.GetTopLevelControl().NativeWindowHandle or 0)
+    except Exception:
+        return 0
+
+
+def pencere_durumu(hwnd):
+    """Teams penceresi: {"simge": simge durumunda, "buyuk": buyutulmus, "onplan": on planda}. Bilinmiyorsa ya da
+    Windows disinda {} (user32 cagrilari best effort)."""
+    if not hwnd:
+        return {}
+    try:
+        return {"simge": bool(user32.IsIconic(hwnd)), "buyuk": bool(user32.IsZoomed(hwnd)),
+                "onplan": user32.GetForegroundWindow() == hwnd}
+    except Exception:
+        return {}
 
 
 def teams_pencere_basliklari():
@@ -117,10 +163,28 @@ class Yakalayici:
         gorunmeyen) bir satirinin onek-uzantisi ya da >= BENZER_ORAN benzeri ise yeni satir degil
         {'guncelle': True, 'onceki_text': ...} olarak doner (motor acik parcadaki satiri yerinde gunceller)."""
 
-    def __init__(self, katilimcilar=(), okuma_fn=None, ad_esigi=AD_ESIGI):
+    def __init__(self, katilimcilar=(), okuma_fn=None, ad_esigi=AD_ESIGI, ses_var_fn=None, log_fn=None, ses_sure_fn=None):
         """katilimcilar: bilinen adlar (Outlook daveti/ayar) — sezgisel tanima beklemeden gecerli. okuma_fn(okuma): HER UIA
-        okumasinda (bos okuma ve altyazi grubu yokken de) cagrilir, bkz. _okuma_yayinla."""
+        okumasinda (bos okuma ve altyazi grubu yokken de) cagrilir, bkz. _okuma_yayinla. ses_var_fn(): son loopback
+        konusma bitisinin epoch'u | None (motor.son_loopback_ses; panel canliligi icin). log_fn(mesaj, **ek): motor.olay_kaydet.
+        ses_sure_fn(bas_epoch) -> bas_epoch'tan bu yana suzgeci gecen loopback konusma suresi (sn; motor.loopback_konusma_sn,
+        K1b): varsa donuk yalniz son degisimden sonra >= DONUK_SES_SN konusmayla tetiklenir."""
         self.grup = None
+        self.ses_var_fn = ses_var_fn
+        self.ses_sure_fn = ses_sure_fn
+        self.log_fn = log_fn
+        self._grup_rid = None                      # panel ogesinin runtime id'si (yeniden cizilme tespiti)
+        self.pencere_hwnd = 0                      # altyazi panelinin ust penceresi
+        self._son_bulma = None                     # panelin agactan en son bulundugu an (periyodik dogrulama)
+        self._zorla_bul = False                    # yeniden_bul(): bir sonraki okumada yeniden ara
+        self.yeniden_bul_sayisi = 0                # okuma olayindaki "yeniden_bul": yapilan yeniden bulma sayisi
+        self._onceki_okuma = None                  # canlilik: bir onceki okumanin satirlari
+        self._son_degisim = None                   # satirlarin en son degistigi an (saat.simdi epoch'u)
+        self._donuk_acik = False
+        self._son_donuk_bul = 0.0
+        self._donuk_ses = None                     # donuk yeniden aramasinin yapildigi andaki son konusma bitisi
+        self._bulunamadi_loglandi = False
+        self._simge_loglandi = False
         self.bilinen = set(a for a in katilimcilar if a)
         self.okuma_fn = okuma_fn
         self.ad_esigi = ad_esigi                   # sezgisel ad kac AYRI satirda gorulunce ad sayilir
@@ -168,23 +232,31 @@ class Yakalayici:
             return
         try:
             satir = {"okuma_no": okuma["okuma_no"], "bas_epoch": round(okuma["bas_epoch"], 3),
-                     "bit_epoch": round(okuma["bit_epoch"], 3), "grup": okuma["grup"], "gorunen": okuma["gorunen"]}
+                     "bit_epoch": round(okuma["bit_epoch"], 3), "grup": okuma["grup"], "gorunen": okuma["gorunen"],
+                     "degisti": okuma["degisti"], "donuk": okuma["donuk"], "yeniden_bul": okuma["yeniden_bul"],
+                     "pencere": okuma["pencere"], "okuma_sn": round(okuma["okuma_sn"], 3)}
             with open(self._okuma_yolu, "a", encoding="utf-8") as f:
                 f.write(json.dumps(satir, ensure_ascii=False) + "\n")
         except Exception:
             self._okuma_yolu = None                # IO hatasi: kaydi kapat, okuyucu etkilenmesin
 
-    def _okuma_yayinla(self, bas_epoch, bit_epoch, grup, gorunen):
+    def _okuma_yayinla(self, bas_epoch, bit_epoch, grup, gorunen, degisti=True, donuk=False, pencere=None):
         """Her UIA okumasi (bos okuma ve altyazi grubu yokken de) bir okuma olayi uretir (plan 3 'Cizelge', C2):
           {"tur": "okuma", "okuma_no", "bas_epoch", "bit_epoch", "grup": altyazi paneli bulundu mu,
-           "gorunen": [[konusmaci, metin], ...]}
+           "gorunen": [[konusmaci, metin], ...],
+           "degisti": satirlar bir onceki okumadan farkli mi, "donuk": satirlar >= PANEL_DONUK_SN degismedi ve
+           hoparlorde konusma var, "yeniden_bul": yapilan yeniden bulma sayisi, "pencere": {"simge", "buyuk",
+           "onplan"} | {}, "okuma_sn": okuma suresi}
         bas_epoch okuma baslamadan, bit_epoch okuma bittikten HEMEN sonra olculur (satirlarin gorundugu an bu aralikta).
+        degisti varsayilani True: canlilik bilinmiyorsa (dogrudan cagri) 'degismedi' iddia edilmez.
         Olay okuma_fn'e gider (konusmaci.py cizelgesi + heartbeat) ve olcum kaydi aciksa okumalar.jsonl'e yazilir."""
         self._okuma_sira += 1
         self.son_okuma_epoch = bit_epoch
         self._okuma_baslari.append(bas_epoch)
         okuma = {"tur": "okuma", "okuma_no": self._okuma_sira, "bas_epoch": bas_epoch, "bit_epoch": bit_epoch,
-                 "grup": bool(grup), "gorunen": [[k, n] for k, n in gorunen]}
+                 "grup": bool(grup), "gorunen": [[k, n] for k, n in gorunen],
+                 "degisti": bool(degisti), "donuk": bool(donuk), "yeniden_bul": self.yeniden_bul_sayisi,
+                 "pencere": dict(pencere or {}), "okuma_sn": max(0.0, bit_epoch - bas_epoch)}
         self._okuma_yaz(okuma)
         if self.okuma_fn is not None:
             try:
@@ -228,6 +300,8 @@ class Yakalayici:
                 konusan = m
             elif konusan and len(m) >= 2:
                 ciftler.append((konusan, m))
+            elif not konusan and len(m) >= KISA_SATIR:
+                ciftler.append(("?", m))          # adi gorunmeyen uzun satir atilmaz: canlida Bilinmeyen (adi sayilmaz)
         return self._adlari_dogrula(ciftler)
 
     def _adlari_dogrula(self, ciftler):
@@ -274,30 +348,179 @@ class Yakalayici:
         gorunen = []
         try:
             if self.grup is None:
-                self.grup, baslik = _grup_bul()
-                if baslik:
-                    self.pencere_basligi = baslik
-                    self.toplanti_adi = toplanti_adi_cikar(baslik) or self.toplanti_adi
-                if self.grup is None:
+                self._zorla_bul = False
+                grup, baslik = _grup_bul()
+                self._baslik_guncelle(baslik)
+                if grup is None:
                     if self.hazir:
                         self.kayip_zamani = self.kayip_zamani or dt.datetime.now()
                         self._kayip_simdi = self._kayip_simdi or saat.simdi()
                     self.hazir = False
-                    self._okuma_yayinla(bas_epoch, saat.simdi(), False, [])
+                    self._onceki_okuma = None
+                    self._okuma_yayinla(bas_epoch, saat.simdi(), False, [], degisti=False, pencere=self._pencere())
                     return []
+                self._ata(grup)
                 self.hazir, self.kayip_zamani, self._kayip_simdi = True, None, None
                 self.hazir_zamani = self.hazir_zamani or dt.datetime.now()
             gorunen = self._ciftler()
         except Exception:
             self.grup = None
-            self._okuma_yayinla(bas_epoch, saat.simdi(), False, [])
+            self._onceki_okuma = None
+            self._okuma_yayinla(bas_epoch, saat.simdi(), False, [], degisti=False, pencere=self._pencere())
             return []
         bit_epoch = saat.simdi()                   # okuma biter bitmez (yayim hesabindan once)
-        self._okuma_yayinla(bas_epoch, bit_epoch, True, gorunen)
+        degisti = self._degisim_izle(gorunen, bit_epoch)
+        donuk = self._donuk_denetle(bit_epoch)
+        pencere = self._pencere()
+        self._okuma_yayinla(bas_epoch, bit_epoch, True, gorunen, degisti=degisti, donuk=donuk, pencere=pencere)
+        self._bakim()                              # zorla/periyodik yeniden bulma: olay yayilandan SONRA (okuma zamanlari bozulmaz)
         if not gorunen:
             return []
         # satir zamani: okumanin ortasi (eskiden okuma bittikten sonraki an: yavas okumada kayardi)
         return self._isle(self._etiketle(gorunen), saat.ts((bas_epoch + bit_epoch) / 2))   # ekranda yerel saat
+
+    # ---------- panel canliligi ve yeniden bulma (bayat/donuk UIA ogesi: Teams buyutulunce/arkaya alinca)
+    def _log(self, mesaj, **ek):
+        if self.log_fn is None:
+            return
+        try:
+            self.log_fn(mesaj, **ek)
+        except TypeError:
+            try:
+                self.log_fn(mesaj)                 # yalniz mesaj alan basit gunluk islevi
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def yeniden_bul(self):
+        """Panel atamasi basarisiz (motor) ya da bayat panel supheli: bir sonraki okumada paneli agactan yeniden ara.
+        Baska thread'den cagrilabilir (yalniz bayrak kurar)."""
+        self._zorla_bul = True
+
+    def pencere_durumu(self):
+        return pencere_durumu(self.pencere_hwnd)
+
+    def _pencere(self):
+        p = self.pencere_durumu()
+        if p.get("simge"):
+            if not self._simge_loglandi:
+                self._simge_loglandi = True
+                self._log("Teams penceresi küçültülmüş: altyazı güncellenmiyor", neden="pencere_simge")
+        else:
+            self._simge_loglandi = False
+        return p
+
+    def _baslik_guncelle(self, baslik):
+        if baslik:
+            self.pencere_basligi = baslik
+            self.toplanti_adi = toplanti_adi_cikar(baslik) or self.toplanti_adi
+
+    def _ata(self, grup):
+        """Bulunan panel ogesini onbellege alir (runtime id + pencere handle)."""
+        self.grup = grup
+        self._grup_rid = _rid(grup)
+        self.pencere_hwnd = _pencere_handle(grup)
+        self._son_bulma = saat.simdi()
+
+    def _bakim(self):
+        """Okuma olayi yayilandan sonra: yeniden_bul() istegi varsa ya da panel YENIDEN_BUL_SN'dir agactan dogrulanmadiysa dogrula."""
+        if self.grup is None:
+            return
+        simdi = saat.simdi()
+        if self._son_bulma is None:
+            self._son_bulma = simdi
+        if self._zorla_bul:
+            self._zorla_bul = False
+            self._log("altyazı paneli yeniden aranıyor (konuşmacı ataması başarısız)", neden="yeniden_bul")
+            self._yeniden_bul_et("zorla")
+        elif simdi - self._son_bulma >= YENIDEN_BUL_SN:
+            self._yeniden_bul_et("periyodik")
+
+    def _yeniden_bul_et(self, sebep):
+        """Paneli agactan yeniden bulur. sebep 'donuk'/'zorla': bulunan oge her zaman benimsenir; 'periyodik': runtime id
+        ayniysa eski oge kalir, degistiyse yeni oge gecilir (log 'panel yeniden çizilmiş'). Bulunamazsa eski oge
+        okunmaya devam eder (altyazi kapanmis sayilip toplanti bitirilmez; kayip sayimi okuma yolunda)."""
+        eski_rid = self._grup_rid
+        try:
+            yeni, baslik = _grup_bul()
+        except Exception:
+            yeni, baslik = None, ""
+        self._son_bulma = saat.simdi()
+        if yeni is None:
+            if sebep != "periyodik":
+                self.yeniden_bul_sayisi += 1
+                if not self._bulunamadi_loglandi:
+                    self._bulunamadi_loglandi = True
+                    self._log("altyazı paneli yeniden aranırken bulunamadı: eski öğe okunuyor", neden="panel_bulunamadi")
+            return False
+        self._bulunamadi_loglandi = False
+        self._baslik_guncelle(baslik)
+        yeni_rid = _rid(yeni)
+        oge_degisti = eski_rid is not None and yeni_rid is not None and yeni_rid != eski_rid
+        if sebep == "periyodik" and not oge_degisti and eski_rid is not None and yeni_rid is not None:
+            return False                                   # ayni oge: dokunma
+        self._ata(yeni)
+        if oge_degisti:
+            self._log("panel yeniden çizilmiş (yeni öğe)", neden="panel_yeniden")
+        if sebep != "periyodik" or oge_degisti:
+            self.yeniden_bul_sayisi += 1
+        return True
+
+    def _degisim_izle(self, gorunen, simdi):
+        """Satirlar bir onceki okumayla ayni mi? Degistiyse _son_degisim ilerler."""
+        liste = [(k, n) for k, n in gorunen]
+        degisti = liste != self._onceki_okuma
+        if degisti or self._son_degisim is None:
+            self._son_degisim = simdi
+        self._onceki_okuma = liste
+        return degisti
+
+    def _donuk_mu(self, simdi):
+        """-> (donuk, ses): ses = son loopback konusma bitisi (epoch) | None. ses_sure_fn varsa (K1b) donuk icin son
+        degisimden (- DONUK_SES_PAYI) bu yana >= DONUK_SES_SN sesli konusma gerekir; yoksa son konusma bitisi
+        >= son degisim - DONUK_SES_PAYI yeter."""
+        if (self.ses_var_fn is None and self.ses_sure_fn is None) or self._son_degisim is None \
+                or simdi - self._son_degisim < PANEL_DONUK_SN:
+            return False, None
+        ses = None
+        if self.ses_var_fn is not None:
+            try:
+                ses = self.ses_var_fn()
+            except Exception:
+                return False, None
+        if self.ses_sure_fn is not None:
+            try:
+                sure = self.ses_sure_fn(self._son_degisim - DONUK_SES_PAYI)
+            except Exception:
+                return False, None
+            try:
+                donuk = sure is not None and float(sure) >= DONUK_SES_SN
+            except (TypeError, ValueError):
+                donuk = False
+            return donuk, ses
+        return (ses is not None and ses >= self._son_degisim - DONUK_SES_PAYI), ses
+
+    def _donuk_denetle(self, simdi):
+        """Donuk: PANEL_DONUK_SN'dir satir degismedi ve hoparlorde o aralikta konusma var -> panel ogesi bayat sayilir,
+        hemen yeniden aranir. Donuk surerse yeniden arama PANEL_DONUK_SN'de bir ve yalniz YENI konusma geldikse
+        (sessizlikte UIA yuruyusu bosuna okuma boslugu acmasin). Olay bayragi donuk surdukce True kalir."""
+        donuk, ses = self._donuk_mu(simdi)
+        if donuk:
+            if not self._donuk_acik:
+                self._donuk_acik = True
+                self._son_donuk_bul, self._donuk_ses = simdi, ses
+                self._log(f"altyazı paneli {int(simdi - self._son_degisim)} sn değişmedi, hoparlörde konuşma var: "
+                          "panel yeniden aranıyor", neden="panel_donuk")
+                self._yeniden_bul_et("donuk")
+            elif (simdi - self._son_donuk_bul >= PANEL_DONUK_SN and ses is not None
+                  and ses > (self._donuk_ses or 0) + DONUK_SES_PAYI):
+                self._son_donuk_bul, self._donuk_ses = simdi, ses
+                self._yeniden_bul_et("donuk")
+        elif self._donuk_acik:
+            self._donuk_acik = False
+            self._log("altyazı paneli yeniden güncelleniyor", neden="panel_canli")
+        return donuk
 
     # ---------- yayim karari (UIA'dan bagimsiz; testler dogrudan cagirir)
     def _isle(self, gorunen, simdi):

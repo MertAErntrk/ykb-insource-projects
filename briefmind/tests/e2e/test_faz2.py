@@ -26,7 +26,7 @@ F1_KARSILASTIR = ("klip", "dogru", "yanlis", "kirli", "soru", "adayli", "devir",
                   "bekleyen_kalan", "capa", "L", "kes_tamam", "eksik")
 K1 = {"ipucu_rms": 0.0}                                         # prompt korumasi 1 kapali: dusuk RMS klibe de prompt gider
 K2 = {"ipucu_rms": 0.0, "hal_supheli": 2.0, "hal_at": 2.0}      # koruma 1 + 2 kapali: supheli puan da etkisiz (fixture isirmali)
-HAL_KATEGORI = ("akici", "kara_liste", "altyazi_mk", "dongu", "krsn_ust", "krsn_alt", "akici_mikrofon")
+HAL_KATEGORI = ("akici", "kara_liste", "altyazi_mk", "dongu", "krsn_ust", "krsn_alt", "akici_mikrofon", "krsn_orta", "rms_dusuk")
 
 
 @pytest.fixture(autouse=True)
@@ -128,18 +128,24 @@ def test_terim_duzeltme_faz1_kapilari_degismez(seed):
 
 @pytest.mark.parametrize("seed", SEEDLER)
 def test_halusinasyon_cesit_sifir_kesin_satir(seed):
+    """B3 kurali: halusinasyon klibi kesin ad almaz; atilir (yalniz icsel puan hal_at), icsel supheli (nota girmez, LLM'e
+    gitmez), 'Bilinmeyen' (speaker '?' ya da cizelge suphesi: nota 'Bilinmeyen:' girer) ya da 'Ad?' (sahip uretmez).
+    Zaman cizelgesi hicbir klibi silmez."""
     s = olc("halusinasyon_cesit", seed)
     assert s["hal_toplam"] >= 10, "halusinasyon klibi uretilmedi"
-    assert s["hal_kesin"] + s["hal_belirsiz_kesin"] == 0, _kirmizi(s, "HALUSINASYON_KESIN")
-    assert s["hal_supheli"] + s["hal_dusen"] == s["hal_toplam"]
-    assert s["hal_llm_girdi"] == 0, "supheli satir LLM'e (duzeltme / ozet) gitti"
+    assert s["hal_kesin"] + s["hal_belirsiz_kesin"] == 0, _kirmizi(s, "HALUSINASYON_KESIN") + _kirmizi(s, "HALUSINASYON_KESIN_YAKIN")
+    assert s["hal_supheli"] + s["hal_dusen"] + s["hal_bilinmeyen"] + s["hal_adayli"] == s["hal_toplam"]
+    assert s["hal_llm_girdi"] == 0, "icsel supheli satir LLM'e (duzeltme / ozet) gitti"
+    assert s["satir_sil"].get("halusinasyon", 0) == 0, "zaman cizelgesi klip sildi"
+    assert s["hal_cizelge"] >= 1 and s["cizelge_bilinmeyen_eksik"] == 0, "cizelge suphesi satiri 'Bilinmeyen:' ile nota girmedi"
     assert s["sizinti"] == 0 and s["bozulan"] == 0 and s["bozulan_kelime"] == 0
     assert s.get("yanlis", 0) == 0 and s.get("cift_ut", 0) == 0 and s.get("eksik", 0) == 0
 
 
 def test_halusinasyon_cesit_kapsam():
-    """Tum turler (kara liste, dongu, kr/sn ucu, akici cumle, mikrofon) hem sessiz bosluk hem konusma ardinda uretildi; supheli
-    satirlar var (soluk, nota girmez), atilanlar var (satir_sil 'halusinasyon')."""
+    """Tum turler (kara liste, dongu, kr/sn ucu, akici cumle, mikrofon, orta icsel puanli krsn_orta / rms_dusuk) hem sessiz
+    bosluk hem konusma ardinda uretildi; icsel supheli satirlar var (soluk, nota girmez), atilanlar var (SesServisi suzgeci:
+    hal_atilan), cizelge suphesi satirlari var (nota 'Bilinmeyen:'); hicbir tur kesin ad almadi."""
     dag = {}
     for sd in SEEDLER:
         for k, v in olc("halusinasyon_cesit", sd)["hal_dagilim"].items():
@@ -149,8 +155,10 @@ def test_halusinasyon_cesit_kapsam():
     assert {k.split(":")[0] for k in dag} == {"uzak", "yakin"}
     assert sum(v for k, v in dag.items() if k.endswith(":supheli")) >= 20, dag
     assert sum(v for k, v in dag.items() if k.endswith(":dusen")) >= 20, dag
-    assert _topla("halusinasyon_cesit", "hal_atilan") >= 1 or sum(
-        olc("halusinasyon_cesit", sd)["satir_sil"].get("halusinasyon", 0) for sd in SEEDLER) >= 1, "hicbir klip atilmadi"
+    assert sum(v for k, v in dag.items() if k.endswith(":bilinmeyen")) >= 15, dag
+    assert _topla("halusinasyon_cesit", "hal_cizelge") >= 5, dag
+    assert _topla("halusinasyon_cesit", "hal_atilan") >= 1, "hicbir klip atilmadi (SesServisi suzgeci)"
+    assert all(not k.endswith(":kesin") and not k.endswith(":belirsiz_kesin") for k in dag), dag
     for sd in SEEDLER:
         assert olc("halusinasyon_cesit", sd)["hal_belirsiz_kesin"] == 0
 
@@ -190,10 +198,12 @@ def test_prompt_koruma_ikincisi_tek_basina_yeter():
 
 
 def test_prompt_negatif_kontrol_fixture_isirir():
-    """Negatif kontrol 2: iki koruma da kapali -> sizan prompt metni kesin satir olur (fixture bos degil)."""
+    """Negatif kontrol 2: iki koruma da kapali -> sizan prompt metni transkripte girer ve satir supheli degildir (nota
+    girer; B3 sonrasi sessizlikteki klip zaman cizelgesinden 'Bilinmeyen' / 'Ad?' kalir, icerigi dusmez): fixture bos degil."""
     seedler = KONTROL_SEEDLER
     assert sum(olc("k2", sd)["ipucu_sizinti_satir"] for sd in seedler) >= 3
-    assert sum(olc("k2", sd)["hal_kesin"] for sd in seedler) >= 3
+    assert sum(olc("k2", sd)["hal_bilinmeyen"] + olc("k2", sd)["hal_adayli"] + olc("k2", sd)["hal_kesin"]
+               for sd in seedler) >= 3
 
 
 # ---------------- negatif kontroller: kapilar gercekten isirir ----------------
@@ -222,11 +232,19 @@ def test_negatif_kontrol_gevsek_kapi_bozulan_uretir(monkeypatch):
     assert s["bozulan_kelime"] > 0 and s["komite_commit"] > 0 and s["ek_kaybi"] > 0, s
 
 
-def test_negatif_kontrol_cizelge_kurali_kapaliyken_halusinasyon_kesin_olur(monkeypatch):
+def test_negatif_kontrol_cizelge_kurali_kapaliyken_bilinmeyen_etiketi_kalkar(monkeypatch):
+    """B3: cizelge kurali kapaninca (CIZELGE_PUANI 0) orta icsel puanli (0.3-0.4) halusinasyon klipleri cizelge suphesi
+    almaz: 'Bilinmeyen' zorlamasi kalkar, konusma ardindakiler onceki konusmaciya 'Ad?' (yapiskan) olarak kalir; kesin ad
+    yine cikmaz (konusmaci karari). Kural acikken ayni tohumlarda cizelge suphesi >= 2 / tohum."""
     import motor
+    acik = [olc("halusinasyon_cesit", sd) for sd in KONTROL_SEEDLER]
+    assert all(s["hal_cizelge"] >= 2 for s in acik), [s["hal_cizelge"] for s in acik]
     monkeypatch.setattr(motor, "CIZELGE_PUANI", 0.0)
-    s = D.calistir(seed=7, **FAZ2["halusinasyon_cesit"])
-    assert s["hal_kesin"] + s["hal_belirsiz_kesin"] >= 3, s["hal_dagilim"]
+    kapali = [D.calistir(seed=sd, **FAZ2["halusinasyon_cesit"]) for sd in KONTROL_SEEDLER]
+    assert all(s["hal_cizelge"] == 0 and s["cizelge_supheli"] == 0 for s in kapali), [s["hal_dagilim"] for s in kapali]
+    assert sum(s["hal_adayli"] for s in kapali) > sum(s["hal_adayli"] for s in acik), \
+        ([s["hal_dagilim"] for s in kapali], [s["hal_dagilim"] for s in acik])
+    assert all(s["hal_kesin"] + s["hal_belirsiz_kesin"] == 0 for s in kapali)
 
 
 # ---------------- ogrenme acik / kapali ----------------

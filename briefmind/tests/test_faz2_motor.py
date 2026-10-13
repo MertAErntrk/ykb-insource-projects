@@ -244,24 +244,52 @@ def test_cizelge_agirligi_stt_ile_ayni():
     assert round(fark, 4) == motor_mod.CIZELGE_PUANI
 
 
-def test_gercek_konusmaciyla_etkinliksiz_klip_supheli_nota_girmez(tmp_path, saat):
-    """Altyazi saglikli (Ayse 1-4 sn konusuyor), 25-28 sn'de kimse yok: klip supheli (+0.6), soluk, nota girmez."""
-    olaylar = []
+def _gercek_konusmaci_motoru(tmp_path, olaylar):
     m = motor_mod.Motor(str(tmp_path / "t"), "Test", dt.date.fromtimestamp(T0), duzelt=False, ben=BEN,
                         katilimcilar=[A, B, BEN], olay=lambda t, v: olaylar.append((t, v)))
     m._isle = lambda veri, duzelt: None
+    return m
+
+
+def test_gercek_konusmaciyla_etkinliksiz_klip_icsel_puan_yoksa_supheli_degil_bilinmeyen_girer(tmp_path, saat):
+    """Altyazi saglikli (Ayse 1-4 sn konusuyor), 25-28 sn'de kimse yok. Eski kural (+0.6) bu klibi tek basina supheli
+    yapip nottan dusuruyordu; yeni kural icsel puan (hal_ic) 0 iken supheli YAPMAZ: klip 'Bilinmeyen' olarak notta kalir."""
+    olaylar = []
+    m = _gercek_konusmaci_motoru(tmp_path, olaylar)
     akit(m, saat, [(A, 1, 4)], [(1, "loopback", 1, 4, "Bütçe tablosunu güncelledim."),
-                               (2, "loopback", 25, 28, "Kampanya görsellerini de ekledim.")], 45)
+                               (2, "loopback", 25, 28, "Kampanya görsellerini de ekledim.")], 45, hal={2: 0.0})
     s1, s2 = m.mevcut
     assert not s1["supheli"] and s1["speaker"] == A
-    assert s2["supheli"] and s2["hal_puani"] == 0.6 and s2["cizelge_etkin"] is False and s2["speaker"] == "?"
+    assert not s2["supheli"] and "supheli_neden" not in s2 and s2["speaker"] == "?" and s2["hal_ic"] == 0.0
+    assert s2["hal_puani"] == 0.0 and motor_mod.nota_girer(s2)
+    assert motor_mod.blok_metni(m.mevcut) == (f"{A}?: Bütçe tablosunu güncelledim.\n"
+                                              "Bilinmeyen: Kampanya görsellerini de ekledim.")
+    assert not [1 for t, v in olaylar if t == "satir_sil"]
+    m.kapat()
+
+
+def test_gercek_konusmaciyla_etkinliksiz_klip_icsel_puanla_cizelge_suphesi_bilinmeyen_olarak_girer(tmp_path, saat):
+    """Ayni senaryo, klibin icsel puani 0.3 (>= hal_cizelge_taban): 0.3 + 0.3 >= hal_supheli -> supheli_neden 'cizelge'.
+    Eski davranisin (supheli, nota girmez) niyeti korunur: sahip / kesin ad uretmez; fark: icerik dusmez, 'Bilinmeyen:'."""
+    olaylar = []
+    m = _gercek_konusmaci_motoru(tmp_path, olaylar)
+    # Burak 32-35 sn'de konusur: panel klibin altyazi zamanindan SONRA degisir (cizelge_canli: panel donuk degil)
+    akit(m, saat, [(A, 1, 4), (B, 32, 35)], [(1, "loopback", 1, 4, "Bütçe tablosunu güncelledim."),
+                                            (2, "loopback", 25, 28, "Kampanya görsellerini de ekledim.")], 50, hal={2: 0.3})
+    s1, s2 = m.mevcut
+    assert not s1["supheli"] and s1["speaker"] == A
+    assert s2["supheli"] and s2["supheli_neden"] == "cizelge" and s2["cizelge_etkin"] is False and s2["speaker"] == "?"
+    assert s2["hal_ic"] == 0.3 and s2["hal_puani"] == pytest.approx(0.6)
     g = [v for t, v in olaylar if t == "satir_guncelle" and v["id"] == s2["id"]]
-    assert g and g[-1]["supheli"] is True                                           # canli ekran soluk gosterir
-    assert [r for r in motor_mod.altyazi_kayitlari(m.klasor) if r["id"] == s2["id"]][0]["supheli"] is True
-    assert motor_mod.blok_metni(m.mevcut) == f"{A}?: Bütçe tablosunu güncelledim."      # capa az: 'Ad?' 
-    assert "Kampanya görsellerini" not in m.transkript_metni()
-    kayit = m.belirsizler()
-    assert [(x["tur"], x["ts"]) for x in kayit if x["tur"] == "supheli"] == [("supheli", s2["ts"])]
+    assert g and g[-1]["supheli"] is True and g[-1]["supheli_neden"] == "cizelge"     # canli ekran soluk gosterir
+    kayit = [r for r in motor_mod.altyazi_kayitlari(m.klasor) if r["id"] == s2["id"]][0]
+    assert kayit["supheli"] is True and kayit["supheli_neden"] == "cizelge" and kayit["hal_ic"] == 0.3
+    assert motor_mod.blok_metni(m.mevcut) == (f"{A}?: Bütçe tablosunu güncelledim.\n"
+                                              "Bilinmeyen: Kampanya görsellerini de ekledim.")   # capa az: 'Ad?'
+    assert "Kampanya görsellerini" in m.transkript_metni()
+    assert any("altyazı canlıyken etkinlik yok; nota Bilinmeyen olarak girer" in v for t, v in olaylar if t == "log")
+    assert [x["tur"] for x in m.belirsizler() if x["tur"] == "supheli"] == []        # nota girdi: 'nota girmez' listesinde degil
+    assert not [1 for t, v in olaylar if t == "satir_sil"]
     m.kapat()
 
 
@@ -282,7 +310,9 @@ def test_cizelge_etkin_karardan(akis, adaylar, beklenen):
     assert motor_mod.Motor.cizelge_etkin(karar(1, "?", adaylar=adaylar, akis=akis, kapsama=False)) is None
 
 
-def test_yuksek_taban_puan_cizelgeyle_atilir_ikinci_karar_tekrar_saymaz(tmp_path, saat):
+def test_yuksek_taban_puan_cizelgeyle_silinmez_yalniz_icsel_puan_siler_ikinci_karar_tekrar_saymaz(tmp_path, saat):
+    """Eski kural: icsel 0.4 + cizelge 0.6 = 1.0 -> motor klibi SILIYORDU (tek sinyal hem konusmaciyi hem icerigi
+    olduruyordu). Yeni: silme yalniz hal_ic >= hal_at; zaman cizelgesi en fazla 'cizelge' suphesi (nota Bilinmeyen girer)."""
     olaylar = []
     m = _toplanti(tmp_path, duzelt=False)
     m._olay = lambda t, v: olaylar.append((t, v))
@@ -290,27 +320,43 @@ def test_yuksek_taban_puan_cizelgeyle_atilir_ikinci_karar_tekrar_saymaz(tmp_path
     ev["hal_puani"] = 0.4                                         # ses.py puani (kr/sn yumusak kural gibi)
     s = m.ses_olayi(ev)
     m.konusmaci.kararlar = [karar(1, "?", 0.0, adaylar=[], neden="kimse")]
-    m.kontrol()                                                   # 0.4 + 0.6 = 1.0 >= hal_at (0.9): atilir
-    assert ("satir_sil", {"id": s["id"], "neden": "halusinasyon"}) in olaylar and m.mevcut == []
-    # ayni anda 0.2 tabanli klip: 0.8 -> supheli; sonraki 'bolunemedi' karari puani ikinci kez artirmaz
+    m.kontrol()                                                   # 0.4 + 0.3 = 0.7: supheli ('cizelge'), SILINMEZ
+    assert not any(t == "satir_sil" for t, _ in olaylar) and m.mevcut == [s]
+    assert s["supheli"] and s["supheli_neden"] == "cizelge" and s["hal_ic"] == 0.4 and s["hal_puani"] == pytest.approx(0.7)
+    # icsel puan >= hal_at: (ses.py normalde metni atar; Motor'a metinle gelirse) yalniz hal_ic siler
+    ev0 = klip(5, 10, 12)
+    ev0["hal_puani"] = 0.95
+    s0 = m.ses_olayi(ev0)
+    m.konusmaci.kararlar = [karar(5, "?", 0.0, adaylar=[], neden="kimse")]
+    m.kontrol()
+    assert ("satir_sil", {"id": s0["id"], "neden": "halusinasyon"}) in olaylar and s0 not in m.mevcut
+    # 0.35 tabanli klip: 0.65 -> supheli; sonraki 'bolunemedi' karari puani ikinci kez artirmaz
     ev2 = klip(2, 3, 5)
-    ev2["hal_puani"] = 0.2
+    ev2["hal_puani"] = 0.35
     s2 = m.ses_olayi(ev2)
     m.konusmaci.kararlar = [karar(2, "?", 0.0, adaylar=[], neden="kimse")]
     m.kontrol()
     m.konusmaci.kararlar = [karar(2, "?", 0.0, adaylar=[], neden="kimse")]
     m.kontrol()
-    assert s2["supheli"] and s2["hal_puani"] == 0.8
+    assert s2["supheli"] and s2["hal_puani"] == pytest.approx(0.65) and s2["hal_ic"] == 0.35
     m.kapat()
 
 
 def test_hal_esikleri_config_esikler_den(tmp_path, saat):
-    m = _toplanti(tmp_path, duzelt=False, esikler={"esikler": {"hal_supheli": 0.7}})
-    m.ses_olayi(klip(1, 0, 2))
-    m.konusmaci.kararlar = [karar(1, "?", 0.0, adaylar=[], neden="kimse")]
-    m.kontrol()
-    assert not m.mevcut[0]["supheli"] and m.mevcut[0]["hal_puani"] == 0.6           # 0.6 < 0.7
-    m.kapat()
+    """hal_supheli ve hal_cizelge_taban config 'esikler'den: 0.4 + 0.3 = 0.7 < 0.8 -> supheli degil (puan icsel kalir);
+    taban 0.5 > 0.4 -> supheli degil; varsayilanlarda ayni klip supheli ('cizelge')."""
+    for esik, supheli in (({"hal_supheli": 0.8}, False), ({"hal_cizelge_taban": 0.5}, False), ({}, True)):
+        m = _toplanti(tmp_path, ad="2026-10-05_haftalik-" + "-".join(esik) + "x", duzelt=False,
+                      esikler={"esikler": esik})
+        ev = klip(1, 0, 2)
+        ev["hal_puani"] = 0.4
+        m.ses_olayi(ev)
+        m.konusmaci.kararlar = [karar(1, "?", 0.0, adaylar=[], neden="kimse")]
+        m.kontrol()
+        s = m.mevcut[0]
+        assert s["supheli"] is supheli
+        assert s["hal_puani"] == (pytest.approx(0.7) if supheli else 0.4)           # supheli degilse puan icsel kalir
+        m.kapat()
 
 
 def test_supheli_satir_nota_ve_sorumluya_girmez_yedek_girer(tmp_path, saat, monkeypatch):
@@ -323,6 +369,9 @@ def test_supheli_satir_nota_ve_sorumluya_girmez_yedek_girer(tmp_path, saat, monk
     assert motor_mod.blok_metni([s, sup, yedek]).count("Abone") == 0 and "Yedek satır" in motor_mod.blok_metni(
         [s, sup, yedek])
     assert motor_mod.nota_girer(s) and not motor_mod.nota_girer(sup) and motor_mod.nota_girer(yedek)
+    # cizelge suphesi icerigi dusurmez: nota 'Bilinmeyen:' etiketiyle girer (sahip uretmez)
+    ciz = dict(s, id=101, supheli=True, supheli_neden="cizelge", text="Kampanya görselleri hazır.")
+    assert motor_mod.nota_girer(ciz) and "Bilinmeyen: Kampanya görselleri hazır." in motor_mod.blok_metni([s, ciz])
     m.kapat()
 
 
@@ -525,7 +574,7 @@ def test_belirsiz_konusmaci_ardisik_satirlar_tek_kayit(tmp_path, saat):
 class _Yakalayici:
     isi = None
 
-    def __init__(self, katilimcilar=(), okuma_fn=None):
+    def __init__(self, katilimcilar=(), okuma_fn=None, **kw):
         self.hazir = False
 
     def oku(self):

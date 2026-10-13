@@ -23,7 +23,7 @@ from collections import Counter
 import numpy as np
 
 import ayar as ayar_mod
-from metin import gorunen_ad
+from metin import gorunen_ad, nota_girer
 
 PENCERE_SATIR = 6
 ORTUSME = 2
@@ -110,9 +110,9 @@ def _satir_yaz(s):
 
 def pencereler(satirlar, boy=PENCERE_SATIR, ortusme=ORTUSME):
     """satirlar: [{'ts','speaker','text', ...}] -> [{'bas','son','metin'}]; ust uste binen satir pencereleri.
-    Konusmaci adi gosterim kuraliyla (metin.gorunen_ad) yazilir; supheli (halusinasyon) satirlar girmez."""
-    satirlar = [s for s in satirlar if (s.get("text") or "").strip()
-                and not (s.get("supheli") and s.get("kaynak") != "altyazi-yedek")]
+    Konusmaci adi gosterim kuraliyla (metin.gorunen_ad) yazilir; nota girmeyen (icsel halusinasyon supheli) satirlar
+    girmez, cizelge suphesi ('Bilinmeyen:' ile notta olan) satirlar girer (metin.nota_girer: motor ile tek kural)."""
+    satirlar = [s for s in satirlar if (s.get("text") or "").strip() and nota_girer(s)]
     adim = max(1, boy - ortusme)
     sonuc = []
     for i in range(0, len(satirlar), adim):

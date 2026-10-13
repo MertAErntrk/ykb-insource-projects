@@ -12,8 +12,10 @@ T0 = 1_700_000_000.0
 
 # ---------------------------------------------------------------- puan fixture'lari
 # (ad, metin, sesli sure sn, tokens, rms, cizelge_etkin)
-# cizelge_etkin=False: altyazi saglikliyken o aralikta etkinlik yok (motor/konusmaci verir); akici cumle gurultuye
-# uydurulmussa metin ve hiz kurallari tek basina yakalayamaz, yalniz cizelge kurali ayirir.
+# cizelge_etkin=False: altyazi saglikliyken o aralikta etkinlik yok (motor/konusmaci verir). Cizelge agirligi 0.3: akici
+# cumle gurultuye uydurulmussa metin ve hiz kurallari tek basina yakalayamaz, cizelge tek basina da supheli yapmaz
+# (CIZELGE_TEK); bu klipler Motor'da 'Bilinmeyen' olarak notta kalir, yalniz icsel puani da >= hal_cizelge_taban
+# olanlar 'cizelge' suphesi alir (tests/test_motor_b3.py).
 GERCEK = [
     ("kisa cevap", "Evet.", 0.8, None, 0.06, None),
     ("kisa cevap iki kelime", "Tamam, anladım.", 1.4, None, 0.05, True),
@@ -34,11 +36,24 @@ HALUSINASYON = [
     ("sessizlige yapisan uzun cumle (kr/sn)", "Bu konuyu daha sonra tekrar konuşuruz ve karar verelim ve devam edelim.",
      1.5, None, 0.01, None),
     ("cok seyrek metin (kr/sn)", "Evet, tamam.", 7.0, None, 0.01, None),
-    ("gurultuye uydurulmus akici cumle", "Bu konuyu daha sonra tekrar konuşuruz.", 2.4, None, 0.008, False),
-    ("gurultuye uydurulmus kisa cumle", "Evet, şimdi başlayabiliriz.", 2.0, None, 0.01, False),
     ("3-gram dongu", "bir sonraki adım bir sonraki adım bir sonraki adım bir sonraki adım", 9.0, None, 0.01, None),
     ("muzik etiketi", "[Müzik]", 3.0, None, 0.004, None),
 ]
+# yalniz cizelge kuraliyla ayirt edilebilenler: tek basina 0.3 (< hal_supheli); eskiden 0.6 ile supheliydi
+CIZELGE_TEK = [
+    ("gurultuye uydurulmus akici cumle", "Bu konuyu daha sonra tekrar konuşuruz.", 2.4, None, 0.008, False),
+    ("gurultuye uydurulmus kisa cumle", "Evet, şimdi başlayabiliriz.", 2.0, None, 0.01, False),
+]
+
+
+@pytest.mark.parametrize("ad,metin,sure,tokens,rms,cizelge", CIZELGE_TEK, ids=[h[0] for h in CIZELGE_TEK])
+def test_yalniz_cizelgeyle_ayirt_edilen_klip_tek_basina_supheli_degil(ad, metin, sure, tokens, rms, cizelge):
+    """Eski 0.6 agirlik tek sinyalle klibi supheli yapip nottan dusuruyordu (panel donuk/bayatken her klip). 0.3 ile
+    puan hal_cizelge_taban'a esit, hal_supheli'nin altinda: karari Motor'daki cizelge kurali verir."""
+    puan = stt.halusinasyon_puani(metin, sure, tokens=tokens, rms=rms, cizelge_etkin=cizelge)
+    assert puan == pytest.approx(stt.CIZELGE_PUANI) and puan < stt.HAL_ESIKLER["hal_supheli"]
+    assert puan >= stt.HAL_ESIKLER["hal_cizelge_taban"]
+    assert puan == pytest.approx(stt.halusinasyon_puani(metin, sure, tokens=tokens, rms=rms) + 0.3)
 
 
 @pytest.mark.parametrize("ad,metin,sure,tokens,rms,cizelge", GERCEK, ids=[g[0] for g in GERCEK])
@@ -56,10 +71,15 @@ def test_en_az_bir_fixture_atilma_esigini_asar_ve_hepsi_0_1_araliginda():
     assert all(0.0 <= p <= 1.0 for p in puanlar) and max(puanlar) >= 0.9
 
 
-def test_cizelge_none_kural_uygulanmaz_false_arti_06():
+def test_cizelge_none_kural_uygulanmaz_false_arti_03():
+    """Cizelge agirligi 0.6 -> 0.3 (stt.CIZELGE_PUANI, motor ile tek sabit): zaman cizelgesi tek basina klibi supheli
+    (>= 0.5) yapamaz; icsel puani zaten >= hal_cizelge_taban olan klibi supheli yapar. Kuralin niyeti ayni: None / True
+    uygulanmaz, False eklenir."""
     m, s = "Bu konuyu daha sonra tekrar konuşuruz.", 2.4
     assert stt.halusinasyon_puani(m, s, cizelge_etkin=None) == stt.halusinasyon_puani(m, s, cizelge_etkin=True) == 0.0
-    assert stt.halusinasyon_puani(m, s, cizelge_etkin=False) == pytest.approx(0.6)
+    assert stt.CIZELGE_PUANI == 0.3
+    assert stt.halusinasyon_puani(m, s, cizelge_etkin=False) == pytest.approx(0.3)
+    assert 0.3 < stt.HAL_ESIKLER["hal_supheli"]
 
 
 # ---------------------------------------------------------------- kural agirliklari
@@ -188,7 +208,9 @@ def test_cizelge_fn_false_supheli_none_ve_hata_kural_yok():
 
     s, _ = _servis(cizelge_fn=cizelge)
     ev = s.klip_olayi_uret(_p(), [{"text": "Bu konuyu daha sonra tekrar konuşuruz."}])
-    assert cagrilar == [("loopback", T0 + 10.0, T0 + 13.0)] and ev["supheli"] and ev["hal_puani"] == pytest.approx(0.6)
+    # cizelge_fn False -> +0.3: tek basina supheli degil (zaman cizelgesi suphesini Motor verir, hal_ic taban ister)
+    assert cagrilar == [("loopback", T0 + 10.0, T0 + 13.0)] and not ev["supheli"]
+    assert ev["hal_puani"] == pytest.approx(0.3)
     s2, _ = _servis(cizelge_fn=lambda *a: None)
     assert s2.klip_olayi_uret(_p(), [{"text": "Bu konuyu daha sonra tekrar konuşuruz."}])["hal_puani"] == 0.0
 

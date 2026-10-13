@@ -50,6 +50,18 @@ def ad_geciyor(ad, metin):
 KESIN_GUVEN = 0.7               # spk_guven bunun altindaysa ad "Ad?" gosterilir (gosterim kurali, MIMARI_v3 §3)
 
 
+def nota_girer(satir):
+    """Satir nota / ozete / dayanaga / RAG pencerelerine girer mi? (motor ve rag icin TEK kural; motor.nota_girer bunu
+    sarar.) Icsel halusinasyon supheli ('ic') satirlar girmez (canli ekranda soluk, transkriptte kalir); altyazi yedegi
+    'supheli' isaretlidir ama bilincli olarak girer; zaman cizelgesi suphesi ('cizelge': altyazi canliyken etkinlik yok)
+    icerigi dusurmez: girer, yalniz 'Bilinmeyen' etiketiyle."""
+    if not isinstance(satir, dict):
+        return False
+    if satir.get("supheli_neden") == "cizelge":
+        return True
+    return not (satir.get("supheli") and satir.get("kaynak") != "altyazi-yedek")
+
+
 def gorunen_ad(satir, esik=KESIN_GUVEN):
     """Satirin konusmacisinin TEK gosterim kurali (canli ekran, not.md transkripti, LLM girdisi, Gecmis):
     karar bekleniyor -> "beklemede…"; "?" -> "Bilinmeyen"; "A / B" cakisma -> "A / B (aynı anda)"; "A → B" oldugu

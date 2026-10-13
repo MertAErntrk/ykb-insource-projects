@@ -55,7 +55,12 @@ HAL_ESIKLER = {
     "hal_rms_dusuk": 0.012,    # sesli aralik RMS'i bundan kucuk ...
     "hal_uzun_kr": 80,         # ... ve metin en az bu kadar karakterse +0.3
     "hal_yanki": 0.6,          # cikti kelimelerinin bu payi (en az 3 kelime) gonderilen prompt'ta geciyorsa +0.9
+    "hal_cizelge_taban": 0.3,  # motor: cizelge suphesi icin icsel puan en az bu (altyazi canliyken etkinlik yok + bu = supheli)
 }
+# cizelge kurali agirligi (altyazi saglikliyken klip araliginda etkinlik yok): TEK sabit; motor.CIZELGE_PUANI buradan gelir.
+# 0.6 iken tek sinyal klibi supheli yapip nottan dusuruyordu (gercek toplanti); 0.3: tek basina supheli yapmaz, icsel
+# puani >= hal_cizelge_taban olan klibi supheli ('cizelge') yapar ve silme asla zaman cizelgesinden olmaz.
+CIZELGE_PUANI = 0.3
 # Whisper prompt'u (terim.prompt) etiketleri: ciktida gecerse prompt aynen sizmistir (sessiz/gurultulu klip)
 _PROMPT_ETIKET = re.compile(r"(?:kat[ıi]l[ıi]mc[ıi]lar|terimler)\s*:")
 YANKI_EN_AZ = 3
@@ -103,7 +108,7 @@ def halusinasyon_puani(metin, sure_sn, tokens=None, rms=None, cizelge_etkin=None
       >=3-gram tekrar payi > 0.5    +0.3
       kara liste (video altyazi kaliplari)  +0.5
       RMS dusuk + metin uzun        +0.3 (rms verilmisse)
-      cizelge_etkin False           +0.6 (altyazi saglikliyken o aralikta etkinlik yok); None: kural uygulanmaz
+      cizelge_etkin False           +CIZELGE_PUANI=0.3 (altyazi saglikliyken o aralikta etkinlik yok); None: kural uygulanmaz
       prompt yankisi                +0.9 (prompt_yankisi_mi: etiket ya da ipucu kelimeleri; ipucu: gonderilen prompt)
     sure_sn: klibin SESLI suresi. Esikler config 'esikler' (esikler=) ile ezilir. Metin bossa 0.0."""
     m = re.sub(r"\s+", " ", metin or "").strip()
@@ -150,7 +155,7 @@ def halusinasyon_puani(metin, sure_sn, tokens=None, rms=None, cizelge_etkin=None
         puan += 0.3
     # g) cizelge kurali
     if cizelge_etkin is False:
-        puan += 0.6
+        puan += CIZELGE_PUANI
     # h) prompt yankisi: Whisper gonderilen prompt'u (ya da parcasini) aynen soyler
     if prompt_yankisi_mi(m, ipucu, esikler):
         puan += 0.9

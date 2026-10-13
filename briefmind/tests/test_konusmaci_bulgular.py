@@ -321,3 +321,72 @@ def test_uc_donuslu_klipte_sinir_ortusmeleri_toplanip_ayni_anda_denmez():
         _, kr, _ = kos(utt, katilimcilar=(AYLA, BORA), lag_fn=lambda t: 1.0, seed=seed)
         sahte += sum(1 for d in kr.values() if d["cakisma"])
     assert sahte == 0, sahte
+
+
+# ---------------------------------------------------------------- okuma bosluklari (gercek toplanti bulgusu)
+
+def test_her_5_snde_okuma_boslugu_kapsama_yok_vermez():
+    """Bulgu (gercek toplanti): R=0.61 iken okuma dongusundeki 5 sn'lik UIA yurumesi 1.8 sn'lik heartbeat'i asip her
+    5 sn'de bosluk aciyordu; her bosluktan sonra satirlar taban sayilip ust sifirlaniyor, aralik hic olusmuyordu:
+    347 satirin 298'i kapsama_yok, 45'i kimse. Esik max(3R, 5 sn) ve satirlarin korunmasiyla: kapsama_yok <= %5,
+    kesin yanlis 0, kesin karar bosluksuz kosunun >= %60'i, aralik sayisi >= %80'i."""
+    def kos_bosluklu(bosluk):
+        utt = toplanti_karisik(3)
+        kon = Konusmaci(ben=BEN, katilimcilar=(AYLA, BORA, CEM, BEN))
+        kon.kulaklik_ayarla(True)
+        kl = klipler(utt, BEN)
+        rnd = random.Random(9)
+        delikler = []
+        t = 2.0
+        while t < 620:
+            delikler.append((t, t + rnd.uniform(1.5, 3.0)))
+            t += 5.0
+        oku = okumalar(utt, lambda t: 1.0, R=0.6, jit=0.05)
+        if bosluk:
+            oku = [o for o in oku if not any(a <= o["bas_epoch"] - T0 < b for a, b in delikler)]
+        ev = [(o["bit_epoch"], 0, o) for o in oku]
+        ev += [(T0 + c["bit"] + 1.0, 1, c) for c in kl]
+        ev.sort(key=lambda x: (x[0], x[1]))
+        kararlar = {}
+        for t, tur, x in ev:
+            if tur == 0:
+                kon.okuma_ekle(x)
+            else:
+                kon.klip_ekle({"tur": "klip", "klip_no": x["klip_no"], "akis": x["akis"], "bas": T0 + x["bas"],
+                               "bit": T0 + x["bit"]})
+            for d in kon.kontrol(t):
+                kararlar[d["klip_no"]] = d
+        for d in kon.bitir():
+            kararlar[d["klip_no"]] = d
+        lb = [(c, kararlar[c["klip_no"]]) for c in kl if c["akis"] == "loopback"]
+        yanlis = [d for c, d in lb if d["spk_guven"] >= 0.7 and d["speaker"] != gercek(c)]
+        kesin = sum(1 for c, d in lb if d["spk_guven"] >= 0.7 and d["speaker"] == gercek(c))
+        yok = sum(1 for _, d in lb if d["neden"] in ("kapsama_yok", "panel_donuk"))
+        return len(lb), yok, kesin, yanlis, kon.durum()
+
+    n0, yok0, kesin0, yanlis0, d0 = kos_bosluklu(False)
+    n1, yok1, kesin1, yanlis1, d1 = kos_bosluklu(True)
+    assert n1 == n0 and not yanlis0 and not yanlis1, (yanlis0, yanlis1)
+    assert yok1 <= 0.05 * n1, (yok1, n1)
+    assert kesin1 >= 0.6 * kesin0, (kesin1, kesin0)
+    assert d1["araliklar"] >= 0.8 * d0["araliklar"], (d1, d0)
+    assert d1["bosluk_sn"] == 0 and d1["neden"] is None
+
+
+def test_gercek_cakismada_metin_esitlik_bozucu_uygulanmaz():
+    """Gercek ust uste binme (iki bant da klibi kapsiyor): klip metni yalniz B'nin satiriyla ortusse de karar 'A / B'
+    (cakisma=True, ⟨⟩ korumasi) kalir; metin esitlik bozucu yalniz devir / zayif payda (urun kurali: karisik metinli
+    cakisma satiri tek ada indirgenmez)."""
+    import test_konusmaci as T
+    for ipucu in (1, 0):
+        sim = T.Sim(seed=0, metin=True, esikler={"metin_ipucu": ipucu})
+        t = T.isinma(sim)
+        sim.soz(T.A, t, t + 6.0)
+        sim.soz(T.B, t + 1.0, t + 5.5)
+        no = sim.klip(t, t + 6.0)
+        zb = sim.sozler[-1]
+        sim.klipler[no]["text"] = " ".join(zb["kelimeler"])          # metin yalniz B'nin kelimeleri
+        sim.kos()
+        k = sim.sonuc[no]
+        assert k["cakisma"] is True and k["speaker"] == f"{T.A} / {T.B}" and k["bol"] is None, (ipucu, k)
+        assert k["neden"] == "cakisma" and k["spk_guven"] <= 0.5

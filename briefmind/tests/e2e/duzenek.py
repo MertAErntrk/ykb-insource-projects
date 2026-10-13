@@ -13,7 +13,12 @@ Akis (hepsi sanal saatte, olay yiginiyla):
   okuma bitince -> Motor.okuma_ekle;  Motor kararlarinda `bol` -> sahte yeniden_kes -> iki cocuk klip.
 
 Olcum klip_no ile yapilir (metin esleme yok): her son satirin klibi zemin gercegine bilinir.
-Altyazi metni sentetik izlerle (capNNNkNN) isaretlidir: hicbir cikti dosyasinda gorunmemelidir.
+Altyazi satirlari zemin gercegi kelimelerini tasir (metin ipucu gercekci calissin), kelimelerin ~%40'i bozuktur ve bozuk
+kelime sentetik izdir (capNNNkNN / capNNNrNN): hicbir cikti dosyasinda gorunmemelidir (sizinti kapisi).
+Okuma olayi gercek Yakalayici canlilik yolundan gelir (degisti / donuk / yeniden bulma; UIA yerine sahte oge), K1
+kancalari (son_loopback_ses, olay_kaydet, yeniden_bul_fn) isler.py'deki gibi baglidir. B6 panel senaryolari:
+SENARYOLAR_PANEL (okuma bosluklari, donuk / bos panel, yeniden cizim, gecikme 7 / suruklenme, kuyruk metni, '?' satirlar,
+gec satir), kapilar tests/e2e/test_panel_e2e.py'de.
 
 Faz 2 (terim + duzeltme + halusinasyon filtresi): Motor gercek terim havuzu (terim.TerimHavuzu: davet + elle terimler) ve
 gercek duzelt.duzelt kapisiyla kosar; SAHTE LLM (SahteLLM) gercekci bir karisim onerir: dogru terim duzeltmeleri, yaygin
@@ -83,6 +88,7 @@ from metin import gorunen_ad, kesin_ad_mi      # noqa: E402
 T0 = 1_760_000_000.0                     # sabit epoch (yerel saat dilimi yalniz 'ts' gosterimini etkiler)
 BAS = dt.datetime.fromtimestamp(T0)
 A, B, C, BEN = "Melek Taslak", "Kaan Uydurma", "Sinan Kurgu", "Zeynep Örnek"   # kurgusal adlar
+D4, D5, D6 = "Elif Deneme", "Burak Sanal", "Ayşe Kurmaca"                      # ek uzak kisiler (kalabalik senaryolar)
 ODA = "Salon Odası"                       # oda cihazi etiketi (kimlik_turu oda)
 KONUK = "Konuk"                           # genel etiket (kimlik_turu genel)
 HAYALET = "Uydurma Kişi"                  # altyazida bir kez beliren sezgisel ad (toplantida yok)
@@ -93,6 +99,7 @@ SES_ESIK_KISA = 0.65                      # VAD: sesli sure bundan kisaysa klip 
 VAD_KAPANIS = ses.CUMLE_SESSIZLIK         # klip bit'ten bu kadar sonra kapanir (sessizlik beklenir)
 PANEL_SATIR = 5                           # Teams panelinde ayni anda gorunen satir
 KELIME_PERIYODU = 0.5                     # Teams altyazi parcasi yenileme sikligi (varsayim; Faz 0 verisiyle guncellenir)
+BOZUK_PAY = 0.4                           # altyazi kelimelerinin bu payi bozuk (sentetik iz; sayi / ad korunur)
 
 # ---------------- zemin gercegi: metin havuzu ----------------
 CUMLELER = [
@@ -154,15 +161,19 @@ SENARYOLAR_FAZ2 = {
 SEDLER_FAZ2 = SEDLER + SEDLER_GENIS[:2]
 # Faz 4 not hatti senaryolari (MIMARI_v3 §9 Faz 4 kabulu): hepsi tur="not_faz4" (kayit numarali, kod adli cumleler) ve karsit
 # davranisli sahte LLM (llm="dusman"); SENARYOLAR'a girmez. not_korumasiz: negatif kontrol (sahip dogrulama + dayanak kapali).
+# bozuk=1.0: altyazi metni tamamen sentetik iz (metin ipucu eslesmez). Gercek kelimelerle 'ayni anda' klibinin metni yalniz
+# baskin (Whisper'in yazdigi) konusmacinin satiriyla ortusur ve B2b esitlik bozucu klibi 'Ad?' yapar: ⟨⟩ ('A / B') satiri
+# olusmaz, ⟨⟩ korumalarinin fixture'i bosalir. Bu senaryolar ⟨⟩ korumalarini sinar; 'Ad?' korumalari ayrica sinanir.
+_F4 = dict(tur="not_faz4", llm="dusman", bozuk=1.0)
 SENARYOLAR_FAZ4 = {
-    "not_temiz": dict(tur="not_faz4", llm="dusman"),
-    "not_kapali": dict(tur="not_faz4", llm="dusman", kapali=((150.0, 330.0),)),            # uzak konusmacilar 'Bilinmeyen'
-    "not_ust_uste": dict(tur="not_faz4", llm="dusman", ayni=0.18, devir=0.2),               # 'A / B' ⟨⟩ ve 'A → B' yogun
-    "not_uzun": dict(tur="not_faz4", llm="dusman", sure=900.0, aralik=(0.6, 1.2), bilgi=0.05),             # ~180 madde, 16k pencere
-    "not_cok_uzun": dict(tur="not_faz4", llm="dusman", sure=1300.0, aralik=(0.6, 1.2), bilgi=0.05, pencere=32768),   # ~270 madde
-    "not_korumasiz": dict(tur="not_faz4", llm="dusman", korumasiz=True),
+    "not_temiz": dict(_F4),
+    "not_kapali": dict(_F4, kapali=((150.0, 330.0),)),                                      # uzak konusmacilar 'Bilinmeyen'
+    "not_ust_uste": dict(_F4, ayni=0.18, devir=0.2),                                         # 'A / B' ⟨⟩ ve 'A → B' yogun
+    "not_uzun": dict(_F4, sure=900.0, aralik=(0.6, 1.2), bilgi=0.05),                       # ~180 madde, 16k pencere
+    "not_cok_uzun": dict(_F4, sure=1300.0, aralik=(0.6, 1.2), bilgi=0.05, pencere=32768),   # ~270 madde
+    "not_korumasiz": dict(_F4, korumasiz=True),
     # ⟨⟩ karari komsu kesin satirla kok paylasir; numara / tutar yalniz ⟨⟩ icinde (dayanak zorunlu deger denetimi)
-    "not_komsu_sarmal": dict(tur="not_faz4", llm="dusman", ayni=0.2, komsu=0.8),
+    "not_komsu_sarmal": dict(_F4, ayni=0.2, komsu=0.8),
 }
 SEDLER_FAZ4 = {"not_temiz": SEDLER, "not_kapali": SEDLER, "not_ust_uste": SEDLER, "not_uzun": (7, 11),
                "not_cok_uzun": (7, 11), "not_korumasiz": (7, 11), "not_komsu_sarmal": SEDLER}
@@ -176,6 +187,54 @@ SENARYOLAR_FAZ3 = {
     "uzun_surekli_kisa": dict(tur="faz3", sinir_kes=True, uzun=False, surekli=True),
 }
 SEDLER_FAZ3 = SEDLER
+# B6 panel / kapsama dayanikliligi senaryolari (plan B0-B6; bkz. test_panel_e2e.py). Hepsi tur="karisik", 600 sn (donuk /
+# bos: 900 sn, iki 90 sn'lik pencere), gercek Yakalayici canlilik yolu (degisti / donuk / yeniden bulma) + Motor +
+# Konusmaci; SENARYOLAR'a girmez.
+#  panel_saglikli    : okuma_bosluklari'nin referansi (ayni R ~0.6, bosluksuz)
+#  okuma_bosluklari  : OLAY: R ~0.6, her 5 sn'de 1.5-3 sn okuma boslugu (UIA yurumesi okuma dongusunu tutuyor)
+#  panel_donuk       : panel iki pencerede donuk (satirlar degismiyor, grup True); bos_okuma: okuma bos (grup True)
+#  panel_yeniden     : panel iki kez yeniden cizilir (tum satirlarin metni / oge kimligi degisir)
+#  gecikme7          : Teams gecikmesi 7 sn (> L_maks); *_metinsiz: metin ipucu kapali (karsilastirma)
+#  gecikme_surukle   : gecikme toplanti boyunca 2 -> 6 sn dogrusal suruklenir
+#  kuyruk_metin      : satir en cok 16 kelime gosterir (iki satirlik blok; basi duser), sozlerin yarisi 3 cumle (uzun tur)
+#  soru_satirlar     : satir gruplarinin %30'u adsiz ('?': _ciftler'in adi okunamayan uzun satir icin verdigi etiket)
+#  soru_ciftler      : satirlar gercek _ciftler yolundan (sahte UIA agaci): dolu panelde en ust satirin ad denetimi
+#                      agacin disinda -> ('?', metin); adlar bilinen listeden (yapi tanima)
+#  gec_satir         : sozlerin %12'sinin satiri 2-3.5 sn ek gecikmeyle belirir (gec yeniden puanlama)
+#  gecikme7_bosluk   : olay bicimi okuma bosluklari + gecikme 7; gecikme5_bosluk_metinsiz: gecikme 5, metin ipucu kapali;
+#                      bozuk1_bosluk: gecikme 7, altyazi metni tamamen sentetik (metin eslesmez)
+SENARYOLAR_PANEL = {
+    "panel_saglikli": dict(tur="karisik", sure=600.0, okuma_aralik=(0.2, 0.4)),
+    "okuma_bosluklari": dict(tur="karisik", sure=600.0, okuma_aralik=(0.2, 0.4), okuma_bosluk=(5.0, 1.5, 3.0)),
+    "panel_donuk": dict(tur="karisik", sure=900.0, donuk=((150.0, 240.0), (400.0, 490.0))),
+    "bos_okuma": dict(tur="karisik", sure=900.0, bos=((150.0, 240.0), (400.0, 490.0))),
+    "panel_yeniden": dict(tur="karisik", sure=600.0, yeniden=(200.0, 420.0)),
+    "gecikme7": dict(tur="karisik", sure=600.0, gecikme=7.0),
+    "gecikme7_metinsiz": dict(tur="karisik", sure=600.0, gecikme=7.0, esikler={"metin_ipucu": 0}),
+    "gecikme_surukle": dict(tur="karisik", sure=600.0, gecikme=(2.0, 6.0)),
+    "kuyruk_metin": dict(tur="karisik", sure=600.0, kuyruk=16, uzun_soz=0.5, devam=0.3),
+    "soru_satirlar": dict(tur="karisik", sure=600.0, soru_oran=0.3),
+    "soru_ciftler": dict(tur="karisik", sure=600.0, ciftler=True),
+    "gec_satir": dict(tur="karisik", sure=600.0, gec_satir=(0.12, 2.0, 3.5)),
+    # olay bicimi okuma bosluklari + buyuk gecikme: zaman capalari boslukta acilan (kaba) satirlara duser, metin ipucu
+    # kapali / eslesmez (bozuk=1.0) -> L yalniz zaman capalari ve capraz ilintiyle oturmali, kesin yanlis 0
+    "gecikme7_bosluk": dict(tur="karisik", sure=600.0, gecikme=7.0, okuma_aralik=(0.2, 0.4), okuma_bosluk=(5.0, 1.5, 3.0)),
+    "gecikme5_bosluk_metinsiz": dict(tur="karisik", sure=600.0, gecikme=5.0, okuma_aralik=(0.2, 0.4),
+                                     okuma_bosluk=(5.0, 1.5, 3.0), esikler={"metin_ipucu": 0}),
+    "bozuk1_bosluk": dict(tur="karisik", sure=600.0, gecikme=7.0, bozuk=1.0, okuma_aralik=(0.2, 0.4),
+                          okuma_bosluk=(5.0, 1.5, 3.0)),
+    # ayni kisi %50 olasilikla surdurur (0.8-2.5 sn duraklama), 4 uzak kisi, okuma bosluklari; metin ipucu kapali /
+    # altyazi metni eslesmiyor (bozuk=1.0): isinmada ayni satirin periyodik 'devam' baslari uzak L tohumlamamali
+    "devam_metinsiz": dict(tur="karisik", sure=600.0, okuma_aralik=(0.2, 0.4), okuma_bosluk=(5.0, 1.5, 3.0), devam=0.5,
+                           kisiler=[D4], esikler={"metin_ipucu": 0}),
+    "devam_bozuk1": dict(tur="karisik", sure=600.0, okuma_aralik=(0.2, 0.4), okuma_bosluk=(5.0, 1.5, 3.0), devam=0.5,
+                         kisiler=[D4], bozuk=1.0),
+    # toplanti ortasinda gecikme sicramasi (300. sn'de 2 -> 7 sn), 6 uzak kisi, okuma bosluklari: eski L ile kesin yanlis
+    # yerine 'Ad?' (L supheli) ve kullanici uyarisi (atama olcut 'gecikme') <= 60 sn
+    "gecikme_adim": dict(tur="karisik", sure=600.0, okuma_aralik=(0.2, 0.4), okuma_bosluk=(5.0, 1.5, 3.0),
+                         gecikme={"adim": (2.0, 7.0, 300.0)}, kisiler=[D4, D5, D6]),
+}
+SEDLER_PANEL = SEDLER
 SURELER = {"karisik": 900.0, "hizli_devir": 420.0, "klip_ici_devir": 420.0, "araya_girme": 420.0, "ayni_anda": 320.0,
            "ben_uzak": 480.0, "yanki": 480.0, "not_faz4": 600.0, "faz3": 480.0}
 
@@ -212,9 +271,12 @@ FAZ2_ZAMAN = ["bu akşam", "yarın sabah", "cuma günü", "pazartesi", "gelecek 
 # Whisper'in Faz 2 cumlelerinde bozdugu ekli biçimler (anahtar: dogru biçimin kucuk harfi) -> duyulan
 WHISPER_HATA_FAZ2 = dict(WHISPER_HATA, **{"jenkins'e": "cenkinse", "jira'ya": "ciraya", "kubernetes'in": "kubernetisin",
                                           "taslak'ın": "taşlakın", "commit'i": "komiti"})
-# Halusinasyon cesitleri: (ad, metin, sesli sure sn, akis, icerik_yeterli). icerik_yeterli: metin kendi basina ayirt edilir
-# (SesServisi suzgeci metni atar / kr-sn puani supheli yapar); False: akici kisa cumle ('Evet.' dongusu de suzgeçte tek
-# 'Evet.'a iner) -- yalniz sessiz bosluktaki cizelge kurali yakalar, konusma hemen ardindan ayirt edilemez (izlenir).
+# Halusinasyon cesitleri: (ad, metin, sesli sure sn, akis, icerik_yeterli[, zarf araligi]). icerik_yeterli: metin kendi
+# basina ayirt edilir (SesServisi suzgeci metni atar / kr-sn puani supheli yapar); False: akici kisa cumle ('Evet.' dongusu
+# de suzgeçte tek 'Evet.'a iner) -- konusma hemen ardindan ayirt edilemez (izlenir). B3: icsel puani 0.3-0.4 olan turler
+# (krsn_orta: kr/sn 25-30 +0.4; rms_dusuk: dusuk RMS + uzun metin +0.3) tek basina supheli degildir; altyazi canliyken
+# etkinlik yoksa cizelge kurali (+0.3) ile supheli_neden 'cizelge' olur: nota 'Bilinmeyen:' girer (negatif kontrol bunu
+# kapatinca kalkar).
 HAL_CESIT = (
     ("akici", "Bu konuyu daha sonra tekrar konuşuruz.", 2.4, "loopback", False),
     ("kara_liste", "İzlediğiniz için teşekkürler.", 2.4, "loopback", True),
@@ -224,6 +286,8 @@ HAL_CESIT = (
      2.0, "loopback", True),
     ("krsn_alt", "Sağ olun.", 6.0, "loopback", True),
     ("akici_mikrofon", "Tamam, o zaman bir sonraki konuya geçelim.", 2.4, "mikrofon", False),
+    ("krsn_orta", "Bu konuyla ilgili bütün maddeleri tekrar gözden geçirelim.", 2.1, "loopback", False),
+    ("rms_dusuk", "Anladım, o zaman bir sonraki konuya geçip devam edelim.", 2.4, "loopback", False, (0.004, 0.009)),
 )
 # Prompt sizintisi: sessiz klip (STT prompt verilmezse bos, verilirse prompt metnini soyler). (ad, sure, akis, zarf araligi)
 HAL_SESSIZ = (
@@ -289,14 +353,18 @@ class _Uretici:
 
 
 def uret_karisik(r, sure, kisiler, cakisma=0.05, hizli=0.12, tekrar=False, devam=0.12, uzun_sessizlik=0,
-                 hizli_aralik=(0.15, 0.5), taban=1.6, kisa=0.12, havuz=None, hata=None, sessizlik=(9.0, 12.0)):
+                 hizli_aralik=(0.15, 0.5), taban=1.6, kisa=0.12, havuz=None, hata=None, sessizlik=(9.0, 12.0),
+                 uzun_soz=0.0):
     """Genel toplanti: kisiler sirayla konusur; gecis: cakisma (kismi ust uste), hizli devir (<0.55 sn bosluk: VAD ayni
-    klibe koyar), normal bosluk; ayni kisi duraklayip surdurebilir; uzun_sessizlik: her N sozde 9-12 sn sessizlik."""
+    klibe koyar), normal bosluk; ayni kisi duraklayip surdurebilir; uzun_sessizlik: her N sozde 9-12 sn sessizlik;
+    uzun_soz: sozlerin bu payi 3 cumle (uzun tek satir: kuyruk metni senaryosu)."""
     g = _Uretici(r, havuz, hata)
     t, son, sayac = 2.0, None, 0
     while t < sure:
         kim = son if (son and r.random() < devam) else r.choice([k for k in kisiler if k != son])
         metin = g.cumle(tekrar, kisa)
+        if uzun_soz and r.random() < uzun_soz:
+            metin = " ".join([metin.rstrip(".") + "."] + [g.cumle(tekrar, 0.0) for _ in range(2)])
         d = g.sure(metin, taban)
         if son is None:
             bas = t
@@ -537,11 +605,14 @@ def uret(tur, r, sec):
     if tur == "karisik":
         hal = sec.get("halusinasyon")
         faz2 = sec.get("cumleler") == "faz2"
-        return uret_karisik(r, sure, [A, B, C, BEN], cakisma=sec.get("cakisma", 0.05), hizli=sec.get("hizli", 0.12),
-                            kisa=sec.get("kisa", 0.12), tekrar=sec.get("tekrar", False),
-                            uzun_sessizlik=(6 if hal in ("cesit", "sessiz") else 18) if hal else 0,
-                            havuz=FAZ2_SABLON if faz2 else None, hata=WHISPER_HATA_FAZ2 if faz2 else None,
-                            sessizlik=(4.5, 12.0) if hal in ("cesit", "sessiz") else (9.0, 12.0))
+        ut = uret_karisik(r, sure, [A, B, C] + list(sec.get("kisiler") or ()) + [BEN], cakisma=sec.get("cakisma", 0.05),
+                          hizli=sec.get("hizli", 0.12),
+                          kisa=sec.get("kisa", 0.12), tekrar=sec.get("tekrar", False),
+                          uzun_sessizlik=sec.get("uzun_sessizlik", (6 if hal in ("cesit", "sessiz") else 18) if hal else 0),
+                          havuz=FAZ2_SABLON if faz2 else None, hata=WHISPER_HATA_FAZ2 if faz2 else None,
+                          sessizlik=sec.get("sessizlik", (4.5, 12.0) if hal in ("cesit", "sessiz") else (9.0, 12.0)),
+                          devam=sec.get("devam", 0.12), uzun_soz=sec.get("uzun_soz", 0.0))
+        return ut
     if tur == "not_faz4":
         return uret_not(r, sure, ayni=sec.get("ayni", 0.10), devir=sec.get("devir", 0.10), bilgi=sec.get("bilgi", 0.2),
                         aralik=sec.get("aralik", (0.9, 3.0)), komsu=sec.get("komsu", 0.0))
@@ -557,14 +628,31 @@ class Panel:
     """Zemin gercegindeki her soz icin altyazi satiri: gecikme (lag +-0.4), 0.8 sn'lik parcalarla kelime artisi,
     bazi sozlerde 1 sn'lik geri alma (kelime sayisi -1) ve kalici yeniden yazim (kelimeler degisir, sayi ayni);
     ayni kisinin kisa duraklamayla suren sozu tek satir. Panel son PANEL_SATIR satiri gosterir. Kapali pencerede
-    (altyazi kapali) okuma `grup=False`; pencere bitince panel bostan baslar."""
+    (altyazi kapali) okuma `grup=False`; pencere bitince panel bostan baslar.
 
-    def __init__(self, ut, lag, kapali, r):
+    Satir metni (B6): zemin gercegi cumlesinin kelimeleri, BOZUK_PAY'i bozuk (sayi ve buyuk harfli ad korunur);
+    bozuk kelime sentetik iz (capNNNkNN / capNNNrNN) olarak yazilir: hicbir cikti dosyasinda gorunmemeli (sizinti
+    kapisi), konusmaci.py icin eslesmeyen kelimedir. Her sozde en az bir iz vardir. Kalici yeniden yazim (rev2)
+    kelimenin halini cevirir (bozuk -> dogru, dogru -> bozuk 'r'). jetonlar(): kimlik dizisi (eski duzenek; L_gercek).
+    Ek kipler: donuk pencereleri (satirlar pencere basindaki haliyle kalir, grup True), bos pencereleri (okuma bos,
+    grup True), yeniden (bu anlardan sonra panel yeniden cizilmis: tum satirlarin bozuk kumesi degisir, 2. kume),
+    kuyruk (satir en cok bu kadar kelime gosterir, basi duser), soru_oran (satir gruplarinin bu payi adsiz '?'),
+    gec_satir ((oran, en az, en cok): sozlerin bu payinin satiri bu kadar ek gecikmeyle belirir), lag: sabit ya da
+    soz basina islev (suruklenen gecikme)."""
+
+    def __init__(self, ut, lag, kapali, r, r_kel=None, donuk=(), bos=(), yeniden=(), kuyruk=None, soru_oran=0.0,
+                 gec_satir=None, bozuk=None):
         self.kapali = sorted(kapali)
+        self.donuk, self.bos, self.yeniden = sorted(donuk), sorted(bos), sorted(yeniden)
+        self.kuyruk, self.soru_oran = kuyruk, soru_oran
         self._onbellek = {}
+        r_kel = r_kel or random.Random(1)
+        bozuk = BOZUK_PAY if bozuk is None else bozuk
         for u in ut:
             n = len(u["slot"])
-            s = u["bas"] + max(0.0, lag + r.uniform(-0.4, 0.4))
+            lag_u = lag(u["bas"]) if callable(lag) else lag
+            ek = r.uniform(gec_satir[1], gec_satir[2]) if gec_satir and r.random() < gec_satir[0] else 0.0
+            s = u["bas"] + max(0.0, lag_u + ek + r.uniform(-0.4, 0.4))
             e = max(s + 0.6, u["bit"] + (s - u["bas"]))
             rev1 = rev2 = None
             if n >= 5 and r.random() < 0.2:
@@ -573,7 +661,8 @@ class Panel:
             if n >= 5 and r.random() < 0.2:
                 a = s + (e - s) * r.uniform(0.5, 1.0)
                 rev2 = (a, set(r.sample(range(n), max(1, int(0.3 * n)))))
-            u["alt"] = {"s": s, "e": e, "n": n, "rev1": rev1, "rev2": rev2}
+            u["alt"] = {"s": s, "e": e, "n": n, "rev1": rev1, "rev2": rev2, "gec": ek}
+            u["bozuk"] = (self._bozuk_kume(u, r_kel, bozuk), self._bozuk_kume(u, r_kel, bozuk))
         gruplar = []
         for u in sorted(ut, key=lambda x: x["bas"]):         # ayni kisinin duraksamali devami tek satir
             if gruplar and gruplar[-1]["kim"] == u["kim"] and u["bas"] - gruplar[-1]["son"] < 2.5:
@@ -584,8 +673,29 @@ class Panel:
         for g in gruplar:
             g["ilk"] = min(u["alt"]["s"] for u in g["uts"])
         gruplar.sort(key=lambda g: g["ilk"])
+        for i, g in enumerate(gruplar):
+            g["soru"] = bool(soru_oran) and (i * 7919 + 13) % 100 < soru_oran * 100
+            for u in g["uts"]:
+                u["soru"] = g["soru"]
         self.gruplar = gruplar
         self._ilkler = [g["ilk"] for g in gruplar]
+
+    @staticmethod
+    def _sabit(i, dogru):
+        """Sayi ve (cumle basi disinda) buyuk harfli ad bozulmaz (metin ipucu capalari gercekci kalsin)."""
+        return any(ch.isdigit() for ch in dogru) or (i > 0 and dogru[:1].isupper())
+
+    @classmethod
+    def _bozuk_kume(cls, u, r_kel, pay):
+        """Bozuk kelime indeksleri: sabit olmayanlarin ~pay'i; hic yoksa bir tane (her sozde en az bir iz). pay >= 1:
+        tum kelimeler iz (eski tam sentetik metin; sayi / ad dahil: metin ipucu hic eslesmez)."""
+        if pay >= 1.0:
+            return frozenset(range(len(u["slot"])))
+        kume = {i for i, (dogru, _) in enumerate(u["slot"]) if not cls._sabit(i, dogru) and r_kel.random() < pay}
+        if not kume and u["slot"]:
+            aday = [i for i, (dogru, _) in enumerate(u["slot"]) if not cls._sabit(i, dogru)] or [len(u["slot"]) - 1]
+            kume.add(r_kel.choice(aday))
+        return frozenset(kume)
 
     @staticmethod
     def _n(u, t):
@@ -599,10 +709,11 @@ class Panel:
             n -= 1
         return n
 
-    def jetonlar(self, u, t):
+    def _durum(self, u, t):
+        """(gorunen kelime sayisi, taban, yeniden yazim var mi, panel nesli) | None."""
         n = self._n(u, t)
         if n <= 0:
-            return []
+            return None
         a = u["alt"]
         # kapali pencere bitince panel bostan baslar: pencere sonrasi yalniz sonradan uretilen kelimeler gorunur
         taban = 0
@@ -611,6 +722,15 @@ class Panel:
                 taban = max(taban, self._n(u, w1) if a["e"] > w1 else a["n"])
         r2 = a["rev2"]
         yazildi = bool(r2) and r2[0] <= t
+        return n, taban, yazildi, bisect.bisect_right(self.yeniden, t)
+
+    def jetonlar(self, u, t):
+        """Kimlik dizisi: cap{soz}{k|r}{kelime}. (Satir metni icin bkz. kelimeler.)"""
+        d = self._durum(u, t)
+        if d is None:
+            return []
+        n, taban, yazildi, _ = d
+        r2 = u["alt"]["rev2"]
         anahtar = (u["id"], n, yazildi, taban)               # ayni durum ayni jetonlari verir (duzenek hizi)
         tok = self._onbellek.get(anahtar)
         if tok is None:
@@ -618,21 +738,57 @@ class Panel:
             self._onbellek[anahtar] = tok
         return tok
 
+    def kelimeler(self, u, t):
+        """Satirda gorunen kelimeler: dogru kelime ya da (bozuk kumede / yeniden yazimda) sentetik iz."""
+        d = self._durum(u, t)
+        if d is None:
+            return []
+        n, taban, yazildi, nesil = d
+        r2 = u["alt"]["rev2"]
+        anahtar = ("k", u["id"], n, yazildi, taban, nesil)
+        kel = self._onbellek.get(anahtar)
+        if kel is None:
+            bozuk = u["bozuk"][nesil % 2]
+            kel = []
+            for i in range(taban, n):
+                yeniden = yazildi and i in r2[1]
+                if (i in bozuk) != yeniden:
+                    kel.append(f"cap{u['id']:03d}{'r' if yeniden else 'k'}{i:02d}")
+                else:
+                    kel.append(u["slot"][i][0])
+            self._onbellek[anahtar] = kel
+        return kel
+
     def kapali_mi(self, t):
         return any(w0 <= t < w1 for w0, w1 in self.kapali)
 
+    def bos_mu(self, t):
+        return any(w0 <= t < w1 for w0, w1 in self.bos)
+
+    def donuk_ani(self, t):
+        """Donuk pencerede panel pencere basindaki halinde kalir."""
+        for w0, w1 in self.donuk:
+            if w0 <= t < w1:
+                return w0
+        return t
+
     def gorunen(self, t):
         """t anindaki panel: [(kim, metin)] (eski -> yeni)."""
+        if self.bos_mu(t):
+            return []
+        t = self.donuk_ani(t)
         i = bisect.bisect_right(self._ilkler, t)
         cikti = []
         while i > 0 and len(cikti) < PANEL_SATIR:
             i -= 1
             g = self.gruplar[i]
-            tok = []
+            kel = []
             for u in g["uts"]:
-                tok += self.jetonlar(u, t)
-            if tok:
-                cikti.append((g["kim"], " ".join(tok)))
+                kel += self.kelimeler(u, t)
+            if kel:
+                if self.kuyruk:
+                    kel = kel[-self.kuyruk:]
+                cikti.append(("?" if g["soru"] else g["kim"], " ".join(kel)))
         cikti.reverse()
         return cikti
 
@@ -801,7 +957,7 @@ class Kosum:
     """Tek senaryo kosumu. `alici`: zaman(an), okuma(ev), klip(ev), kontrol(), stt_durum(d) metotlari olan nesne.
     yeniden_kes(klip_no, an_epoch) -> bool bu nesnede (SesServisi.yeniden_kes sozlesmesi)."""
 
-    def __init__(self, ut, sec, seed, alici):
+    def __init__(self, ut, sec, seed, alici, katilimcilar=()):
         self.sec = sec
         self.r = random.Random(seed * 1000 + 1)
         self.ut = ut
@@ -816,12 +972,42 @@ class Kosum:
         self.kes_istek = self.kes_tamam = 0
         self.okuma_ornekleri = []            # panelin ornekleme anlari (goreli sn)
         self.lag = sec.get("gecikme", 2.0)
+        if isinstance(self.lag, dict) and "adim" in self.lag:   # gecikme sicramasi: {"adim": (once, sonra, an)}
+            a, b, an = (float(x) for x in self.lag["adim"])
+            self.lag = lambda bas: a if bas < an else b
+        elif isinstance(self.lag, (tuple, list)):           # suruklenen gecikme: (bas, son) toplanti boyunca dogrusal
+            a, b, sure = float(self.lag[0]), float(self.lag[1]), max(1.0, max(u["bit"] for u in ut))
+            self.lag = lambda bas: a + (b - a) * min(1.0, max(0.0, bas / sure))
         self.ben = sec.get("ben", BEN)                       # mikrofon sahibi (zemin gercegindeki ad)
         self.kapali = list(sec.get("kapali", ()))
         self.takilma = list(sec.get("takilma", ()))
         self.kesinti = list(sec.get("stt_kesinti", ()))
-        self.panel = Panel(ut, self.lag, self.kapali, self.r)
-        self.yakalayici = yakalayici.Yakalayici()
+        self.r_kel = random.Random(seed * 1000 + 3)                  # altyazi kelime bozulmasi (ana RNG akisi degismez)
+        self.panel = Panel(ut, self.lag, self.kapali, self.r, r_kel=self.r_kel, donuk=sec.get("donuk", ()),
+                           bos=sec.get("bos", ()), yeniden=sec.get("yeniden", ()), kuyruk=sec.get("kuyruk"),
+                           soru_oran=sec.get("soru_oran", 0.0), gec_satir=sec.get("gec_satir"), bozuk=sec.get("bozuk"))
+        self.okuma_bosluklari = []           # okuma dongusunun kisa duraklamalari (UIA yurumesi; kapsama olcumune girmez)
+        ob = sec.get("okuma_bosluk")         # (periyot, en az, en cok) sn
+        if ob:
+            rb = random.Random(seed * 1000 + 5)
+            k = 2.0
+            son = max(u["bit"] for u in ut) + 40
+            while k < son:
+                self.okuma_bosluklari.append((k, k + rb.uniform(ob[1], ob[2])))
+                k += ob[0]
+        # gercek Yakalayici: canlilik (degisti / donuk), yeniden bulma ve pencere alanlari gercek kod yolundan;
+        # K1 kancalari (ses_var_fn -> motor.son_loopback_ses, log_fn -> motor.olay_kaydet) alicida varsa baglanir
+        self.yakalayici = yakalayici.Yakalayici(katilimcilar=katilimcilar, okuma_fn=alici.okuma,
+                                                ses_var_fn=getattr(alici, "ses_var", None), log_fn=getattr(alici, "log", None),
+                                                ses_sure_fn=getattr(alici, "ses_sure", None))
+        self._oge_nesil = 0                  # sahte panel ogesi (runtime id: yeniden cizimde degisir)
+        self.ciftler = bool(sec.get("ciftler"))                      # satirlar gercek _ciftler yolundan (sahte UIA agaci)
+        self._kontroller = []
+        self.soru_okuma = 0                  # '?' satirli okuma sayisi (gercek _ciftler yolu)
+        if not sec.get("saat_adimlari"):
+            yakalayici._grup_bul = self._grup_bul_sahte
+            if self.ciftler:
+                yakalayici.auto = types.SimpleNamespace(WalkControl=self._walk_control)
         self.adim = bool(sec.get("saat_adimlari"))             # saat adimi modu: damgalar gercek kod yollarindan
         self._akislar = {}
         self.uzun = bool(sec.get("uzun"))                            # Faz 3: config uzun_pencere
@@ -872,14 +1058,16 @@ class Kosum:
         for v in self._akis_klip.values():
             v.sort()
         son = max(u["bit"] for u in self.ut) + 40
+        aralik = self.sec.get("okuma_aralik", (0.7, 1.1))     # okuma sonrasi uyku: R ~1.2 sn; (0.2, 0.4): R ~0.6 (olay)
+        duraklar = self.takilma + self.okuma_bosluklari
         t = r.uniform(0.2, 0.9)                              # okumalar: R ~1.2 sn (okuma + uyku), jitter
         while t < son:
-            if any(a <= t < b for a, b in self.takilma):
-                t = max(b for a, b in self.takilma if a <= t < b) + r.uniform(0.0, 1.0)
+            if any(a <= t < b for a, b in duraklar):
+                t = max(b for a, b in duraklar if a <= t < b) + r.uniform(0.0, 1.0)
                 continue
             d = r.uniform(1.0, 2.0) if r.random() < self.sec.get("yavas_okuma", 0.02) else r.uniform(0.1, 0.4)   # %2 yavas okuma
             self.at(t + d, "okuma", (t, d))
-            t += d + r.uniform(0.7, 1.1)                     # tek okuyucu: bir sonraki okuma oncekinin ardindan
+            t += d + r.uniform(*aralik)                      # tek okuyucu: bir sonraki okuma oncekinin ardindan
         kul = self.sec.get("kulaklik", True)                 # kulaklik pasif tespiti ~35 sn sonra
         if kul in (True, False):
             self.at(35.0, "kulaklik", {"tur": "kulaklik", "durum": kul, "guven": 0.8})
@@ -900,11 +1088,12 @@ class Kosum:
             if not uzak and not (mod == "cesit" and bosluk >= 4.0):
                 continue
             if mod == "cesit":
-                ad, metin, sure, akis, yeterli = HAL_CESIT[i_tur % len(HAL_CESIT)]
+                ad, metin, sure, akis, yeterli = HAL_CESIT[i_tur % len(HAL_CESIT)][:5]
                 if not uzak and sure > 3.0:
                     i_tur += 1
-                    ad, metin, sure, akis, yeterli = HAL_CESIT[i_tur % len(HAL_CESIT)]
-                zarf_ara = None
+                    ad, metin, sure, akis, yeterli = HAL_CESIT[i_tur % len(HAL_CESIT)][:5]
+                tanim = HAL_CESIT[i_tur % len(HAL_CESIT)]
+                zarf_ara = tanim[5] if len(tanim) > 5 else None
             else:
                 ad, sure, akis, zarf_ara = HAL_SESSIZ[i_tur % len(HAL_SESSIZ)]
                 metin, yeterli = "ee", True
@@ -1135,7 +1324,52 @@ class Kosum:
             y.oku()                                          # okuma_fn -> alici.okuma
             self.alici.zaman(T0 + t)
             return
-        self.alici.okuma(self.yakalayici._okuma_yayinla(T0 + bas, T0 + bas + d, grup, gorunen))
+        if self.ciftler and grup:                            # satirlar gercek _ciftler yolundan (sahte UIA agaci)
+            self._kontroller = self._uia_agaci(gorunen)
+            self.yakalayici.grup = self.yakalayici.grup or self._oge()
+            gorunen = self.yakalayici._ciftler()
+        self.soru_okuma += any(kim == "?" for kim, _ in gorunen)
+        self._okuma_gercek(T0 + bas, T0 + bas + d, grup, gorunen)
+
+    # --- gercek Yakalayici okuma yolu (UIA'siz): canlilik, donuk tespiti, yeniden bulma, pencere alanlari ---
+    def _oge(self):
+        """Sahte panel ogesi: runtime id panel yeniden cizildikce (sec 'yeniden') degisir."""
+        return types.SimpleNamespace(GetRuntimeId=lambda nesil=self._oge_nesil: (42, 7, nesil))
+
+    def _grup_bul_sahte(self):
+        self._oge_nesil = bisect.bisect_right(self.panel.yeniden, self.saat)
+        return self._oge(), "Alt yazılar | E2E | Microsoft Teams"
+
+    def _uia_agaci(self, gorunen):
+        """Panelin TextControl dizisi: her satir [ad, metin]. Panel doluyken en ustteki (en eski) satirin ad denetimi
+        gorunur agacin disindadir (kaydirma): yalniz metni okunur -> _ciftler ('?', metin) verir. (Ortadaki adsiz satiri
+        _ciftler bir onceki konusmacinin devami sayar: Teams ayni kisinin ardisik satirlarinda adi yinelemez.)"""
+        out = []
+        for i, (kim, metin) in enumerate(gorunen):
+            if not (i == 0 and len(gorunen) >= PANEL_SATIR) and kim != "?":
+                out.append(types.SimpleNamespace(Name=kim, ControlTypeName="TextControl"))
+            out.append(types.SimpleNamespace(Name=metin, ControlTypeName="TextControl"))
+        return out
+
+    def _walk_control(self, *_a, **_k):
+        return [(c, 1) for c in self._kontroller]
+
+    def _okuma_gercek(self, bas_e, bit_e, grup, gorunen):
+        """Yakalayici._oku'nun UIA disi kismi: degisti / donuk (ses_var_fn) / pencere alanlari ve okuma olayi gercek
+        _okuma_yayinla'dan; ardindan _bakim (zorla / periyodik yeniden bulma, sahte _grup_bul)."""
+        y = self.yakalayici
+        if not grup:
+            y.grup = None
+            y._onceki_okuma = None
+            y._okuma_yayinla(bas_e, bit_e, False, [], degisti=False, pencere=y._pencere())
+            return
+        if y.grup is None:
+            y._ata(self._oge())
+            y.hazir = True
+        degisti = y._degisim_izle(gorunen, bit_e)
+        donuk = y._donuk_denetle(bit_e)
+        y._okuma_yayinla(bas_e, bit_e, True, gorunen, degisti=degisti, donuk=donuk, pencere=y._pencere())
+        y._bakim()
 
     def _yeni_klip_no(self, c):
         c["no"] = self._no
@@ -1226,26 +1460,36 @@ class Kosum:
         return True
 
     # --- zemin gercegi sorgulari ---
+    def gecikme(self, bas):
+        """Teams gecikmesi (sn): sabit ya da soz basina (suruklenen)."""
+        return self.lag(bas) if callable(self.lag) else self.lag
+
     def kapsamasiz(self, c, pay=1.0):
         """Klibin altyazi zamani penceresi tamamen kapali / takilma penceresinde mi? (kesin '?' beklenir)"""
-        a, b = c["bas"] + self.lag, c["bit"] + self.lag
+        a, b = c["bas"] + self.gecikme(c["bas"]), c["bit"] + self.gecikme(c["bas"])
         return any(a >= w0 + pay and b <= w1 for w0, w1 in self.kapali + self.takilma)
 
     def kapsamali(self, c):
         """Klibin altyazi zamani hic kapali / takilma penceresine degmiyor mu (genis pay)?"""
-        a, b = c["bas"] + self.lag - 1.0, c["bit"] + self.lag + 3.0
+        a, b = c["bas"] + self.gecikme(c["bas"]) - 1.0, c["bit"] + self.gecikme(c["bas"]) + 3.0
         return not any(a < w1 and b > w0 for w0, w1 in self.kapali + self.takilma)
 
-    def L_gercek(self):
+    def L_gercek(self, son_sn=None):
         """Idealize L: >= 1 sn sessizligin ardindan baslayan uzak sozun, klip basi ile panelde ilk goruldugu okuma
-        ornegi arasindaki fark (medyan). Konusmaci'nin capa tanimi (MIMARI_v3 §3 madde 5a) ile ayni olcu."""
+        ornegi arasindaki fark (medyan). Konusmaci'nin capa tanimi (MIMARI_v3 §3 madde 5a) ile ayni olcu.
+        son_sn: yalniz toplantinin son bu kadar saniyesindeki sozler (suruklenen gecikmede bitisteki gercek deger)."""
         uzak = sorted([u for u in self.ut if u["kim"] != self.ben and not u["sessiz"]], key=lambda x: x["bas"])
+        if son_sn is not None:
+            sinir = max(u["bas"] for u in uzak) - son_sn if uzak else 0.0
+            uzak = [u for u in uzak if u["bas"] >= sinir]
         farklar, son_bit, ornek = [], -1e9, self.okuma_ornekleri
         for u in uzak:
             ilk = u["bas"] - son_bit >= 1.0
             son_bit = max(son_bit, u["bit"])
-            if not ilk or any(w0 - 3 <= u["bas"] + self.lag <= w1 + 3 for w0, w1 in self.kapali + self.takilma):
+            if not ilk or any(w0 - 3 <= u["bas"] + self.gecikme(u["bas"]) <= w1 + 3 for w0, w1 in self.kapali + self.takilma):
                 continue
+            if any(a <= u["alt"]["s"] <= b for a, b in self.okuma_bosluklari):
+                continue                                     # satir okuma boslugunda belirdi: ilk gorulme ani olculemez
             for t in ornek[bisect.bisect_left(ornek, u["alt"]["s"]):]:
                 if t > u["alt"]["s"] + 8:
                     break
@@ -1307,10 +1551,24 @@ class MotorAlici:
         self.silinme = collections.Counter()  # satir_sil olaylarinin nedeni (yanki / halusinasyon ...)
         self.loglar = []                     # Motor.log mesajlari (Olaylar paneli): sessiz yedek dususu burada gorunur
         self.kapanis_gecikme = []            # parca kapanisi ertelemesi (sn): kapanis karari -> parca_kapandi
+        self.atama = []                      # (goreli sn, veri): Motor 'atama' olaylari (B5 uyarisi / duzelme)
+        self.kapsama = []                    # (goreli sn, veri): Motor 'kapsama' olaylari (neden / mesaj)
+        self.L_izi = []                      # (goreli sn, L) 5 sn'de bir
         self._kp, self._kp_bas = None, None
 
     def zaman(self, an):
         self.saat.t = an
+
+    # K1 kancalari (isler.py ile ayni baglama): yakalayici canlilik icin son loopback konusma bitisi, log -> olay_kaydet
+    def ses_var(self):
+        return self.m.son_loopback_ses() if self.m is not None else None
+
+    def ses_sure(self, bas_epoch):
+        return self.m.loopback_konusma_sn(bas_epoch) if self.m is not None else 0.0
+
+    def log(self, mesaj, **ek):
+        if self.m is not None:
+            self.m.olay_kaydet(mesaj, **ek)
 
     def okuma(self, ev):
         self.m.okuma_ekle(ev)
@@ -1320,6 +1578,9 @@ class MotorAlici:
 
     def kontrol(self):
         self.m.kontrol()
+        an = self.saat.t - T0
+        if not self.L_izi or an - self.L_izi[-1][0] >= 5.0:    # L izi: 5 sn'de bir (gecikme uyum suresi)
+            self.L_izi.append((round(an, 1), round(self.m.konusmaci.L, 3)))
         kp = self.m._kapanis
         if kp is not None and kp is not self._kp:
             self._kp, self._kp_bas = kp, self.saat.t
@@ -1337,6 +1598,10 @@ class MotorAlici:
             self.silinme[veri.get("neden")] += 1
         elif tip == "log":
             self.loglar.append(str(veri))
+        elif tip == "atama":
+            self.atama.append((round(self.saat.t - T0, 1), dict(veri)))
+        elif tip == "kapsama":
+            self.kapsama.append((round(self.saat.t - T0, 1), dict(veri)))
 
 
 class KonusmaciAlici:
@@ -1996,7 +2261,7 @@ def _not_olcum(m, k, satirlar, not_md, sahte, alici):
 
 def _ortam_kaydet():
     return {"saat": (saat_mod.simdi, saat_mod.duvar, saat_mod.duvardan, saat_mod.time), "gercek_time": gercek_time.time,
-            "grup_bul": yakalayici._grup_bul, "PARCA_TOKEN": M.PARCA_TOKEN, "DUZELT_MIN_TOKEN": M.DUZELT_MIN_TOKEN,
+            "grup_bul": yakalayici._grup_bul, "auto": yakalayici.auto, "PARCA_TOKEN": M.PARCA_TOKEN, "DUZELT_MIN_TOKEN": M.DUZELT_MIN_TOKEN,
             "sor": llm.sor, "token_say": llm.token_say, "BAGLAM_PENCERESI": llm.BAGLAM_PENCERESI,
             "BUTCE_AYAR": llm.BUTCE_AYAR, "kesinlestir": M.Motor._aksiyonlari_kesinlestir,
             "dayanak": M.dayanak_kontrolu}
@@ -2005,6 +2270,7 @@ def _ortam_kaydet():
 def _ortam_geri_yukle(e):
     gercek_time.time = e["gercek_time"]
     yakalayici._grup_bul = e["grup_bul"]
+    yakalayici.auto = e["auto"]
     saat_mod.time = e["saat"][3]
     saat_mod.sifirla()                                       # ankrajlar gercek saate (adim modu sanal ankraj birakir)
     saat_mod.simdi, saat_mod.duvar, saat_mod.duvardan = e["saat"][:3]
@@ -2048,7 +2314,7 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
                 dict(a, tarih=tarih_mod.tarih_coz(a.get("tarih"), self.tarih)) for a in aksiyonlar]
             M.dayanak_kontrolu = lambda not_md, transkript, esik=0.34, ozet_kaynak=None: (not_md, [])
         ut = uret(tur, random.Random(seed), sec)
-        liste = list(katilimcilar) if katilimcilar is not None else [A, B, C, BEN]
+        liste = list(katilimcilar) if katilimcilar is not None else [A, B, C] + list(sec.get("kisiler") or ()) + [BEN]
         kl_dir = M.yeni_klasor(f"e2e {tur} {seed}", BAS.date())
         alici = MotorAlici(saat)
         havuz = terim_mod.TerimHavuzu(sec["terim_yol"]) if sec.get("terim_yol") else None     # None: toplantiya ozel havuz
@@ -2061,14 +2327,16 @@ def calistir(seed=7, tur="karisik", katilimcilar=None, **sec):
         if sec.get("ogrenme", True) is False:                # ogrenme kapali: gozlem de ogrenme de yok
             m._ogren = lambda: None
             m.terimler.gozlem_ekle = lambda *a, **kw: False
-        k = Kosum(ut, sec, seed, alici)
+        k = Kosum(ut, sec, seed, alici, katilimcilar=liste)
         if sec.get("ipucu"):                                 # isler.py ile ayni: terim.prompt(seri, katilimcilar)
             k.servis._ipucu_fn = _ipucu_onbellekli(m)
         m.yeniden_kes_fn = k.yeniden_kes
+        m.yeniden_bul_fn = k.yakalayici.yeniden_bul           # B5: atama basarisizsa panel yeniden aranir (isler.py gibi)
         k.calistir()
         saat.t = T0 + k.bitis + 30
         m.kontrol()
         durum = dict(m.konusmaci.durum())
+        durum["araliklar_liste"] = m.konusmaci.araliklar_listesi()   # cizelge (metin yok): tur dagilimi / kapsanan sure
         m.bitir()
         stt_eksik = m.stt_eksik()
         not_md = m.notu_uret()
@@ -2289,6 +2557,7 @@ def _motor_olcum(k, alici, satirlar, jsonl, not_md, ham_cikti, durum, stt_eksik,
     sonuc.update(_hayalet_olcum(k, karar, ayr, "\n".join(sahte.mesajlar)))
     sonuc["satir_sil"] = dict(alici.silinme)
     sonuc.update(_ipucu_olcum(k, satirlar))
+    sonuc.update(_panel_olcum(k, alici, satirlar, durum, sec))
     sonuc.update(ek or {})
     sonuc["llm_gorevleri"] = {g: sahte.gorevler.count(g) for g in set(sahte.gorevler)}
     sonuc["not_uzunluk"] = len(not_md)
@@ -2341,11 +2610,15 @@ def _duzeltme_olcum(k, satirlar):
 
 
 def _hayalet_olcum(k, karar, ayr, llm_metni=""):
-    """Halusinasyon klipleri (Faz 2 kapisi): satiri olmayan = dusen (filtre / at / tekrar / satir_sil); satir var ve supheli
-    (nota girmez) = hal_supheli; satir var ve supheli degil = hal_kesin (KAPI: 0). Konusma ardinda ayirt edilemeyen
-    turler (hal_belirsiz: akici cumle) hal_belirsiz_kesin olarak yalniz izlenir."""
+    """Halusinasyon klipleri (Faz 2 kapisi, B3 kurali): satiri olmayan = dusen (filtre / at / tekrar / satir_sil);
+    icsel supheli (nota girmez) = hal_supheli; '?' ya da cizelge suphesi (nota 'Bilinmeyen:' girer) = hal_bilinmeyen;
+    'Ad?' / 'A → B' / 'A / B' (kesin degil, sahip uretmez) = hal_adayli; adli ve spk_guven >= 0.7 = hal_kesin (KAPI: 0).
+    Konusma ardinda ayirt edilemeyen turlerin (hal_belirsiz: akici cumle) kesin adi hal_belirsiz_kesin olarak ayri
+    sayilir. hal_llm_girdi: icsel supheli satirin metni LLM'e gitti (KAPI: 0); hal_bilinmeyen_llm: Bilinmeyen satir
+    LLM'e gitti (tasarim geregi: izlenir)."""
     s = collections.Counter(dict.fromkeys(
-        ("hal_toplam", "hal_dusen", "hal_supheli", "hal_belirsiz_kesin", "hal_kesin", "hal_llm_girdi"), 0))
+        ("hal_toplam", "hal_dusen", "hal_supheli", "hal_bilinmeyen", "hal_adayli", "hal_belirsiz_kesin", "hal_kesin",
+         "hal_llm_girdi", "hal_bilinmeyen_llm", "hal_cizelge"), 0))
     dagilim = collections.Counter()              # "konum:tur:sonuc" -> n (kapsam gorunurlugu)
     for no, c in sorted(k.klipler.items()):
         if not c["hayalet"]:
@@ -2354,20 +2627,120 @@ def _hayalet_olcum(k, karar, ayr, llm_metni=""):
         sat = karar.get(no)
         if sat is None:
             sonuc = "dusen"
-        elif sat.get("supheli"):
+        elif sat.get("supheli") and sat.get("supheli_neden") != "cizelge":
             sonuc = "supheli"
+        elif sat.get("supheli_neden") == "cizelge" or _sinif(sat) == "soru":
+            sonuc = "bilinmeyen"
+            s["hal_cizelge"] += sat.get("supheli_neden") == "cizelge"
+        elif _sinif(sat) != "kesin":
+            sonuc = "adayli"
         elif c.get("hal_belirsiz"):
             sonuc = "belirsiz_kesin"
+            ayr.append(("HALUSINASYON_KESIN_YAKIN", _ozet_klip(c), c.get("hal_tur"), sat.get("hal_puani"), sat.get("speaker")))
         else:
             sonuc = "kesin"
             ayr.append(("HALUSINASYON_KESIN", _ozet_klip(c), c.get("hal_tur"), sat.get("hal_puani"), sat.get("speaker")))
         s["hal_" + sonuc] += 1
         if sat is not None and len(sat.get("text") or "") >= 20 and sat["text"] in llm_metni:
-            s["hal_llm_girdi"] += 1                   # supheli satir LLM'e (duzeltme / ozet) gitmemeli
+            if sonuc == "supheli":
+                s["hal_llm_girdi"] += 1               # icsel supheli satir LLM'e (duzeltme / ozet) gitmemeli
+            else:
+                s["hal_bilinmeyen_llm"] += 1
         dagilim[f"{'yakin' if c.get('yakin') else 'uzak'}:{c.get('hal_tur', 'eski')}:{sonuc}"] += 1
     out = dict(s)
     out["hal_dagilim"] = dict(dagilim)
     return out
+
+
+def _panel_olcum(k, alici, satirlar, durum, sec):
+    """B6 panel / kapsama olcumleri (uzak = teslim edilmis loopback satirlari; halusinasyon / yanki haric): neden dagilimi
+    (spk_neden ilk parcasi), kapsama_yok / panel_donuk / kimse / hayalet / Bilinmeyen / belirsiz oranlari (%), pencere
+    ici (donuk / bos pencereleri, altyazi zamani; bas >= w0 + 2) ve pencere disi (>= 10 sn uzak) oranlari, uyari olaylari
+    (atama / kapsama; ilk uyari sn), gec guncelleme sayisi, yakalayici yeniden bulma / loglari, bitisteki gercek gecikme,
+    uzun turlerin son klip paylari (kuyruk metni), '?' satirlarinin klipleri."""
+    lag_at = k.gecikme
+    uzak = []
+    for sat in satirlar:
+        c = k.klipler.get(sat.get("klip_no"))
+        if c is None or c["akis"] != "loopback" or c["hayalet"] or c["yanki"] or sat.get("kaynak") != "ses":
+            continue
+        uzak.append((c, sat))
+    n = len(uzak)
+    neden = collections.Counter((sat.get("spk_neden") or "").split("+")[0] for _, sat in uzak)
+    liste = durum.get("araliklar_liste") or []
+    o = {"uzak_satir": n, "neden": dict(neden), "durum_neden": durum.get("neden"), "bosluk_sn": durum.get("bosluk_sn"),
+         "araliklar": durum.get("araliklar"), "araliklar_tur": dict(collections.Counter(a["tur"] for a in liste)),
+         "araliklar_yeni": sum(1 for a in liste if a["tur"] == "yeni"),
+         "aralik_sure_sn": round(sum(a["son"] - a["ilk"] for a in liste), 1)}
+    for ad in ("kapsama_yok", "panel_donuk", "kimse", "hayalet", "yapiskan"):
+        o[ad + "_oran"] = _yuzde(neden.get(ad, 0), n)
+    o["bilinmeyen_oran"] = _yuzde(sum(1 for _, sat in uzak if M._konusan(sat) == "Bilinmeyen"), n)
+    o["belirsiz_oran"] = _yuzde(sum(1 for _, sat in uzak if _sinif(sat) != "kesin"), n)
+    o["cizelge_supheli"] = sum(1 for sat in satirlar if sat.get("supheli_neden") == "cizelge")
+    blok = M.blok_metni(satirlar)                            # transkript blogu (not / LLM girdisi)
+    o["cizelge_bilinmeyen_eksik"] = sum(1 for sat in satirlar if sat.get("supheli_neden") == "cizelge"
+                                        and not (M._konusan(sat) == "Bilinmeyen" and M.nota_girer(sat)
+                                                 and M.satir_metni(sat) in blok))
+    pencereler = sorted(list(sec.get("donuk", ())) + list(sec.get("bos", ())))
+    ici, disi = [], []
+    for c, sat in uzak:
+        a, b = c["bas"] + lag_at(c["bas"]), c["bit"] + lag_at(c["bas"])
+        if any(w0 + 2.0 <= a and b <= w1 for w0, w1 in pencereler):
+            ici.append(sat)
+        elif all(b <= w0 - 2.0 or a >= w1 + 10.0 for w0, w1 in pencereler):
+            disi.append(sat)
+    ici_neden = collections.Counter((sat.get("spk_neden") or "").split("+")[0] for sat in ici)
+    o.update(ici=len(ici), ici_neden=dict(ici_neden), ici_panel_donuk_oran=_yuzde(ici_neden.get("panel_donuk", 0), len(ici)),
+             ici_kimse_oran=_yuzde(ici_neden.get("kimse", 0), len(ici)), disi=len(disi),
+             disi_belirsiz_oran=_yuzde(sum(1 for sat in disi if _sinif(sat) != "kesin"), len(disi)),
+             disi_bilinmeyen_oran=_yuzde(sum(1 for sat in disi if M._konusan(sat) == "Bilinmeyen"), len(disi)))
+    o["pencere_ilk"] = pencereler[0][0] if pencereler else None
+    o["uzak_kararlar"] = [{"klip_no": c["klip_no"], "bas": round(c["bas"], 2), "bit": round(c["bit"], 2),
+                           "speaker": sat.get("speaker"), "spk_guven": float(sat.get("spk_guven") or 0.0),
+                           "neden": sat.get("spk_neden")} for c, sat in uzak]          # goreli sn; metin yok
+    o["atama"] = list(alici.atama)
+    o["kapsama_olay"] = list(alici.kapsama)
+    o["atama_ilk"] = next((an for an, v in alici.atama if v.get("var") is False), None)
+    o["kapsama_ilk"] = next((an for an, v in alici.kapsama if v.get("var") is False), None)
+    o["kapsama_neden"] = sorted({str(v.get("neden")) for _, v in alici.kapsama if v.get("var") is False})
+    say = collections.Counter(sid for _an, tip, sid, d in alici.olaylar if tip == "satir_guncelle" and d == "karar")
+    o["gec_guncelleme"] = sum(1 for v in say.values() if v > 1)
+    o["yeniden_bul"] = k.yakalayici.yeniden_bul_sayisi
+    o["yak_log"] = {ad: sum(1 for m_ in alici.loglar if anahtar in m_) for ad, anahtar in (
+        ("donuk", "değişmedi, hoparlörde konuşma var"), ("canli", "yeniden güncelleniyor"),
+        ("yeniden_cizilmis", "panel yeniden çizilmiş"), ("zorla", "konuşmacı ataması başarısız"),
+        ("atama", "Konuşmacı atanamıyor"), ("kapsama", "Konuşmacı bilgisi yok"))}
+    Ls = k.L_gercek(son_sn=90.0)
+    o["L_gercek_son"] = round(Ls, 2) if Ls is not None else None
+    o["L_hata_son"] = round(abs(durum["L"] - Ls), 2) if Ls is not None else None
+    o["L_izi"] = list(alici.L_izi)
+    Lg = k.L_gercek()
+    uyum = None                                              # L'nin gercek gecikmeye ilk oturdugu an (sonra sapmadan)
+    if Lg is not None and alici.L_izi:
+        for i, (an, L) in enumerate(alici.L_izi):
+            if all(abs(L2 - Lg) <= 0.8 for _, L2 in alici.L_izi[i:]):
+                uyum = an
+                break
+    o["L_uyum_sn"] = uyum
+    # kuyruk metni: >= 16 kelimelik tek konusmacili turun, tur basindan >= 6 sn sonra baslayan klipleri
+    grup_of = {u["id"]: g for g in k.panel.gruplar for u in g["uts"]}
+    uzun = []
+    for c, sat in uzak:
+        if not c["sozler"] or len({u["kim"] for u in c["sozler"]}) != 1:
+            continue
+        g = grup_of.get(c["sozler"][0]["id"])
+        if g is None or sum(len(u["slot"]) for u in g["uts"]) < 16 or c["bas"] < min(u["bas"] for u in g["uts"]) + 6.0:
+            continue
+        uzun.append((sat["klip_no"], round(float(sat["adaylar"][0][1]) if sat.get("adaylar") else 0.0, 3), sat.get("spk_neden")))
+    o["uzun_tur_klip"] = len(uzun)
+    o["uzun_tur_p1_dusuk"] = [x for x in uzun if x[1] < 0.6]
+    soru = [(c, sat) for c, sat in uzak if c["sozler"] and all(u.get("soru") for u in c["sozler"])]
+    o["soru_klip"] = len(soru)
+    o["soru_okuma"] = k.soru_okuma
+    o["soru_neden"] = dict(collections.Counter((sat.get("spk_neden") or "").split("+")[0] for _, sat in soru))
+    o["soru_adli"] = [(sat["klip_no"], sat.get("speaker"), sat.get("spk_guven")) for _, sat in soru
+                      if (sat.get("speaker") or "?") != "?"]
+    return o
 
 
 def _ipucu_olcum(k, satirlar):
@@ -2461,15 +2834,19 @@ def konusmaci_kos(ut, seed=1, katilimcilar=None, ben=BEN, esikler=None, **sec):
     sec = dict(sec)
     sec.setdefault("tur", "karisik")
     sec.setdefault("ben", ben)
-    kon = Konusmaci(ben=ben, katilimcilar=katilimcilar if katilimcilar is not None else sorted({u["kim"] for u in ut}),
-                    esikler=esikler)
+    liste = katilimcilar if katilimcilar is not None else sorted({u["kim"] for u in ut})
+    kon = Konusmaci(ben=ben, katilimcilar=liste, esikler=esikler)
     alici = KonusmaciAlici(kon)
-    k = Kosum(ut, sec, seed, alici)
-    alici.k = k
-    k.calistir()
-    alici.zaman(T0 + k.bitis + 30)
-    alici.kontrol()
-    alici.bitir()
+    eski = (yakalayici._grup_bul, yakalayici.auto)
+    try:
+        k = Kosum(ut, sec, seed, alici, katilimcilar=liste)
+        alici.k = k
+        k.calistir()
+        alici.zaman(T0 + k.bitis + 30)
+        alici.kontrol()
+        alici.bitir()
+    finally:
+        yakalayici._grup_bul, yakalayici.auto = eski
     sayac, ayr, _cift, _eksik = degerlendir(k, alici.karar)
     return sayac, ayr, k, kon
 
@@ -2655,7 +3032,7 @@ def main(argv=None):
         else:
             adlar.append(argv[i])
         i += 1
-    tum = dict(SENARYOLAR, **SENARYOLAR_FAZ2, **SENARYOLAR_FAZ4)
+    tum = dict(SENARYOLAR, **SENARYOLAR_FAZ2, **SENARYOLAR_FAZ4, **SENARYOLAR_PANEL)
     for ad, sc in tum.items():
         if adlar and ad not in adlar:
             continue

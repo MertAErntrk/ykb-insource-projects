@@ -174,7 +174,7 @@ class SahteYakalayici:
     hata_at = None                                                  # sinif ozelligi: oku() bunu firlatir
     isi = None
 
-    def __init__(self, katilimcilar=(), okuma_fn=None):
+    def __init__(self, katilimcilar=(), okuma_fn=None, **kw):
         self.hazir = False
         self.okuma_fn = okuma_fn
 

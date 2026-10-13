@@ -315,12 +315,17 @@ class Faz1Hat(Hat):
         return {"oneri": sum(k.get("oneri", 0) for k in kayitlar), "kabul": sum(len(k.get("kabul") or []) for k in kayitlar),
                 "red": dict(sorted(red.items())), "llm": "gercek" if self.ayar.get("llm") else "sahte"}
 
+    OKUMA_EK = ("degisti", "donuk", "yeniden_bul", "pencere", "okuma_sn")    # K2 canlilik alanlari (kayitta varsa aynen)
+
     def okuma_olayi(self, okuma):
         self.saat.t = okuma.get("bit_epoch") or okuma.get("bas_epoch") or self.saat.t
         gorunen = [[g[0], g[1]] for g in (okuma.get("gorunen") or []) if len(g) >= 2 and isinstance(g[1], str)]
-        self.motor.okuma_ekle({"tur": "okuma", "okuma_no": okuma.get("okuma_no"), "bas_epoch": okuma["bas_epoch"],
-                               "bit_epoch": okuma.get("bit_epoch", okuma["bas_epoch"]),
-                               "grup": okuma.get("grup", True), "gorunen": gorunen})
+        ev = {"tur": "okuma", "okuma_no": okuma.get("okuma_no"), "bas_epoch": okuma["bas_epoch"],
+              "bit_epoch": okuma.get("bit_epoch", okuma["bas_epoch"]), "grup": okuma.get("grup", True), "gorunen": gorunen}
+        for ad in self.OKUMA_EK:                                     # eski kayitlarda yok: konusmaci varsayilanla okur
+            if ad in okuma:
+                ev[ad] = okuma[ad]
+        self.motor.okuma_ekle(ev)
 
     def okuma(self, an, gorunen):                                  # eski imza (Hat sozlesmesi)
         self.okuma_olayi({"bas_epoch": an, "bit_epoch": an, "gorunen": gorunen})

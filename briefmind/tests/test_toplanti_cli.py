@@ -34,7 +34,7 @@ class SahteServis:
 
 
 class SahteYakalayici:
-    def __init__(self, katilimcilar=(), okuma_fn=None):
+    def __init__(self, katilimcilar=(), okuma_fn=None, **kw):
         self.okuma_fn = okuma_fn
         self.hazir = True
         self.tur = 0

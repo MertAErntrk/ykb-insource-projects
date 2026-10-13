@@ -16,6 +16,7 @@ import llm
 import motor as motor_mod
 import outlook
 import saat
+import yakalayici as yakalayici_mod
 from motor import Motor
 from yakalayici import Yakalayici, ekran_okuyucu
 
@@ -32,6 +33,110 @@ def hata_logla(tb):
     ayar_mod.hata_yaz(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====\n{tb}")
 
 
+class _UIAIsi:
+    """Okuma dongusunu bloke etmeden TEK bir UIA isini ayri thread'de calistirir (thread'in kendi UIA/COM baslatmasi).
+    Dongu yalniz calisiyor / sonuc_al() ile bakar. Ayni anda en fazla bir is."""
+
+    def __init__(self, ad):
+        self.ad = ad
+        self._t = None
+        self._bitti = True                  # calisan is yok
+        self._alindi = True
+        self._sonuc = None
+        self._hata = None
+
+    @property
+    def calisiyor(self):
+        return not self._bitti
+
+    def baslat(self, fn, *args):
+        if self.calisiyor:
+            return False
+        self._bitti, self._alindi, self._sonuc, self._hata = False, False, None, None
+        self._t = threading.Thread(target=self._calis, args=(fn,) + args, daemon=True, name="uia-" + self.ad)
+        self._t.start()
+        return True
+
+    def _calis(self, fn, *args):
+        sonuc, hata = None, None
+        try:
+            with (_UIA_THREAD() if _UIA_THREAD else contextlib.nullcontext()):
+                sonuc = fn(*args)
+        except Exception as e:
+            hata = e
+        self._sonuc, self._hata = sonuc, hata
+        self._bitti = True                  # en son: sonuc/hata yayinlandi
+
+    def sonuc_al(self):
+        """Biten isin sonucu BIR KEZ: (True, sonuc, hata) | (False, None, None)."""
+        if self._bitti and not self._alindi:
+            self._alindi = True
+            return True, self._sonuc, self._hata
+        return False, None, None
+
+
+class _PencereIzleyici:
+    """Toplanti penceresi (Ayril dugmesi) hala var mi? toplanti_penceresi_var() UIA yuruyusudur (Teams buyukken > 1,8 sn):
+    okuma dongusunde calisirsa her seferinde okuma boslugu acar (gercek toplanti: 347 satirin 298'i kapsama_yok).
+    Bu yuzden ayri thread'de, yalniz panel okunamiyorken (hizli_sn) ya da en az yavas_sn'de bir calisir; dongu yalniz
+    onbellekteki sonuca bakar. adim() -> True: pencere yok_sn'dir yok (toplanti bitti)."""
+
+    def __init__(self, hizli_sn, yavas_sn, yok_sn):
+        self.hizli_sn, self.yavas_sn, self.yok_sn = hizli_sn, yavas_sn, yok_sn
+        self._is = _UIAIsi("pencere")
+        self._son_istek = saat.simdi()
+        self.deger = None                   # son kesin sonuc: True/False | None (henuz yok)
+        self._yok_bas = None                # ardisik 'yok' sonuclarinin ilk bitis ani
+        self.kontrol_sayisi = 0
+
+    def adim(self, hazir):
+        bitti, sonuc, hata = self._is.sonuc_al()
+        simdi = saat.simdi()
+        if bitti:
+            self._son_istek = simdi             # aralik denetimin BITISINDEN sayilir (yavas yuruyus ard arda donmesin)
+        if bitti and hata is None:
+            self.deger = bool(sonuc)
+            self._yok_bas = None if self.deger else (self._yok_bas or simdi)
+        if self.deger is False and self._yok_bas is not None and simdi - self._yok_bas >= self.yok_sn:
+            return True
+        aralik = self.hizli_sn if (not hazir or self.deger is False) else self.yavas_sn
+        if not self._is.calisiyor and simdi - self._son_istek >= aralik:
+            self._son_istek = simdi
+            self.kontrol_sayisi += 1
+            self._is.baslat(lambda: yakalayici_mod.toplanti_penceresi_var())
+        return False
+
+
+class _YavasDongu:
+    """Okuma dongusunun gercek periyodu esigi sure_sn boyunca asarsa BIR KEZ log (toparlanip yine yavaslarsa yeniden)."""
+
+    def __init__(self, esik_sn, sure_sn, log_fn):
+        self.esik_sn, self.sure_sn, self.log_fn = esik_sn, sure_sn, log_fn
+        self._bas = None
+        self._n = 0
+        self._top = self._oku_top = self._uyku_top = 0.0
+        self._loglandi = False
+
+    def adim(self, simdi, periyot, oku_sn, uyku_sn):
+        """simdi: monotonik an; periyot: bir onceki okuma baslangicindan beri; oku_sn/uyku_sn: o turun okuma/uyku suresi."""
+        if periyot is None or periyot <= self.esik_sn:
+            self._bas, self._n, self._top, self._oku_top, self._uyku_top = None, 0, 0.0, 0.0, 0.0
+            self._loglandi = False
+            return
+        if self._bas is None:
+            self._bas = simdi - periyot
+        self._n += 1
+        self._top += periyot
+        self._oku_top += oku_sn
+        self._uyku_top += uyku_sn
+        if not self._loglandi and simdi - self._bas > self.sure_sn:
+            self._loglandi = True
+            n = self._n
+            self.log_fn(f"okuma döngüsü yavaş: periyot ort. {self._top / n:.1f} sn (okuma {self._oku_top / n:.2f} sn, "
+                        f"bekleme {self._uyku_top / n:.2f} sn, diğer {max(0.0, (self._top - self._oku_top - self._uyku_top) / n):.2f} sn), "
+                        f"{int(simdi - self._bas)} sn'dir; konuşmacı eşleşmesi zayıflayabilir")
+
+
 class YakalamaIsi(QtCore.QThread):
     """Toplanti boyunca calisir: ses olaylari (SesServisi olay_fn) ve altyazi okumalari (Yakalayici okuma_fn) -> motor.
     Bitince salt-okunur belirsizler listesini yayar.
@@ -45,6 +150,11 @@ class YakalamaIsi(QtCore.QThread):
     toplanti_bitti = QtCore.pyqtSignal(list)
     hata = QtCore.pyqtSignal(str)
     KAPANIS_SN = 30                         # hizli kapanista ses servisi + acik parcanin diske yazilmasi icin toplam sure
+    PENCERE_HIZLI_SN = 5.0                  # toplanti penceresi denetimi: panel okunamiyorken (ayri thread)
+    PENCERE_YAVAS_SN = 30.0                 # ... panel okunuyorken en az bu aralikla
+    PENCERE_YOK_SN = 45.0                   # pencere bu kadar sn yoksa toplanti bitti kabul edilir
+    DONGU_YAVAS_SN = 10.0                   # okuma periyodu 2*OKUMA_ARALIK'i bu kadar sn asarsa bir kez log
+    ALTYAZI_DENEME_SN = 8                   # altyazi acma denemeleri: 8, 16 sn
 
     def __init__(self, baslik, ctx, terimler, duzelt, otobitir, ayar=None):
         super().__init__()
@@ -117,6 +227,7 @@ class YakalamaIsi(QtCore.QThread):
             return []
         self._bitirildi = True
         self.motor.yeniden_kes_fn = None              # ses durdu: bitiste devir bolunmez ('A → B')
+        self.motor.yeniden_bul_fn = None              # yakalayici durdu: panel yeniden aranamaz
         self.durum.emit("Parçalar tamamlanıyor…")
         bitti, belirsizler, hata = self._sinirli(self.motor.bitir)
         if hata is not None:
@@ -128,6 +239,14 @@ class YakalamaIsi(QtCore.QThread):
                                   "(eksikse Geçmiş → Yeniden özetle)")
             return []
         return belirsizler or []
+
+    def _olay_log(self, mesaj, **ek):
+        """Gunluk: motor.olay_kaydet (Olaylar + olaylar.jsonl) varsa o, yoksa (sahte motor) yalniz Olaylar."""
+        kaydet = getattr(self.motor, "olay_kaydet", None)
+        if kaydet is not None:
+            kaydet(mesaj, **ek)
+        else:
+            self.olay.emit("log", mesaj)
 
     def _ipucu(self, akis=None):
         """Whisper prompt'u: katilimci adlari + serinin <=20 ilgili terimi (<=~380 karakter). Bos olabilir."""
@@ -196,7 +315,13 @@ class YakalamaIsi(QtCore.QThread):
             self.ses_servisi = None
             self.motor.yeniden_kes_fn = None
             self._stt_yok(repr(e))
-        y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=self.motor.okuma_ekle)
+        # motor kancalari (K1): son loopback konusma bitisi (panel canliligi), olay gunlugu; yoksa (sahte motor) yedek
+        y = Yakalayici(katilimcilar=katilimcilar, okuma_fn=self.motor.okuma_ekle,
+                       ses_var_fn=getattr(self.motor, "son_loopback_ses", None),
+                       ses_sure_fn=getattr(self.motor, "loopback_konusma_sn", None),      # K1b
+                       log_fn=getattr(self.motor, "olay_kaydet", None) or self._olay_log)
+        if hasattr(y, "yeniden_bul"):
+            self.motor.yeniden_bul_fn = y.yeniden_bul     # atama basarisizsa motor paneli yeniden aratir
         if olcum:
             try:
                 y.okuma_kaydi_ac(klasor)                          # olcum/okumalar.jsonl
@@ -210,8 +335,15 @@ class YakalamaIsi(QtCore.QThread):
             try:
                 self.durum.emit("Teams'te altyazı bekleniyor…")
                 bekleme_bas, deneme, ipucu_verildi = saat.simdi(), 0, False
-                pencere_yok_sn, son_pencere_kontrol = 0.0, saat.simdi()
+                # UIA yuruyusleri (pencere denetimi, altyazi acma/dil) ayri thread'de: okuma dongusu hic bloke olmaz
+                pencere = _PencereIzleyici(self.PENCERE_HIZLI_SN, self.PENCERE_YAVAS_SN, self.PENCERE_YOK_SN)
+                ac_isi, dil_isi = _UIAIsi("altyazi-ac"), _UIAIsi("altyazi-dil")
+                yavas = _YavasDongu(2 * yakalayici_mod.OKUMA_ARALIK, self.DONGU_YAVAS_SN, self._olay_log)
+                onceki_bas, uyku_sn = None, 0.0
                 while not self._dur:
+                    dongu_bas = time.monotonic()
+                    periyot = None if onceki_bas is None else dongu_bas - onceki_bas
+                    onceki_bas = dongu_bas
                     stt_kesik = False
                     if self.ses_servisi is not None:
                         try:
@@ -233,43 +365,34 @@ class YakalamaIsi(QtCore.QThread):
                         ipucu_verildi = True
                         self.olay.emit("log", "altyazı görünmüyor. Konuşmacı adları için Teams'te bir kez: "
                                               "… → Ayarlar → Erişilebilirlik → 'Toplantılarımda her zaman alt yazıları göster'")
-                    # --- toplanti penceresi kapandi mi? (altyazi olmadan bitisi anlamak icin, 5 sn'de bir)
-                    if basladi and self.ses_servisi and saat.simdi() - son_pencere_kontrol > 5:
-                        son_pencere_kontrol = saat.simdi()
-                        try:
-                            from yakalayici import toplanti_penceresi_var
-                            if toplanti_penceresi_var():
-                                pencere_yok_sn = 0.0
-                            else:
-                                pencere_yok_sn += 5
-                                if pencere_yok_sn >= 45:
-                                    self.olay.emit("log", "Teams toplantı penceresi kapandı, toplantı bitti kabul edildi.")
-                                    self.olay.emit("sure_dondur", None)
-                                    break
-                        except Exception:
-                            pass
-                    if (not basladi and self.ayar.get("altyazi_otomatik", True) and deneme < 2
-                            and saat.simdi() - bekleme_bas > 8 * (deneme + 1)):
-                        deneme += 1
-                        basarili = False
-                        try:
-                            from yakalayici import altyazi_ac
-                            self.olay.emit("log", f"altyazı görünmüyor, Teams'te açmayı deniyorum ({deneme}/2)…")
-                            basarili = altyazi_ac(lambda m: self.olay.emit("log", m))
-                        except Exception as e:
-                            self.olay.emit("log", f"altyazı otomatik açma hatası: {e!r}")
+                    # --- toplanti penceresi kapandi mi? (altyazi olmadan bitisi anlamak icin): ayri thread, onbellekli sonuc
+                    if basladi and self.ses_servisi and pencere.adim(y.hazir):
+                        self.olay.emit("log", "Teams toplantı penceresi kapandı, toplantı bitti kabul edildi.")
+                        self.olay.emit("sure_dondur", None)
+                        break
+                    # --- altyazi acma denemesi (ayri thread; sonuc geldiginde islenir)
+                    bitti, basarili, hata = ac_isi.sonuc_al()
+                    if bitti:
+                        if hata is not None:
+                            self.olay.emit("log", f"altyazı otomatik açma hatası: {hata!r}")
                         if not basarili and deneme >= 2:
                             self.olay.emit("altyazi_iste", None)
+                    if (not basladi and self.ayar.get("altyazi_otomatik", True) and deneme < 2 and not ac_isi.calisiyor
+                            and saat.simdi() - bekleme_bas > self.ALTYAZI_DENEME_SN * (deneme + 1)):
+                        deneme += 1
+                        self.olay.emit("log", f"altyazı görünmüyor, Teams'te açmayı deniyorum ({deneme}/2)…")
+                        ac_isi.baslat(lambda: yakalayici_mod.altyazi_ac(lambda m: self.olay.emit("log", m)))
+                    oku_bas = time.monotonic()
                     for s in y.oku():                    # okuma olayi okuma_fn ile motora; satirlar yalniz gorunum/yedek
                         self.motor.altyazi_satiri(s)
+                    oku_sn = time.monotonic() - oku_bas
+                    bitti, _, hata = dil_isi.sonuc_al()
+                    if bitti and hata is not None:
+                        self.olay.emit("log", f"altyazı dili ayarlanamadı: {hata!r}")
                     if y.hazir and not basladi:
                         basladi = True
                         if self.ayar.get("altyazi_turkce", True):
-                            try:
-                                from yakalayici import altyazi_dili_turkce
-                                altyazi_dili_turkce(lambda m: self.olay.emit("log", m))
-                            except Exception as e:
-                                self.olay.emit("log", f"altyazı dili ayarlanamadı: {e!r}")
+                            dil_isi.baslat(lambda: yakalayici_mod.altyazi_dili_turkce(lambda m: self.olay.emit("log", m)))
                         self.durum.emit("Yakalanıyor")
                         self.olay.emit("log", "altyazı bulundu, yakalama başladı.")
                     self.motor.kontrol()
@@ -284,7 +407,9 @@ class YakalamaIsi(QtCore.QThread):
                     elif basladi:
                         self.durum.emit(f"Yakalanıyor — {self.motor.parca_no} parça, "
                                         f"açık parça ~{self.motor.mevcut_tok} token{ek}")
-                    time.sleep(y.onerilen_aralik())      # A7: UIA okumasi yavassa 1,2 sn
+                    uyku_sn = y.onerilen_aralik()         # A7: UIA okumasi yavassa 1,2 sn
+                    yavas.adim(time.monotonic(), periyot, oku_sn, uyku_sn)
+                    time.sleep(uyku_sn)
             finally:
                 ekran_okuyucu(False)
             for s in y.bitir():

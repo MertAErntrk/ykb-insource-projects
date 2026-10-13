@@ -57,7 +57,7 @@ def klip(no, bas, bit, metin="Bütçe tablosunu güncelledim.", akis="loopback",
 def karar(no, speaker, guven=0.9, **ek):
     k = {"klip_no": no, "akis": "loopback", "speaker": speaker, "spk_guven": guven, "adaylar": [[speaker, guven]],
          "devir": False, "cakisma": False, "at": False, "bol": None, "neden": "baskin", "kapsama": True,
-         "kimlik_turu": "kisi"}
+         "kimlik_turu": "kisi", "cizelge_canli": True}      # K3: kapsama var, panel donuk degil, klipten sonra degismis
     k.update(ek)
     return k
 
@@ -69,6 +69,7 @@ class SahteKonusmaci:
         self.kararlar, self.bitir_kararlari, self.klipler, self.okumalar = [], [], [], []
         self.bolunemeyen, self.bitir_sayisi, self.kulaklik, self.kapsama = [], 0, None, True
         self.bekleyen_fn = None
+        self.neden, self.bosluk_sn, self.l_olcum = None, 0.0, 0     # K3: durum()['neden'] / ['bosluk_sn']; L_yeniden_olc sayaci
 
     def klip_ekle(self, k):
         self.klipler.append(k)
@@ -96,7 +97,11 @@ class SahteKonusmaci:
         return karar(no, f"{A} → {B}", 0.5, devir=True, neden="devir_bolunemedi")
 
     def durum(self):
-        return {"L": 2.0, "MAD": 0.0, "R": 0.6, "kapsama": self.kapsama, "araliklar": 0}
+        return {"L": 2.0, "MAD": 0.0, "R": 0.6, "kapsama": self.kapsama, "araliklar": 0,
+                "neden": self.neden, "bosluk_sn": self.bosluk_sn}
+
+    def L_yeniden_olc(self):
+        self.l_olcum += 1
 
     def kimlik_turu(self, ad):
         return "kisi"
@@ -137,12 +142,15 @@ def okumalar(sozler, bitis, R=0.6, hiz=3.0, lag=2.0, kapali=(), metin=None):
     return out
 
 
-def akit(m, saat, sozler, klipler, bitis, gecikme=0.6, **kw):
+def akit(m, saat, sozler, klipler, bitis, gecikme=0.6, hal=None, **kw):
     """Okumalari ve klip olaylarini (bit + STT gecikmesi aninda) zaman sirasiyla motora verir; her olaydan sonra
-    kontrol(). klipler: [(no, akis, bas, bit, metin)] (T0'a gore sn)."""
+    kontrol(). klipler: [(no, akis, bas, bit, metin)] (T0'a gore sn). hal: {klip_no: ses.py icsel hal_puani}."""
     olay = [(o["bit_epoch"], 0, "okuma", o) for o in okumalar(sozler, bitis, **kw)]
     for no, akis, bas, bit, metin in klipler:
-        olay.append((T0 + bit + gecikme, 1, "klip", klip(no, bas, bit, metin, akis)))
+        ev = klip(no, bas, bit, metin, akis)
+        if hal and no in hal:
+            ev["hal_puani"] = hal[no]
+        olay.append((T0 + bit + gecikme, 1, "klip", ev))
     olay.sort(key=lambda x: (x[0], x[1]))
     for t, _, tur, o in olay:
         saat.t = t

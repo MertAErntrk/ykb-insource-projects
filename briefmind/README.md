@@ -40,7 +40,7 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 | `stt.py` | Whisper istemcisi, halüsinasyon puanı (`halusinasyon_puani`), tekrar temizleme |
 | `saat.py` | Adıma dayanıklı zaman kaynağı: duvar saati sıçrasa da ses ve altyazı zaman çizelgeleri kaymaz |
 | `toplanti.py` | Komut satırı arayüzü (başla / bitir / liste) |
-| `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, terim aktarma ve geri alma, LLM teşhisi, taşmış transkript temizliği) |
+| `tools/` | Teşhis ve yardımcı scriptler (STT testi, Teams düğme keşfi, terim aktarma ve geri alma, LLM teşhisi, taşmış transkript temizliği, toplantı klasörü teşhisi `toplanti_teshis.py`, Windows altyazı paneli izleyici `altyazi_izle.py`) |
 | `deploy/` | GPU'suz Whisper servisi için OpenShift manifestleri (CPU, faster-whisper) |
 
 ## Nasıl çalışır (v3)
@@ -48,7 +48,9 @@ Motor: parçalar (≤3000 token / 12 dk) ─► terim düzeltmesi (LLM önerir, 
 - **Konuşmacı zamandan bulunur.** Metin Whisper'dan gelir; konuşmacı, klibin zaman aralığının Teams altyazı çizelgesiyle kesişmesinden bulunur (metin eşlemesi yok). Karar gelene kadar satır "beklemede…" görünür.
 - **Gösterim.** `Ad` (güven ≥ 0,7); `Ad?` (ad var ama güven düşük); `Bilinmeyen` (kimse yok); `A → B` (klipte sıralı devir); `A / B (aynı anda)` (çakışma: bu satırdan karar ya da aksiyon çıkmaz, metin ⟨⟩ içinde).
 - **Terimler otomatik.** Terim düzeltmesi ve öğrenme onay istemez; LLM yalnızca öneri verir, kelime sınırı, ek uyumu ve sayı/tarih kapıları karar verir.
-- **Belirsizler paneli.** Kararsız kelimeler, emin olunmayan konuşmacılar ve şüpheli klipler Not sekmesinde salt okunur listelenir; `ts:` bağlantısı transkripti o ana açar. Şüpheli klip nota girmez.
+- **Belirsizler paneli.** Kararsız kelimeler, emin olunmayan konuşmacılar ve şüpheli klipler Not sekmesinde salt okunur listelenir; `ts:` bağlantısı transkripti o ana açar. Ses içeriği şüpheli (halüsinasyon) klip nota girmez; yalnız altyazıda karşılığı bulunmayan klip nota "Bilinmeyen:" olarak girer.
+- **Altyazı paneli kendini toparlar.** Teams penceresi büyütülse, arka plana alınsa ya da altyazı paneli yeniden çizilse de panel her 30 sn'de doğrulanır; konuşma sürerken 12 sn değişmeyen panel yeniden aranır. Pencere denetimi okumayı bekletmez; kısa okuma boşlukları (≤ 20 sn) konuşmacı aralıklarını sıfırlamaz.
+- **Gecikme kendini ölçer.** Altyazı gecikmesi (L) konuşma başlangıçlarıyla altyazı satırlarının çapraz ilintisinden ve ayırt edici kelimelerden sürekli ölçülür; gecikme değişirse kararlar "Ad?" ile sınırlanır ve yeniden ölçülür.
 - **Sahiplik temkinli.** Sorumlu yalnız kesin kaynaktan atanır (güvenli konuşmacının kendi taahhüdü ya da adıyla görev verilen katılımcı); belirsiz sahipler "Sahibi belirsiz" bloğunda kalır, e-posta ve Jira taslağına girmez.
 - **Ölçüm araçları.** `tools/olcum.py` (WER, SER, belirsiz oranı), `tools/etiketle.py` (klip etiketleme), `tools/replay.py` (kaydı çevrimdışı yeniden işletme). Kayıt yalnızca `olcum_kaydi` açıkken yazılır.
 
@@ -137,6 +139,11 @@ Kimsenin cihaz ayarlaması gerekmez; kulaklıkla, dizüstü hoparlör/mikrofonuy
   karşı taraf konuşurken 20 sn hoparlör sesi yoksa da uyarı çıkar.
 - **Teşhis:** `python tools\ses_teshis.py --otomatik` (8 sn konuş, bir ses çal): cihaz başına seviye, tam sessizlik ve
   uygulamanın seçeceği mikrofon.
+- **Teşhis (konuşmacı hep "Bilinmeyen"):** `python tools\toplanti_teshis.py "toplantilar\<klasör>" [--dosya cikti.txt]` — ad (K1..Kn), URL,
+  anahtar ve transkript metni içermeyen yapıştırılabilir rapor: dakika tablosu, L/MAD/R, aralık istatistiği, okuma
+  boşlukları ve otomatik hüküm (destekler / desteklemez / veri yok). Okuma ayrıntısı için Ayarlar → "Ölçüm kaydı" açık olmalı.
+- **Panel izleyici (Windows):** `python tools\altyazi_izle.py --dosya izle.txt` — Teams altyazı panelini her okumada tek satırla
+  izler (öğe kimliği, satır/kelime sayısı, değişti mi, pencere simge/büyük/önplan, okuma ms); ad ve metin yazmaz.
 
 ## Kullanım
 
@@ -146,7 +153,10 @@ Kimsenin cihaz ayarlaması gerekmez; kulaklıkla, dizüstü hoparlör/mikrofonuy
    kapsayınca (en geç 15 sn) yerleşir. Güven 0,7'nin altındaysa ad "Ad?" yazılır, kimse yoksa "Bilinmeyen".
    Klip içinde konuşmacı değiştiyse klip en sessiz noktadan ikiye kesilip yeniden çözülür; kesilemezse "A → B".
    Kulaklıksız (hoparlör) kullanımda mikrofona giren karşı taraf sesi atılır. Altyazı 60 sn'den uzun okunamazsa
-   "Konuşmacı bilgisi yok" şeridi çıkar. Parçalar arka planda özetlenir; kapanış, satırlarının konuşmacı kararını
+   "Konuşmacı bilgisi yok" şeridi çıkar (panel güncellenmiyorsa "pencere küçültülmüş/arka planda olabilir" der).
+   Konuşmacılar 2 dakika boyunca eşleşmezse ya da kararların çoğu belirsiz kalırsa "Konuşmacı atanamıyor" /
+   "Konuşmacı ataması belirsiz" / "Altyazı gecikmesi değişmiş olabilir" şeridi çıkar; uygulama paneli yeniden arar ve
+   gecikmeyi yeniden ölçer, bu sırada adlar "Ad?" ya da "Bilinmeyen" yazılır, kesin gösterilmez. Parçalar arka planda özetlenir; kapanış, satırlarının konuşmacı kararını
    en fazla 20 sn bekler. Kısık gelen ses (tepe < 0,3) Whisper'a gitmeden yükseltilir.
 4. **Bitir** → not doğrudan üretilir; onay istenmez. Not sekmesindeki şeritte aşama ve geçen süre görünür
    ("Parça 3/12 özetleniyor", "Özet paragrafı yazılıyor"…) → Outlook taslağı. Kararsız kalınan kelimeler,

@@ -19,7 +19,9 @@ KATILIMCI = (A, B, C, BEN)
 
 class Sim:
     def __init__(self, R=0.7, hiz=3.0, panel=12, okuma_suresi=0.1, gecikme=1.0, ben=BEN,
-                 katilimcilar=KATILIMCI, esikler=None, kulaklik=True, R_sapma=0.0, seed=0, olay_fn=None):
+                 katilimcilar=KATILIMCI, esikler=None, kulaklik=True, R_sapma=0.0, seed=0, olay_fn=None,
+                 donuk=None, donuk_bayrak=False, yeniden_ciz=None, kuyruk_kelime=None, soru_oran=0.0,
+                 metin=False, bozuk=0.0, ilgisiz=False):
         self.R, self.hiz, self.panel, self.okuma_suresi, self.gecikme = R, hiz, panel, okuma_suresi, gecikme
         self.ben = ben
         self.R_sapma = R_sapma
@@ -30,6 +32,15 @@ class Sim:
         self.satirlar = {}           # satir_no -> [soz indexleri]
         self.kapali = []             # grup False araliklari
         self.takili = []             # okuma yok araliklari
+        self.donuk = donuk           # (a, b): panel bu aralikta donuk (satirlar a anindaki haliyle kalir)
+        self.donuk_bayrak = donuk_bayrak   # yakalayici gibi okumaya "donuk": True yaz (>= 12 sn donunca)
+        self.yeniden_ciz = yeniden_ciz     # t: bu andan sonra panel yeniden cizilmis (tum satir metinleri farkli)
+        self.kuyruk_kelime = kuyruk_kelime # satir en cok bu kadar kelime gosterir (basi duser, kuyruk kayar)
+        self.soru_oran = soru_oran         # satirlarin bu payi adsiz ("?") gorunur
+        self.metin = metin                 # sozlere sentetik kelimeler: klip "text" ve satir metni (metin ipucu)
+        self.bozuk = bozuk                 # altyazi kelimelerinin bu payi bozuk (farkli kelime)
+        self.ilgisiz = ilgisiz             # altyazi metni kliplerle ilgisiz (baska kelimeler)
+        self._wrng = random.Random(seed * 7919 + 17)
         self.klipler = {}
         self.no = 0
         self.sonuc = {}
@@ -37,14 +48,49 @@ class Sim:
         self.cocuklar = {}
         self.ek_okumalar = []        # (bas, gorunen) elle
 
+    _HECE = [c + v for c in "bdfgklmnprstvyz" for v in "aeiou"]
+
+    def _kelime_uret(self, n):
+        """Sentetik, birbirinden ayirt edilir sozcukler (>= 6 harf); %15 durak kelime (ayirt edici degil)."""
+        out = []
+        for _ in range(n):
+            if self._wrng.random() < 0.15:
+                out.append(self._wrng.choice(("ve", "bir", "bu", "için", "ama", "yani", "evet")))
+            else:
+                out.append("".join(self._wrng.choice(self._HECE) for _ in range(3)))
+        return out
+
     # ---- girdi
     def soz(self, kim, s, e, lag=2.0, satir=None):
         if satir is None:
             satir = len(self.satirlar)
             self.satirlar[satir] = []
         self.satirlar[satir].append(len(self.sozler))
-        self.sozler.append({"kim": kim, "s": T0 + s, "e": T0 + e, "lag": lag, "satir": satir})
+        z = {"kim": kim, "s": T0 + s, "e": T0 + e, "lag": lag, "satir": satir}
+        if self.metin:
+            n = max(1, int(round((e - s) * self.hiz)))
+            z["kelimeler"] = self._kelime_uret(n)
+            z["panel"] = self._kelime_uret(n) if self.ilgisiz else list(z["kelimeler"])
+            if self.bozuk:
+                yedek = self._kelime_uret(n)
+                z["panel"] = [yedek[j] if self._wrng.random() < self.bozuk else w for j, w in enumerate(z["panel"])]
+        self.sozler.append(z)
         return satir
+
+    def _klip_metni(self, klip):
+        """Klibin akisindaki sozlerin klip icinde soylenen kelimeleri (kelime j: s + (j + 0.5) / hiz)."""
+        if not self.metin:
+            return ""
+        kel = []
+        for z in self.sozler:
+            if self.akis_of(z["kim"]) != klip["akis"] or "kelimeler" not in z:
+                continue
+            for j, w in enumerate(z["kelimeler"]):
+                an = z["s"] + (j + 0.5) / self.hiz
+                if klip["bas"] <= an <= klip["bit"]:
+                    kel.append((an, w))
+        kel.sort()
+        return " ".join(w for _, w in kel)
 
     def klip(self, bas, bit, akis="loopback", mutlak=False):
         no = self.no
@@ -79,7 +125,24 @@ class Sim:
         top = max(1, int(round((z["e"] - z["s"]) * self.hiz)))
         return min(top, 1 + int((t - z["s"] - z["lag"]) * self.hiz))
 
+    def _satir_metni(self, no, idx, t):
+        parcalar = []
+        for i in idx:
+            z = self.sozler[i]
+            n = self._kelime(z, t)
+            if self.metin:
+                parcalar.extend(z["panel"][:n])
+            else:
+                parcalar.extend("r%dk%d" % (no, j) for j in range(len(parcalar), len(parcalar) + n))
+        if self.kuyruk_kelime:
+            parcalar = parcalar[-self.kuyruk_kelime:]
+        if self.yeniden_ciz is not None and t - T0 >= self.yeniden_ciz:
+            parcalar = ["x" + w for w in parcalar]
+        return " ".join(parcalar)
+
     def gorunen(self, t):
+        if self.donuk and T0 + self.donuk[0] <= t < T0 + self.donuk[1]:
+            t = T0 + self.donuk[0]
         rows = []
         for no, idx in self.satirlar.items():
             n = sum(self._kelime(self.sozler[i], t) for i in idx)
@@ -87,7 +150,9 @@ class Sim:
                 continue
             ilk = min(self.sozler[i]["s"] + self.sozler[i]["lag"] for i in idx)
             kim = self.sozler[idx[0]]["kim"]
-            rows.append((ilk, no, kim, " ".join("r%dk%d" % (no, j) for j in range(n))))
+            if self.soru_oran and (no * 7919 + 13) % 100 < self.soru_oran * 100:
+                kim = "?"
+            rows.append((ilk, no, kim, self._satir_metni(no, idx, t)))
         rows.sort()
         return [[kim, metin] for _, _, kim, metin in rows[-self.panel:]]
 
@@ -154,10 +219,14 @@ class Sim:
                 tob = t + self.okuma_suresi / 2.0
                 ok = {"tur": "okuma", "okuma_no": okuma_no, "bas_epoch": t, "bit_epoch": t + self.okuma_suresi,
                       "grup": grup, "gorunen": self.gorunen(tob) if grup else []}
+                if self.donuk_bayrak and self.donuk and T0 + self.donuk[0] + 12 <= tob < T0 + self.donuk[1]:
+                    ok["donuk"] = True
                 okuma_no += 1
                 heapq.heappush(olaylar, (t + self.okuma_suresi, 0, next(sira), "okuma", ok))
             t += self.R + (self.rng.uniform(-self.R_sapma, self.R_sapma) if self.R_sapma else 0.0)
         for k in list(self.klipler.values()):
+            if self.metin and not k["text"]:
+                k["text"] = self._klip_metni(k)
             heapq.heappush(olaylar, (k["bit"] + self.gecikme, 1, next(sira), "klip", k))
         while olaylar:
             an, _, _, tur, veri = heapq.heappop(olaylar)
@@ -262,7 +331,29 @@ def test_altyazi_gecikmesi_L_tahmini(lag):
     assert not yanlis_kesinler(sim)
 
 
-def test_L_5sn_ustu_ornek_atilir():
+def test_L_ust_ustu_ornek_atilir():
+    """L oturduktan (2 sn) sonra gecikmesi 6 sn'ye sicrayan sozlerin capalari L_ust = max(L_maks, L + L_pay) disinda:
+    atilir (L ya yerinde kalir ya capraz ilinti yeniden olcer), o kliplerin karari kesin degil, kesin yanlis yok.
+    (Isinmada pencere capraz_ust: 6 sn'lik gecikme dogrudan ogrenilir; bkz. test_isinmada_gecikme_6_dogrudan_ogrenilir.)"""
+    olaylar = []
+    sim = Sim(olay_fn=olaylar.append)
+    t = isinma(sim, lag=2.0)
+    nolar = []
+    for kim in (A, B, C, A):
+        sim.soz(kim, t, t + 2.0, 6.0)
+        nolar.append(sim.klip(t, t + 2.0))
+        t += 9.0
+    sim.kos()
+    d = sim.kon.durum()
+    assert d["atilan_ornek"] >= 3, d
+    assert abs(d["L"] - (2.0 + sim.R / 2)) <= 0.6 or any(o["mesaj"] == "L çapraz ilinti" for o in olaylar), d
+    assert all(sim.sonuc[no]["spk_guven"] <= 0.6 for no in nolar)
+    assert not yanlis_kesinler(sim)
+
+
+def test_isinmada_gecikme_6_dogrudan_ogrenilir():
+    """Isinmada (capa_min'den az ornek) aday penceresi capraz_ust (10 sn): 6 sn'lik gecikme, pencerede tek aday
+    oldugundan dogrudan ogrenilir; kesin yanlis yok."""
     sim = Sim()
     t = 0.0
     for kim in (A, B, C, A):
@@ -271,8 +362,8 @@ def test_L_5sn_ustu_ornek_atilir():
         t += 9.0
     sim.kos()
     d = sim.kon.durum()
-    assert d["capa"] == 0 and d["L"] == 2.0 and d["atilan_ornek"] >= 3
-    assert all(k["spk_guven"] <= 0.6 for k in sim.sonuc.values())
+    assert d["capa"] >= 3 and abs(d["L"] - (6.0 + sim.R / 2)) <= 0.6, d
+    assert not yanlis_kesinler(sim)
 
 
 def test_capa_b_duraklama_sonrasi_yeniden_buyume():
@@ -514,10 +605,21 @@ def test_hayalet_ad_uc_satira_kadar_soru():
         sim.soz(hayalet, t, t + 3.0)
         nolar.append(sim.klip(t, t + 3.0))
         t += 4.5
+    ilk = {}
+    gercek_isle = sim._isle
+
+    def isle(kararlar, an, olaylar, sira):
+        for k in kararlar:
+            ilk.setdefault(k["klip_no"], k)
+        return gercek_isle(kararlar, an, olaylar, sira)
+
+    sim._isle = isle
     sim.kos()
     # karar anindaki satir sayisi: 1., 2. klip "?" ; 3. satirdan sonra ad sayilir
-    assert sim.sonuc[nolar[0]]["speaker"] == "?" and sim.sonuc[nolar[0]]["neden"] == "hayalet"
+    assert ilk[nolar[0]]["speaker"] == "?" and ilk[nolar[0]]["neden"] == "hayalet"
     assert sim.sonuc[nolar[-1]]["speaker"] == hayalet
+    # gec yeniden puanlama: ad kisi sayilinca ilk klibin "?" karari ayni klip_no ile guncellenir
+    assert sim.sonuc[nolar[0]]["speaker"] == hayalet and sim.sonuc[nolar[0]].get("guncelleme") is True
     assert sim.kon.kimlik_turu(hayalet) == "kisi"
     assert Konusmaci().kimlik_turu("Rastgele Bir Satır") == "hayalet"
 
@@ -772,3 +874,541 @@ def test_ozellik_belirsiz_orani_makul():
                 toplam += 1
                 kesin += kesin_mi(k)
     assert toplam and kesin / toplam >= 0.5
+
+
+# ---------------------------------------------------------------- B0 / B2 / B2b: bosluk, donuk, gecikme, metin ipucu
+
+def _konusma(sim, t, n=40, seed=1, lag=2.0, lag_fn=None, sure=(1.5, 6.0)):
+    """n sirali soz (A/B/C, ardisik ayni kisi yok), sureler sure araliginda, aralar 0.6-2.0 sn."""
+    rng = random.Random(seed)
+    onceki = None
+    for _ in range(n):
+        kim = rng.choice([k for k in (A, B, C) if k != onceki])
+        d = rng.uniform(*sure)
+        sim.soz(kim, t, t + d, lag_fn(t) if lag_fn else lag)
+        t += d + rng.uniform(0.6, 2.0)
+        onceki = kim
+    return t
+
+
+def _lb_kararlar(sim, filt=lambda k, c: True):
+    return [(no, k) for no, k in sim.son_kararlar().items()
+            if k["akis"] == "loopback" and filt(k, sim.klipler[no])]
+
+
+def _neden_sayimi(kararlar):
+    say = {}
+    for _, k in kararlar:
+        n = k["neden"].split("+")[0]
+        say[n] = say.get(n, 0) + 1
+    return say
+
+
+def _L_izle(sim):
+    """kontrol(an) cagrilarinda (an - T0, L) izi."""
+    izler = []
+    orig = sim.kon.kontrol
+
+    def kontrol(an):
+        r = orig(an)
+        izler.append((an - T0, sim.kon.L))
+        return r
+
+    sim.kon.kontrol = kontrol
+    return izler
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_okuma_bosluklari_periyodik_kapsama_yok_degil(seed):
+    """Olay kok nedeni: R=0.6 iken her 5 sn'de 1.5-3 sn okuma boslugu (UIA yurumesi). Eski heartbeat (3R=1.8) her
+    boslugu kapsama yok sayip satirlari yeniden taban yapiyordu: aralik olusmuyor, her klip kapsama_yok. Kapi: kapsama_yok
+    <= %5, aralik sayisi bosluksuz kosunun >= %80'i, kesin yanlis 0, kesin karar bosluksuzun >= %60'i."""
+    sonuc = {}
+    for bosluk in (False, True):
+        sim = Sim(seed=seed, R=0.6)
+        if bosluk:
+            rng = random.Random(100 + seed)
+            for k in range(0, 400, 5):
+                g = rng.uniform(1.5, 3.0)
+                sim.takili.append((k + 2.0, k + 2.0 + g))
+        t = isinma(sim)
+        _konusma(sim, t, seed=seed)
+        sim.otomatik_klipler()
+        sim.kos()
+        lb = _lb_kararlar(sim)
+        sonuc[bosluk] = (lb, _neden_sayimi(lb), sum(1 for _, k in lb if kesin_mi(k)), sim.kon.durum())
+    lb, say, kesin, durum = sonuc[True]
+    assert say.get("kapsama_yok", 0) + say.get("panel_donuk", 0) <= 0.05 * len(lb), say
+    assert durum["araliklar"] >= 0.8 * sonuc[False][3]["araliklar"], (durum, sonuc[False][3])
+    assert kesin >= 0.6 * sonuc[False][2], (kesin, sonuc[False][2])
+    assert durum["bosluk_sn"] == 0 and durum["neden"] is None
+
+
+def test_okuma_bosluklari_kesin_yanlis_yok():
+    for seed in range(3):
+        sim = Sim(seed=seed, R=0.6)
+        rng = random.Random(100 + seed)
+        for k in range(0, 400, 5):
+            g = rng.uniform(1.5, 3.0)
+            sim.takili.append((k + 2.0, k + 2.0 + g))
+        t = isinma(sim)
+        _konusma(sim, t, seed=seed)
+        sim.otomatik_klipler()
+        sim.kos()
+        assert not yanlis_kesinler(sim), seed
+
+
+def test_kisa_bosluk_satirlari_korur_karar_tavanli():
+    """6 sn'lik okuma boslugu (> bosluk_sn, <= kisa_bosluk_sn): bosluk kaydedilir ama satirlar yeniden taban olmaz;
+    bosluga %50'den az denk gelen klip araliklarla karar alir (tavan 0.6, +bosluk, kapsama False); bosluk icindeki klip
+    kapsama_yok. durum(): bosluk_sn toplami, bosluk surerken neden okuma_yok."""
+    olaylar = []
+    sim = Sim(seed=0, olay_fn=olaylar.append)
+    t = isinma(sim)
+    sim.takili.append((t + 4.0, t + 10.0))
+    sim.soz(B, t, t + 14.0)                         # bosluk boyunca da konusuyor
+    kenar = sim.klip(t, t + 2.0)                    # penceresinin < %50'si boslukta (bosluk_pay)
+    ici = sim.klip(t + 5.0, t + 9.0)                # tamamen boslukta
+    sonra = sim.klip(t + 11.0, t + 14.0)
+    sim.kos()
+    assert any(o["mesaj"] == "okuma boşluğu" and o["sn"] >= 5.5 for o in olaylar)
+    k = sim.sonuc[kenar]
+    assert k["speaker"] == B and k["spk_guven"] <= 0.6 and "bosluk" in k["neden"] and k["kapsama"] is False
+    assert sim.sonuc[ici]["neden"] == "kapsama_yok" and sim.sonuc[ici]["speaker"] == "?"
+    assert sim.sonuc[sonra]["speaker"] == B and sim.sonuc[sonra]["kapsama"] is True
+    assert 5.5 <= sim.kon.durum()["bosluk_sn"] <= 7.0
+    ar = [a for a in sim.kon.araliklar_listesi() if a["kim"] == B]
+    assert 1 <= len(ar) <= 2                        # satir korundu: bosluk sonrasi "yeni" sahte aralik yok
+    assert all(a["tur"] in ("yeni", "devam", "eski") for a in ar)
+
+
+def test_bosluk_payi_ve_durum_nedeni():
+    kon = Konusmaci()
+    t = T0
+    for i in range(10):
+        _oku(kon, i, t, [[A, "bir"]])
+        t += 0.5
+    kon.kontrol(t)
+    assert kon.durum()["kapsama"] is True and kon.durum()["neden"] is None
+    kon.kontrol(t + 8.0)                            # okuma yok (> bosluk_sn)
+    d = kon.durum()
+    assert d["kapsama"] is False and d["neden"] == "okuma_yok" and d["bosluk_sn"] >= 7.5
+    _oku(kon, 20, t + 9.0, [[A, "bir iki"]])
+    pay, tur = kon._bosluk_payi(t + 2.0, t + 10.0)
+    assert abs(pay - 7.0 / 8.0) < 0.05 and tur == "okuma"
+    assert kon._bosluk_payi(T0, T0 + 4.0) == (0.0, None)
+    _oku(kon, 21, t + 9.5, [], grup=False)
+    kon.kontrol(t + 9.6)
+    assert kon.durum()["neden"] == "grup_yok" and kon.durum()["kapsama"] is False
+
+
+@pytest.mark.parametrize("bayrak", [False, True])
+def test_donuk_panel_panel_donuk_kimse_yok(bayrak):
+    """Panel 60-110 sn donuk (satirlar degismiyor, hoparlorde konusma var). Kendi tespiti (bayrak False) ya da
+    okumadaki 'donuk' bayragi (bayrak True; kendi sure tespiti kapali, son degisimden sonra >= donuk_ses_sn loopback
+    konusmasi sarti bayrakta da gecerli). Kapi: pencere icindeki uzak kliplerde panel_donuk >= %90, kimse <= %5;
+    pencere bitince adlar doner; loglar panel donuk / canlandi; durum neden panel_donuk."""
+    olaylar = []
+    esik = {"donuk_sn": 1e9} if bayrak else None
+    sim = Sim(seed=1, donuk=(60.0, 110.0), donuk_bayrak=bayrak, esikler=esik, olay_fn=olaylar.append)
+    nedenler = []
+    orig = sim.kon.kontrol
+
+    def kontrol(an):
+        r = orig(an)
+        nedenler.append((an - T0, sim.kon.durum()["neden"]))
+        return r
+
+    sim.kon.kontrol = kontrol
+    t = isinma(sim)
+    _konusma(sim, t, n=60, seed=1)
+    sim.otomatik_klipler()
+    sim.kos()
+    ici = _lb_kararlar(sim, lambda k, c: 62 <= c["bas"] - T0 < 108)
+    sonra = _lb_kararlar(sim, lambda k, c: c["bas"] - T0 >= 120)
+    say = _neden_sayimi(ici)
+    assert len(ici) >= 6 and say.get("panel_donuk", 0) >= 0.9 * len(ici), say
+    assert say.get("kimse", 0) <= 0.05 * len(ici), say
+    assert all(k["cizelge_canli"] is False for _, k in ici if k["neden"] == "panel_donuk")
+    assert sonra and all(k["speaker"] not in ("?", "") for _, k in sonra) and not yanlis_kesinler(sim)
+    mesajlar = [o["mesaj"] for o in olaylar]
+    assert "panel donuk" in mesajlar and "panel canlandı" in mesajlar
+    assert any(n == "panel_donuk" for a, n in nedenler if 75 <= a <= 108)
+    assert all(n != "panel_donuk" for a, n in nedenler if a >= 125)
+
+
+def test_sessizlikte_degismeyen_panel_donuk_degil():
+    """Hoparlorde konusma yokken panel 40 sn degismez: donuk sayilmaz (kapsama True, neden None)."""
+    sim = Sim(seed=0)
+    t = isinma(sim)
+    nedenler = []
+    orig = sim.kon.kontrol
+
+    def kontrol(an):
+        r = orig(an)
+        nedenler.append(sim.kon.durum()["neden"])
+        return r
+
+    sim.kon.kontrol = kontrol
+    sim.soz(A, t + 45, t + 48)
+    no = sim.klip(t + 45, t + 48)
+    sim.kos()
+    assert all(n is None for n in nedenler) and sim.sonuc[no]["speaker"] == A
+
+
+def test_soru_satirlari_hayalet_kimse_degil():
+    """Adi okunamayan ('?') satirlar etkinlik sayilir: karar '?' ama neden 'hayalet' (kimse degil), adaylar bos degil,
+    kimlik_turu('?') her zaman hayalet (3 satirdan sonra da kisi olmaz)."""
+    sim = Sim(seed=0, soru_oran=1.0)
+    t = isinma(sim)
+    _konusma(sim, t, n=20, seed=2)
+    sim.otomatik_klipler()
+    sim.kos()
+    lb = _lb_kararlar(sim)
+    say = _neden_sayimi(lb)
+    assert lb and say.get("kimse", 0) == 0 and say.get("hayalet", 0) >= 0.9 * len(lb), say
+    assert all(k["speaker"] == "?" and k["adaylar"] and k["adaylar"][0][0] == "?" for _, k in lb if k["neden"] == "hayalet")
+    assert sim.kon.kimlik_turu("?") == "hayalet"
+
+
+def test_kuyruk_metni_uzun_konusmada_buyume_sayilir():
+    """Satir en cok 8 kelime gosterir (basi duser, kuyruk kayar): kelime sayisi artmasa da son 2 kelime ve ilk kelime
+    degisince buyume -> uzun konusmanin son klibinde de p1 >= 0.6."""
+    sim = Sim(seed=0, kuyruk_kelime=8)
+    t = isinma(sim)
+    sim.soz(B, t, t + 30.0)
+    sim.otomatik_klipler()
+    sim.kos()
+    son = [k for no, k in sorted(sim.son_kararlar().items()) if sim.klipler[no]["bas"] >= T0 + t]
+    assert len(son) >= 3
+    assert son[-1]["speaker"] == B and son[-1]["adaylar"][0][1] >= 0.6 and son[-1]["spk_guven"] >= 0.7
+    # yeniden yazim (kuyruk degisti ama bas ayni) buyume degil
+    assert not Konusmaci._kuyruk_buyudu(["bugun", "toplanti", "saat", "ucte"], ["bugun", "toplanti", "saat", "3te"], 4)
+    assert Konusmaci._kuyruk_buyudu(["a", "b", "c", "d", "e"], ["c", "d", "e", "f", "g"], 5)
+
+
+def test_yeniden_cizim_sahte_capa_yok():
+    """60. sn'de panel yeniden cizilir (tum satir metinleri farkli): tam uyumsuzluk + >= 2 satir -> hepsi taban,
+    o okumada sahte 'yeni' aralik basi (capa adayi) yok; kesin yanlis 0; log."""
+    olaylar = []
+    sim = Sim(seed=0, yeniden_ciz=60.0, olay_fn=olaylar.append)
+    t = isinma(sim)
+    _konusma(sim, t, n=40, seed=3)
+    sim.otomatik_klipler()
+    sim.kos()
+    baslar = [b - T0 for b in sim.kon._baslangiclar]
+    assert not [b for b in baslar if 60.0 <= b <= 60.0 + 2 * sim.R]
+    assert any(o["mesaj"] == "altyazı paneli yeniden çizildi" for o in olaylar)
+    assert not yanlis_kesinler(sim)
+    sonra = _lb_kararlar(sim, lambda k, c: c["bas"] - T0 >= 65)
+    assert sum(1 for _, k in sonra if kesin_mi(k)) >= 0.6 * len(sonra)
+
+
+def test_gec_yeniden_puanlama_guncelleme():
+    """Teams gecikmesi 2 -> 4.2 sn'ye sicrar: ilk kisa klipler, satirlari eski L'ye gore gec kaldigi icin '?' (kimse)
+    alir; L basamagi algilaninca 30 sn icinde ayni klip_no ile guncelleme: True karari (dogru ad) gelir."""
+    olaylar = []
+    sim = Sim(seed=0, olay_fn=olaylar.append)
+    t = isinma(sim)
+    nolar = []
+    for i in range(9):
+        kim = (A, B, C)[i % 3]
+        sim.soz(kim, t, t + 1.5, lag=4.2)
+        nolar.append((sim.klip(t, t + 1.5), kim))
+        t += 2.7
+    ilk = {}
+    gercek_isle = sim._isle
+
+    def isle(kararlar, an, olaylar_, sira):
+        for k in kararlar:
+            ilk.setdefault(k["klip_no"], k)
+        return gercek_isle(kararlar, an, olaylar_, sira)
+
+    sim._isle = isle
+    sim.kos()
+    no, kim = nolar[0]
+    assert ilk[no]["speaker"] == "?" and ilk[no]["neden"] == "kimse" and "guncelleme" not in ilk[no]
+    son = sim.sonuc[no]
+    assert son["speaker"] == kim and son.get("guncelleme") is True and son["klip_no"] == no
+    assert any(o["mesaj"] == "geç yeniden puan" and o["klip_no"] == no for o in olaylar)
+    assert abs(sim.kon.durum()["L"] - (4.2 + sim.R / 2)) <= 0.6
+    assert not yanlis_kesinler(sim)
+
+
+def test_yapiskan_yalniz_tek_aday():
+    """Altyazisiz kisa loopback klibi: yalniz A'nin araligi 4 sn icinde bitmisse 'A?' (0.6, yapiskan); iki kisi yakinda
+    bitirdiyse '?'; kullanicinin altyazisi klibi kapsiyorsa (yanki olasi) yapiskan yok."""
+    olaylar = []
+    sim = Sim(seed=0, olay_fn=olaylar.append)
+    t = isinma(sim)
+    sim.soz(A, t, t + 4.0)
+    sim.klip(t, t + 4.0)
+    no = sim.klip(t + 5.0, t + 6.5)
+    sim.kos()
+    k = sim.sonuc[no]
+    assert k["speaker"] == A and k["spk_guven"] == 0.6 and k["neden"].startswith("yapiskan") and k["kimlik_turu"] == "kisi"
+    assert any(o["mesaj"] == "yapışkan" for o in olaylar)
+    sim = Sim(seed=0)
+    t = isinma(sim)
+    sim.soz(A, t, t + 4.0)
+    sim.klip(t, t + 4.0)
+    sim.soz(B, t + 1.0, t + 4.5)
+    sim.klip(t + 1.0, t + 4.5)
+    no = sim.klip(t + 5.5, t + 7.0)
+    sim.kos()
+    assert sim.sonuc[no]["speaker"] == "?" and sim.sonuc[no]["neden"] == "kimse"
+    sim = Sim(seed=0)
+    t = isinma(sim)
+    sim.soz(A, t, t + 4.0)
+    sim.klip(t, t + 4.0)
+    sim.soz(BEN, t + 5.0, t + 6.5)                  # kullanici konusuyor: loopback'teki ses yankidir
+    no = sim.klip(t + 5.0, t + 6.5)
+    sim.klip(t + 5.0, t + 6.5, akis="mikrofon")
+    sim.kos()
+    assert sim.sonuc[no]["speaker"] == "?"
+
+
+def test_gecikme_7_capraz_ilinti_ile_L_oturur():
+    """L 2 sn'ye oturduktan sonra gecikme 7 sn'ye sicrar (> L_ust: zaman capalari pencere disinda atilir); onset'ler
+    ile aralik baslarinin capraz ilintisi (iki ardisik degerlendirme) L'yi sifirlar -> sicramadan sonra 120 sn icinde
+    |L - 7| <= 0.7, sonra sapmaz, log 'L çapraz ilinti'; kesin yanlis yok."""
+    for seed in range(2):
+        olaylar = []
+        sim = Sim(seed=seed, olay_fn=olaylar.append)
+        izler = _L_izle(sim)
+        t = isinma(sim, lag=2.0)
+        t0 = t
+        _konusma(sim, t, n=30, seed=seed, lag=7.0)
+        sim.otomatik_klipler()
+        sim.kos()
+        ilk = next((a for a, L in izler if a >= t0 and abs(L - 7.0) <= 0.7), None)
+        assert ilk is not None and ilk - t0 <= 120.0, (seed, ilk)
+        assert all(abs(L - 7.0) <= 0.7 for a, L in izler if a >= ilk + 30), seed
+        assert any(o["mesaj"] == "L çapraz ilinti" for o in olaylar)
+        # yalniz zaman: duzenli sirayla konusmada 2 ve 7 sn'lik gecikme ayni satirlarla aciklanir (ortusme), sicrama
+        # ancak capraz ilintiyle (<= 120 sn) algilanir; sonrasinda kesin yanlis yok (aradaki kararlar: acik_kalanlar)
+        gec = [x for x in yanlis_kesinler(sim) if sim.klipler[x[0]]["bas"] - T0 >= ilk + 30]
+        assert not gec, gec
+
+
+def test_gecikme_7_isinmada_dogrudan_oturur():
+    """Toplanti 7 sn gecikmeyle baslar: isinma penceresi capraz_ust oldugundan zaman capalari (oy coklugu) L'yi
+    capraz ilintiye gerek kalmadan 60 sn icinde 7'ye oturtur; kesin yanlis yok."""
+    for seed in range(2):
+        sim = Sim(seed=seed)
+        izler = _L_izle(sim)
+        t = isinma(sim, lag=7.0)
+        _konusma(sim, t, n=30, seed=seed, lag=7.0)
+        sim.otomatik_klipler()
+        sim.kos()
+        ilk = next((a for a, L in izler if abs(L - 7.0) <= 0.7), None)
+        assert ilk is not None and ilk <= 60.0, (seed, ilk)
+        assert all(abs(L - 7.0) <= 0.7 for a, L in izler if a >= ilk + 30), seed
+        assert not yanlis_kesinler(sim)
+
+
+def test_gecikme_suruklenme_izlenir():
+    """Gecikme 8 dakikada 2 -> 6 sn'ye surukleniyor: her dakika |L - (gecikme + R/2)| <= 0.8, kesin yanlis 0."""
+    sim = Sim(seed=1)
+    izler = _L_izle(sim)
+    t = isinma(sim, lag=2.0)
+
+    def lag_fn(s):
+        return 2.0 + 4.0 * min(1.0, max(0.0, (s - 15) / 480.0))
+
+    _konusma(sim, t, n=96, seed=2, lag_fn=lag_fn)
+    sim.otomatik_klipler()
+    sim.kos()
+    for m in range(1, 9):
+        an = m * 60.0
+        L = [L for a, L in izler if a <= an][-1]
+        assert abs(L - (lag_fn(an) + sim.R / 2)) <= 0.8, (m, L, lag_fn(an))
+    assert not yanlis_kesinler(sim)
+
+
+def test_L_yeniden_olc_zorla():
+    kon = Konusmaci(olay_fn=lambda d: None)
+    for i in range(6):
+        o = T0 + 12.0 * i
+        kon._onset_gecmis.append((o, 5.0))
+        kon._baslangiclar.append(o + 7.0)
+        kon._bas_tur.append("yeni")
+    kon._ilk_okuma, kon._an = T0, T0 + 70.0
+    kon.L_yeniden_olc()                            # ilk degerlendirme: L'den farkli tepe kaydedilir
+    assert kon.L == 2.0 and kon._capraz_onceki is not None
+    kon.L_yeniden_olc()                            # ikinci: ayni tepe -> L sifirlanir
+    assert abs(kon.L - 7.0) <= 0.25 and kon._basamak_kalan > 0
+
+
+def test_metin_ipucu_bozuk_altyazi_gecikmeyi_capalar():
+    """Gecikme 7 (zaman capalari pencere disinda, capraz ilinti kapali): klibin ayirt edici kelimeleri satirda ilk
+    gorulunce 'metin' capasi -> L 7'ye oturur; altyazi kelimelerinin %40'i bozukken de; kesin yanlis 0."""
+    for bozuk in (0.0, 0.4):
+        olaylar = []
+        sim = Sim(seed=0, metin=True, bozuk=bozuk, esikler={"capraz_en_az": 999}, olay_fn=olaylar.append)
+        t = isinma(sim, lag=7.0)
+        _konusma(sim, t, n=20, seed=5, lag=7.0)
+        sim.otomatik_klipler()
+        sim.kos()
+        assert abs(sim.kon.durum()["L"] - 7.0) <= 0.7, (bozuk, sim.kon.durum())
+        assert sum(1 for o in olaylar if o["mesaj"] == "L örneği" and o["capa"] == "metin") >= 10
+        assert not yanlis_kesinler(sim) and not any("kelime" in str(o) and "r0k" in str(o) for o in olaylar)
+    olaylar = []
+    sim = Sim(seed=0, metin=True, bozuk=0.4, esikler={"capraz_en_az": 999, "metin_ipucu": 0}, olay_fn=olaylar.append)
+    t = isinma(sim, lag=7.0)
+    _konusma(sim, t, n=20, seed=5, lag=7.0)
+    sim.otomatik_klipler()
+    sim.kos()
+    assert not any(o["mesaj"] == "L örneği" and o["capa"] == "metin" for o in olaylar)   # ipucu kapali: metin capasi yok
+
+
+def test_metin_tutarsiz_bayragi():
+    """Altyazi satirlari degisiyor ama hicbir klibin kelimesi gorunmuyor (ilgisiz metin): 60 sn sonra
+    durum()['tutarsiz'], bir kez log; zaman karari etkilenmez (kesin yanlis 0). Ilgili metinde bayrak yok."""
+    olaylar = []
+    sim = Sim(seed=0, metin=True, ilgisiz=True, olay_fn=olaylar.append)
+    t = isinma(sim)
+    _konusma(sim, t, n=30, seed=5)
+    sim.otomatik_klipler()
+    sim.kos()
+    assert sim.kon.durum()["tutarsiz"] is True
+    assert sum(1 for o in olaylar if o["mesaj"].startswith("altyazı metni kliplerle tutarsız")) == 1
+    assert not yanlis_kesinler(sim)
+    sim = Sim(seed=0, metin=True)
+    t = isinma(sim)
+    _konusma(sim, t, n=30, seed=5)
+    sim.otomatik_klipler()
+    sim.kos()
+    assert sim.kon.durum()["tutarsiz"] is False
+
+
+def test_metin_ipucu_kapali_yalniz_zaman_sonucu():
+    """metin_ipucu=0 ile metinli kosum, metinsiz kosumla ayni kararlari verir."""
+    def kos(**kw):
+        sim = Sim(seed=2, R_sapma=0.1, **kw)
+        t = isinma(sim)
+        _konusma(sim, t, n=30, seed=6)
+        sim.otomatik_klipler()
+        sim.kos()
+        return sorted((no, k["speaker"], k["spk_guven"], k["neden"]) for no, k in sim.sonuc.items())
+    assert kos(metin=True, esikler={"metin_ipucu": 0}) == kos(metin=False)
+
+
+def test_metin_esitlik_bozucu_bolunemedi():
+    """Zaman iki aday verir (A'nin gecikmesi buyuk, bandi B'nin klibine tasar; kesilemeyen kisa devir): klip metni
+    yalniz B'nin satiriyla ortusur -> B, tavan 0.6, neden devir_bolunemedi+metin; ipucu kapaliyken 'A → B'."""
+    def kos(ipucu):
+        sim = Sim(seed=0, metin=True, esikler={"metin_ipucu": ipucu})
+        t = isinma(sim)
+        sim.soz(A, t, t + 3.0, lag=3.2)
+        sim.klip(t, t + 3.0)
+        sim.soz(B, t + 3.3, t + 5.3, lag=2.0)
+        no = sim.klip(t + 3.3, t + 5.3)
+        sim.kos()
+        return sim.sonuc[no]
+    k = kos(1)
+    assert k["speaker"] == B and k["spk_guven"] <= 0.6 and k["neden"].endswith("+metin"), k
+    k0 = kos(0)
+    assert k0["speaker"] in (f"{A} → {B}", B) and not k0["neden"].endswith("+metin"), k0
+
+
+def test_ayirt_edici_kokler():
+    kok = kmod._ayirt_edici("Bütçe tablosunu 15 Ekim'de Deniz güncelledi ve bunu için yapı")
+    assert "#15" in kok and "@deniz" in kok and "butce" in kok and "tablo" in kok and "gunce" in kok
+    assert "icin" not in kok and "bunu" not in kok and "ve" not in kok and not any(len(k) > 6 and k[0] not in "#@" for k in kok)
+
+
+def test_cizelge_canli_alani():
+    """Kapsama tam ve panel klipten sonra degismis -> cizelge_canli True; kapsama yok -> False."""
+    sim = Sim(seed=0)
+    t = isinma(sim)
+    sim.soz(A, t, t + 3.0)
+    no = sim.klip(t, t + 3.0)
+    sim.takili.append((t + 10, t + 40))
+    yok = sim.klip(t + 15, t + 18)
+    sim.kos()
+    assert sim.sonuc[no]["cizelge_canli"] is True and sim.sonuc[yok]["cizelge_canli"] is False
+    assert Konusmaci().bolunemedi(5)["cizelge_canli"] is False
+
+
+# ---------------------------------------------------------------- yeniden dogrulama bulgulari (G1 / G3 / G4)
+
+def test_isinmada_ayni_kisinin_ardisik_sozleri_uzak_L_tohumlamaz():
+    """Bulgu F4: isinmada (capa_min'den az ornek) genis aday penceresi (capraz_ust) ayni kisinin art arda sozlerinde
+    satirin duraklama sonrasi periyodik 'devam' baslarini (soz + duraklama ~ 9 sn) capa sanip L'yi ~9'a kilitliyor,
+    390 sn boyunca kesin yanlis uretiyordu. Uzak (> L_maks) 'devam' adayi ornek vermez, uzak 'yeni' adayi en az iki
+    onset'in oyunu ister: gercek gecikme 3 sn, okuma bosluklu panelde 90 sn icinde |L - (3 + R/2)| <= 0.8, kesin
+    yanlis 0."""
+    for seed in (0, 1, 2):
+        sim = Sim(seed=seed, R=0.6, R_sapma=0.1)
+        izler = _L_izle(sim)
+        rng = random.Random(seed + 11)
+        t = 0.0
+        for k in range(60):                                      # her 5 sn'de 1.5-3 sn okuma boslugu (olay bicimi)
+            sim.takili.append((k * 5.0 + 2.0, k * 5.0 + 2.0 + rng.uniform(1.5, 3.0)))
+        lag = 3.0
+        for kim, sure, bosluk in ((A, 4.0, 2.0), (A, 3.5, 2.2), (A, 3.3, 1.8), (B, 3.6, 2.4), (B, 3.0, 2.1),
+                                  (C, 2.8, 1.9), (A, 3.2, 2.3), (A, 3.4, 2.0)):
+            sim.soz(kim, t, t + sure, lag)
+            t += sure + bosluk
+        _konusma(sim, t, n=36, seed=seed + 5, lag=lag)
+        sim.otomatik_klipler()
+        sim.kos()
+        hedef = lag + sim.R / 2.0
+        gec = [(a, L) for a, L in izler if a >= 90.0]
+        assert gec and all(abs(L - hedef) <= 0.8 for a, L in gec), (seed, [x for x in gec if abs(x[1] - hedef) > 0.8][:5])
+        assert not yanlis_kesinler(sim), (seed, yanlis_kesinler(sim))
+
+
+def test_kisa_klip_gec_satirla_onceki_konusmaciya_kesin_atanmaz():
+    """Bulgu: kisa klibin (< kisa_klip_bekle_sn) kendi satiri 2-3.5 sn gec belirince klibi yalniz onceki konusmacinin
+    (okuma boslugunda uzayan, kaba sonlu) bandi kapliyor ve 1.0 ile kesin yanlis cikiyordu. Karar, ardindaki onset'siz
+    satiri aciklayacak klibi bekler (en cok lb_bekle_sn); hala aciklanmayan satir varsa tavan (+gec) ya da metinle gec
+    satirin kisisi 'Ad?'; hicbir durumda onceki konusmaci kesin degil, 'A / B' da degil."""
+    for metin in (False, True):
+        sim = Sim(seed=4, metin=metin, R=0.6)
+        t = isinma(sim)
+        sim.soz(A, t, t + 5.4)
+        sim.soz(B, t + 5.95, t + 6.95, lag=5.0)                 # kisa soz, satiri 3 sn gec belirir
+        sim.takili.append((t + 6.5, t + 9.6))                   # A'nin satir sonu okuma boslugunda (kaba son)
+        sim.klip(t, t + 5.4)
+        no = sim.klip(t + 5.95, t + 6.95)
+        sim.kos()
+        k = sim.sonuc[no]
+        assert not (k["speaker"] == A and k["spk_guven"] >= 0.7), (metin, k)
+        assert k["cakisma"] is False and " / " not in k["speaker"], (metin, k)
+        assert k["speaker"] in ("?", A, B) and k["spk_guven"] <= 0.6, (metin, k)
+        if k["speaker"] == A:
+            assert "+gec" in k["neden"] and "+kaba" in k["neden"], k
+
+
+def test_kaba_bant_ortusmesi_sahte_ayni_anda_vermez():
+    """Bulgu: okuma boslugunda biten / baslayan bantlar (kaba uc) klibi iki kisiye de kaplatinca 'A / B' (cakisma)
+    deniyordu; panel yeniden ciziminde ve gec satirlarda sahte cakisma 3-4 kat artiyordu. Gercek ust uste binme iki
+    bandin KESIN (cekirdek) kismiyla olculur; yalniz kaba banttan gelen ortusmede sirali devir / 'Ad?' kalir."""
+    sayim = {"cakisma": 0, "dogru": 0}
+    for seed in range(4):
+        sim = Sim(seed=seed, R=0.6, R_sapma=0.1)
+        t = isinma(sim)
+        rng = random.Random(seed + 3)
+        kim, onceki = None, None
+        klipler = []
+        for _ in range(30):
+            kim = rng.choice([k for k in (A, B, C) if k != onceki])
+            d = rng.uniform(2.5, 6.0)
+            sim.soz(kim, t, t + d)
+            klipler.append((sim.klip(t, t + d), kim))
+            bos = rng.uniform(0.8, 1.6)
+            if rng.random() < 0.6:                               # gecis okuma boslugunda (kaba uclar)
+                sim.takili.append((t + d + 2.0 - rng.uniform(0.5, 1.5), t + d + bos + 2.0 + rng.uniform(1.0, 2.5)))
+            t += d + bos
+            onceki = kim
+        sim.kos()
+        for no, kim in klipler:
+            k = sim.son_kararlar()[no]
+            if k["cakisma"] or " / " in k["speaker"]:
+                sayim["cakisma"] += 1
+            elif k["speaker"] == kim:
+                sayim["dogru"] += 1
+        assert not yanlis_kesinler(sim), (seed, yanlis_kesinler(sim))
+    assert sayim["cakisma"] <= 2 and sayim["dogru"] >= 90, sayim

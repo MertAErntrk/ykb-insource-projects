@@ -77,7 +77,8 @@ def test_her_okuma_olay_uretir_bos_okuma_ve_grup_yokken_de(monkeypatch):
     assert [o["grup"] for o in y.okumalar] == [False, True, True, False]
     assert [o["gorunen"] for o in y.okumalar] == [[], [list(a), list(b)], [], []]
     assert all(o["tur"] == "okuma" and o["bas_epoch"] <= o["bit_epoch"] for o in y.okumalar)
-    assert set(y.okumalar[1]) == {"tur", "okuma_no", "bas_epoch", "bit_epoch", "grup", "gorunen"}
+    assert set(y.okumalar[1]) == {"tur", "okuma_no", "bas_epoch", "bit_epoch", "grup", "gorunen", "degisti", "donuk",
+                                  "yeniden_bul", "pencere", "okuma_sn"}
     assert y.son_okuma_epoch == y.okumalar[-1]["bit_epoch"]                 # heartbeat
 
 
@@ -224,7 +225,14 @@ def test_ad_esigi_dolunca_konusmaci_sahte_devir_uretmez(monkeypatch, tohum):
         kararlar += kon.kontrol(T + t)
         t += 0.6
     kararlar += kon.bitir()
-    assert len(kararlar) == len(sozler)
+    # K3: "?" karari gec yeniden puanlanirsa ayni klip_no ile ikinci ("guncelleme": True) karar gelir; her klip icin
+    # SON karar gecerlidir. Kapi ayni: sahte devir / cakisma yok, dogru ad >= yarisi
+    son = {}
+    for k in kararlar:
+        assert k["klip_no"] not in son or k.get("guncelleme"), k
+        son[k["klip_no"]] = k
+    assert sorted(son) == list(range(1, len(sozler) + 1))
+    kararlar = list(son.values())
     assert not [(k["klip_no"], k["speaker"]) for k in kararlar
                 if k["devir"] or k["cakisma"] or "→" in k["speaker"] or "/" in k["speaker"]]
     assert sum(1 for k in kararlar if k["speaker"] == sozler[k["klip_no"] - 1][0]) >= len(sozler) // 2
@@ -298,3 +306,302 @@ def test_kaybolan_bekleyen_satirlar_zincirle_yayilir():
     uzun_no = y._uzun[(KIM_A, normalize(uzun[1]))]["no"]
     assert (KIM_B, normalize("Evet."), uzun_no) in y._kisa                  # zincir: ustteki satirin no'su
     assert (KIM_B, normalize("Evet."), None) not in y._kisa
+
+
+# ================================================================ B1: panel canliligi, donuk panel, yeniden bulma
+
+T0 = 1_000_000.0
+
+
+class _Saat:
+    """Sanal saat: saat.simdi() bu nesneden okunur (donuk / periyodik dogrulama sureleri beklemeden test edilir)."""
+
+    def __init__(self, monkeypatch):
+        self.t = T0
+        monkeypatch.setattr(saat_mod, "simdi", lambda: self.t)
+
+
+class _Oge:
+    """UIA ogesi taklidi: Element.GetRuntimeId()."""
+
+    def __init__(self, rid):
+        self.Element = types.SimpleNamespace(GetRuntimeId=lambda: rid)
+
+
+def _canli(monkeypatch, ses_var_fn=None, loglar=None, **kw):
+    """Grubu bulunmus, satirlari elle verilen Yakalayici; (y, saat, bulma_sayaci, satirlar)."""
+    sa = _Saat(monkeypatch)
+    sayac = {"n": 0, "oge": _Oge((42, 1))}
+    monkeypatch.setattr(yakalayici, "_grup_bul", lambda: (sayac.__setitem__("n", sayac["n"] + 1) or sayac["oge"],
+                                                          "Alt yazılar | Toplantı | Microsoft Teams"))
+    log_fn = (lambda m, **ek: loglar.append((m, ek))) if loglar is not None else None
+    y = _y(ses_var_fn=ses_var_fn, log_fn=log_fn, **kw)
+    satirlar = [(KIM_A, "IFRS dokuz raporunda PD kolonu string geliyor")]
+    y._ciftler = lambda: list(satirlar)
+    return y, sa, sayac, satirlar
+
+
+def test_donuk_panel_yeniden_bulur_ve_olay_donuk(monkeypatch):
+    loglar = []
+    ses = {"t": None}
+    y, sa, sayac, satirlar = _canli(monkeypatch, ses_var_fn=lambda: ses["t"], loglar=loglar)
+    y.oku()                                                     # ilk okuma: grup bulundu
+    assert sayac["n"] == 1 and y.okumalar[-1]["degisti"] is True and y.okumalar[-1]["donuk"] is False
+    ses["t"] = sa.t                                             # hoparlorde konusma var
+    sa.t += yakalayici.PANEL_DONUK_SN - 1
+    y.oku()
+    assert y.okumalar[-1]["degisti"] is False and y.okumalar[-1]["donuk"] is False and sayac["n"] == 1   # henuz esik altinda
+    sa.t += 1.5                                                 # >= PANEL_DONUK_SN degismedi
+    ses["t"] = sa.t
+    y.oku()
+    o = y.okumalar[-1]
+    assert o["donuk"] is True and o["degisti"] is False and o["grup"] is True
+    assert sayac["n"] == 2 and y.yeniden_bul_sayisi == 1        # hemen yeniden arandi
+    assert any("değişmedi, hoparlörde konuşma var" in m for m, _ in loglar)
+    assert o["yeniden_bul"] == 0 or o["yeniden_bul"] == 1       # sayac olay yayilandan sonra artabilir
+    y.oku()
+    assert y.okumalar[-1]["yeniden_bul"] == 1
+
+
+def test_donuk_tetiklenmez_ses_yok_ya_da_eski(monkeypatch):
+    for ses_fn in (None, lambda: None, lambda: T0 - 100.0):
+        y, sa, sayac, _ = _canli(monkeypatch, ses_var_fn=ses_fn)
+        y.oku()
+        for _ in range(4):
+            sa.t += 10
+            y.oku()
+        assert all(o["donuk"] is False for o in y.okumalar)
+        assert y.yeniden_bul_sayisi == 0
+        assert sayac["n"] <= 2                                  # yalniz periyodik dogrulama (30 sn) olabilir
+
+
+def test_donuk_ses_hatasi_okumayi_bozmaz(monkeypatch):
+    def bozuk():
+        raise RuntimeError("motor")
+    y, sa, sayac, _ = _canli(monkeypatch, ses_var_fn=bozuk)
+    y.oku()
+    sa.t += 20
+    y.oku()
+    assert y.okumalar[-1]["donuk"] is False
+
+
+def test_donuk_surerse_yalniz_yeni_konusmada_yeniden_arar(monkeypatch):
+    loglar = []
+    ses = {"t": T0}
+    y, sa, sayac, satirlar = _canli(monkeypatch, ses_var_fn=lambda: ses["t"], loglar=loglar)
+    y.oku()
+    sa.t += 13
+    ses["t"] = sa.t
+    y.oku()                                                     # donuk basladi: yeniden bulma 1
+    n1 = sayac["n"]
+    assert y.okumalar[-1]["donuk"] is True
+    sa.t += 13                                                  # sessizlik surer (ses eski): donuk bayragi kalir, UIA yuruyusu yok
+    y.oku()
+    assert y.okumalar[-1]["donuk"] is True and sayac["n"] == n1
+    sa.t += 13
+    ses["t"] = sa.t                                             # yeni konusma, panel hala donuk: yeniden ara
+    y.oku()
+    assert sayac["n"] == n1 + 1
+    satirlar.append((KIM_B, "Test ortamı perşembe hazır olur diye düşünüyorum"))   # panel canlandi
+    y.oku()
+    assert y.okumalar[-1]["donuk"] is False and y.okumalar[-1]["degisti"] is True
+    assert any("yeniden güncelleniyor" in m for m, _ in loglar)
+
+
+def test_donuk_yeniden_bulma_bulamazsa_eski_oge_okunur(monkeypatch):
+    loglar = []
+    y, sa, sayac, _ = _canli(monkeypatch, ses_var_fn=lambda: sa.t, loglar=loglar)
+    y.oku()
+    monkeypatch.setattr(yakalayici, "_grup_bul", lambda: (None, ""))
+    sa.t += 13
+    y.oku()
+    assert y.okumalar[-1]["donuk"] is True and y.okumalar[-1]["grup"] is True and y.grup is not None
+    assert sum("bulunamadı" in m for m, _ in loglar) == 1
+
+
+def test_periyodik_dogrulama_ayni_oge_dokunmaz_degisince_gecer(monkeypatch):
+    loglar = []
+    y, sa, sayac, satirlar = _canli(monkeypatch, loglar=loglar)
+    y.oku()
+    ilk = y.grup
+    assert y._grup_rid == (42, 1) and sayac["n"] == 1
+    sa.t += yakalayici.YENIDEN_BUL_SN - 1
+    satirlar.append((KIM_B, "Test ortamı perşembe hazır olur diye düşünüyorum"))
+    y.oku()
+    assert sayac["n"] == 1                                      # henuz 30 sn degil
+    sa.t += 2
+    y.oku()
+    assert sayac["n"] == 2 and y.grup is ilk and y.yeniden_bul_sayisi == 0          # ayni rid: eski oge kalir
+    sayac["oge"] = _Oge((42, 7))                                # Teams paneli yeniden cizdi
+    sa.t += yakalayici.YENIDEN_BUL_SN + 1
+    y.oku()
+    assert sayac["n"] == 3 and y.grup is sayac["oge"] and y._grup_rid == (42, 7)
+    assert y.yeniden_bul_sayisi == 1
+    assert any("panel yeniden çizilmiş (yeni öğe)" in m for m, _ in loglar)
+    y.oku()
+    assert y.okumalar[-1]["yeniden_bul"] == 1
+
+
+def test_yeniden_bul_genel_istek_sonraki_okumada_arar(monkeypatch):
+    loglar = []
+    y, sa, sayac, _ = _canli(monkeypatch, loglar=loglar)
+    y.oku()
+    sa.t += 2
+    y.oku()
+    assert sayac["n"] == 1
+    sayac["oge"] = _Oge((42, 9))
+    y.yeniden_bul()
+    y.oku()
+    assert sayac["n"] == 2 and y._grup_rid == (42, 9)
+    assert any("yeniden aranıyor" in m for m, _ in loglar)
+    sa.t += 2
+    y.oku()
+    assert sayac["n"] == 2                                      # istek bir kez isler
+
+
+def test_rid_desteklenmiyorsa_none_ve_hata_yutulur():
+    assert yakalayici._rid(object()) is None
+    assert yakalayici._rid(types.SimpleNamespace(GetRuntimeId=lambda: [1, 2])) == (1, 2)
+
+    class Bozuk:
+        @property
+        def Element(self):
+            raise OSError("com")
+    assert yakalayici._rid(Bozuk()) is None
+
+
+def test_grup_bul_ayrintili_ve_sarmal(monkeypatch):
+    pencere = types.SimpleNamespace(Name="Haftalık | Microsoft Teams")
+    grup = types.SimpleNamespace(ControlTypeName="GroupControl", Name="Canlı alt yazı")
+    monkeypatch.setattr(yakalayici, "auto", types.SimpleNamespace(
+        GetRootControl=lambda: types.SimpleNamespace(GetChildren=lambda: [types.SimpleNamespace(Name="Not Defteri"), pencere]),
+        WalkControl=lambda w, includeTop=False, maxDepth=0: iter([(grup, 1)] if w is pencere else [])))
+    assert yakalayici._grup_bul_ayrintili() == (grup, pencere, "Haftalık | Microsoft Teams")
+    assert yakalayici._grup_bul() == (grup, "Haftalık | Microsoft Teams")
+    monkeypatch.setattr(yakalayici, "auto", types.SimpleNamespace(
+        GetRootControl=lambda: types.SimpleNamespace(GetChildren=lambda: [])))
+    assert yakalayici._grup_bul_ayrintili() == (None, None, "") and yakalayici._grup_bul() == (None, "")
+
+
+def test_pencere_durumu_user32_ve_windows_disi(monkeypatch):
+    assert yakalayici.pencere_durumu(0) == {}
+    u = types.SimpleNamespace(IsIconic=lambda h: 1, IsZoomed=lambda h: 0, GetForegroundWindow=lambda: 77)
+    monkeypatch.setattr(yakalayici, "user32", u)
+    assert yakalayici.pencere_durumu(77) == {"simge": True, "buyuk": False, "onplan": True}
+    assert yakalayici.pencere_durumu(5) == {"simge": True, "buyuk": False, "onplan": False}
+    monkeypatch.setattr(yakalayici, "user32", types.SimpleNamespace())          # Windows disi / API yok
+    assert yakalayici.pencere_durumu(77) == {}
+
+
+def test_simge_durumu_bir_kez_loglanir_ve_olaya_girer(monkeypatch):
+    loglar = []
+    y, sa, sayac, _ = _canli(monkeypatch, loglar=loglar)
+    simge = {"v": True}
+    monkeypatch.setattr(y, "pencere_durumu", lambda: {"simge": simge["v"], "buyuk": False, "onplan": False})
+    y.oku()
+    y.oku()
+    assert y.okumalar[-1]["pencere"] == {"simge": True, "buyuk": False, "onplan": False}
+    assert sum("küçültülmüş" in m for m, _ in loglar) == 1
+    simge["v"] = False
+    y.oku()
+    simge["v"] = True
+    y.oku()
+    assert sum("küçültülmüş" in m for m, _ in loglar) == 2          # toparlandiktan sonra yine kuculurse yeniden
+
+
+def test_log_fn_yalniz_mesaj_alirsa_da_calisir(monkeypatch):
+    mesajlar = []
+    y, sa, sayac, _ = _canli(monkeypatch, ses_var_fn=lambda: sa.t)
+    y.log_fn = mesajlar.append
+    y.oku()
+    sa.t += 13
+    y.oku()
+    assert any("hoparlörde konuşma var" in m for m in mesajlar)
+
+
+def test_okuma_olayi_yeni_alanlar_ve_okuma_sn(monkeypatch, tmp_path):
+    y, sa, sayac, _ = _canli(monkeypatch)
+    y.okuma_kaydi_ac(str(tmp_path))
+    y.oku()
+    o = y.okumalar[0]
+    assert o["degisti"] is True and o["donuk"] is False and o["yeniden_bul"] == 0 and o["pencere"] == {}
+    assert o["okuma_sn"] == pytest.approx(o["bit_epoch"] - o["bas_epoch"])
+    import json
+    with open(y._okuma_yolu, encoding="utf-8") as f:
+        satir = json.loads(f.readline())
+    assert {"degisti", "donuk", "yeniden_bul", "pencere", "okuma_sn"} <= set(satir)
+
+
+def test_ciftler_adi_olmayan_uzun_satir_soru_isaretiyle_kalir(monkeypatch):
+    uzun = "bu satirin yaninda hic konusmaci adi gorunmuyor ama uzun bir cumle"
+    kontroller = [types.SimpleNamespace(ControlTypeName="TextControl", Name=uzun),
+                  types.SimpleNamespace(ControlTypeName="TextControl", Name="ok")]
+    monkeypatch.setattr(yakalayici, "auto", types.SimpleNamespace(
+        WalkControl=lambda grup, includeTop=False, maxDepth=0: iter([(c, 1) for c in kontroller])))
+    y = yakalayici.Yakalayici()
+    y.grup = object()
+    assert y._ciftler() == [("?", uzun)]
+    assert "?" not in y._ad_adaylari and "?" not in y.bilinen            # '?' ad sayilmaz
+
+
+def test_ciftler_sonra_adli_satir_gelirse_soru_isareti_karismaz(monkeypatch):
+    uzun = "bu satirin yaninda hic konusmaci adi gorunmuyor ama uzun bir cumle"
+    kontroller = [types.SimpleNamespace(ControlTypeName="TextControl", Name=n)
+                  for n in (uzun, KIM_A, "IFRS dokuz raporunda PD kolonu string geliyor")]
+    monkeypatch.setattr(yakalayici, "auto", types.SimpleNamespace(
+        WalkControl=lambda grup, includeTop=False, maxDepth=0: iter([(c, 1) for c in kontroller])))
+    y = yakalayici.Yakalayici(katilimcilar=[KIM_A])
+    y.grup = object()
+    assert y._ciftler() == [("?", uzun), (KIM_A, "IFRS dokuz raporunda PD kolonu string geliyor")]
+
+
+# ================================================================ K1b: donuk icin sesli konusma SURESI (ses_sure_fn)
+
+def test_donuk_ses_sure_fn_varsa_en_az_donuk_ses_sn_konusma_gerekir(monkeypatch):
+    """ses_sure_fn (motor.loopback_konusma_sn) baglandiysa: panel 12 sn degismedi + son degisimden bu yana yalniz 2 sn
+    sesli konusma -> donuk DEGIL (tek kisa halusinasyon klibi sessiz panelde donuk saydirmaz); >= DONUK_SES_SN (5 sn)
+    konusma -> donuk ve yeniden bulma; cagri son degisim - DONUK_SES_PAYI ile yapilir."""
+    loglar = []
+    ses = {"t": None}
+    sure = {"v": 0.0, "cagri": []}
+
+    def ses_sure(bas):
+        sure["cagri"].append(bas)
+        return sure["v"]
+    y, sa, sayac, satirlar = _canli(monkeypatch, ses_var_fn=lambda: ses["t"], loglar=loglar, ses_sure_fn=ses_sure)
+    y.oku()                                                     # ilk okuma: grup bulundu, degisti
+    son_degisim = sa.t
+    sa.t += yakalayici.PANEL_DONUK_SN + 1
+    ses["t"] = sa.t                                             # eski kural tek basina donuk derdi
+    sure["v"] = 2.0                                             # ... ama yalniz 2 sn konusma
+    y.oku()
+    assert y.okumalar[-1]["donuk"] is False and sayac["n"] == 1 and y.yeniden_bul_sayisi == 0
+    assert sure["cagri"] and abs(sure["cagri"][-1] - (son_degisim - yakalayici.DONUK_SES_PAYI)) < 1e-6
+    sa.t += 3
+    sure["v"] = yakalayici.DONUK_SES_SN + 1.0                   # 6 sn konusma birikti
+    y.oku()
+    o = y.okumalar[-1]
+    assert o["donuk"] is True and sayac["n"] == 2 and y.yeniden_bul_sayisi == 1
+    assert any("değişmedi, hoparlörde konuşma var" in m for m, _ in loglar)
+
+
+def test_donuk_ses_sure_fn_yoksa_eski_kural(monkeypatch):
+    """ses_sure_fn None (eski motor): yalniz son konusma bitisi (ses_var_fn) ile donuk."""
+    ses = {"t": None}
+    y, sa, sayac, _ = _canli(monkeypatch, ses_var_fn=lambda: ses["t"], ses_sure_fn=None)
+    y.oku()
+    sa.t += yakalayici.PANEL_DONUK_SN + 1
+    ses["t"] = sa.t
+    y.oku()
+    assert y.okumalar[-1]["donuk"] is True and y.yeniden_bul_sayisi == 1
+
+
+def test_donuk_ses_sure_fn_hatasi_ya_da_gecersiz_deger_donuk_saymaz(monkeypatch):
+    def bozuk(bas):
+        raise RuntimeError("motor")
+    for fn in (bozuk, lambda bas: None, lambda bas: "x"):
+        y, sa, sayac, _ = _canli(monkeypatch, ses_var_fn=lambda: sa.t, ses_sure_fn=fn)
+        y.oku()
+        sa.t += 20
+        y.oku()
+        assert y.okumalar[-1]["donuk"] is False and y.yeniden_bul_sayisi == 0

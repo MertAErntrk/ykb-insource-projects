@@ -35,13 +35,15 @@ KIRLI_NEDEN = ("kesin ad payi %70-%80 (spk_guven = baskin - ikinci, plan formulu
                "kesimin cocugu: klip baska kisinin sozunden >= %20 kelime tasiyor ama 'baskin' >= 0.7. Sessiz blok yoksa "
                "artik kesilmiyor (ses.kesim_sessiz_mi, 31 -> 13 tohum). Ornek: altyazi_kapali/101 klip 4 25.8-32.1 sn "
                "Sinan 7 / Kaan 2 kelime, Sinan 'baskin' 0.703; gecikme2/107 klip 100 Kaan 8 / Sinan 3, Kaan 0.716")
+# B6 (altyazi satirlari gercek kelimeli, metin ipucu esitlik bozucu): 8 tohum duzeldi ve tablodan kalkti (XPASS):
+# hizli_devir/7, araya_girme/105, klip_ici_devir/104, altyazi_kapali/101, gecikme2/101, halusinasyon/105,
+# okuyucu_takilmasi/101, stt_kesintisi/101. L histerezisi + s2 agirlikli devir kesimi: gecikme2/107, stt_kesintisi/107.
+# Kaba bant cekirdegi + kisa klip gec satir beklemesi: araya_girme/104.
 KIRLI = {
-    "hizli_devir": (7,), "araya_girme": (103, 104, 105), "klip_ici_devir": (104,), "altyazi_kapali": (101,),
-    "gecikme0": (102,), "gecikme2": (101, 107), "halusinasyon": (105,), "okuyucu_takilmasi": (101,),
-    "stt_kesintisi": (101, 107),
+    "araya_girme": (103,), "gecikme0": (102,),
 }
-# Belirsiz orani (havuzlanmis) %12'yi asan senaryolar: olculen yuzde
-BELIRSIZ_BILINEN = {"tekrar": 12.9}
+# Belirsiz orani (havuzlanmis) %12'yi asan senaryolar: olculen yuzde (B6 gercek kelimeli altyazi: tekrar %12.9 -> gecer)
+BELIRSIZ_BILINEN = {}
 BELIRSIZ_NEDEN = ("kok neden: tek konusmacili klipte bile spk_guven < 0.7 ('Ad?', ~%8) - kisa klipte altyazi bandi kapsami "
                   "< %70 ve onceki/sonraki konusmacinin bandi (basta R/2 erken) klibe tasiyor; ust uste binme ('A / B' ~%1.5) "
                   "ve cozulemeyen devir ('A -> B' ~%1) ekleniyor. Sinir degeri: yavas okuma orani %2 -> %3 ve altyazi parca "
@@ -220,13 +222,19 @@ def test_i_halusinasyon_klibi_kesin_ad_almaz(seed):
 
 @pytest.mark.parametrize("seed", SEEDLER)
 def test_i2_halusinasyon_klibi_kesin_satir_sifir(seed):
-    """Faz 2: sessizlikte uydurulan klipten kesin (supheli olmayan) satir cikmaz -- supheli (soluk, nota girmez) ya da atilir.
-    Konusma ardindaki ('yakin') klipler de dahil."""
+    """Faz 2 + B3: sessizlikte uydurulan klipten kesin adli (spk_guven >= 0.7) satir cikmaz; klip ya atilir, ya icsel puanla
+    supheli (soluk, nota girmez, LLM'e gitmez) ya da -- zaman cizelgesi icerigi dusurmedigi icin (B3) -- 'Bilinmeyen' / 'Ad?'
+    ile kalir (sahip uretmez). Konusma ardindaki ('yakin') klipler de dahil. Eski kural (supheli olmayan = kesin) zaman
+    cizelgesiyle (+0.6) satiri nottan dusuruyordu; yeni kural (CIZELGE_PUANI 0.3, yalniz hal_ic >= 0.3) bunu 'Bilinmeyen'
+    olarak nota alir."""
     s = olc("halusinasyon", seed)
     assert s.get("hal_toplam", 0) >= 5, "halusinasyon klibi uretilmedi"
-    assert s.get("hal_kesin", 0) + s.get("hal_belirsiz_kesin", 0) == 0, [a for a in s["ayrinti"] if a[0] == "HALUSINASYON_KESIN"]
-    assert s.get("hal_supheli", 0) + s.get("hal_dusen", 0) == s["hal_toplam"]
-    assert s.get("hal_llm_girdi", 0) == 0, "supheli satir LLM'e (duzeltme / ozet) gitti"
+    assert s.get("hal_kesin", 0) + s.get("hal_belirsiz_kesin", 0) == 0, [a for a in s["ayrinti"] if a[0].startswith("HALUSINASYON_KESIN")]
+    assert (s.get("hal_supheli", 0) + s.get("hal_dusen", 0) + s.get("hal_bilinmeyen", 0)
+            + s.get("hal_adayli", 0) == s["hal_toplam"])
+    assert s.get("hal_llm_girdi", 0) == 0, "icsel supheli satir LLM'e (duzeltme / ozet) gitti"
+    assert s["satir_sil"].get("halusinasyon", 0) == 0, "zaman cizelgesi klip sildi (B3: silme yalniz hal_ic)"
+    assert s["cizelge_bilinmeyen_eksik"] == 0
 
 
 # ---------------- (j) oda / konuk etiketi, hayalet ad ----------------
