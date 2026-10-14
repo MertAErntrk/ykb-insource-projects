@@ -1,0 +1,12 @@
+{
+  "log": {
+    "version": "1.2",
+    "pages": [{"id": "list", "title": "Örnek: yeni gelen talepler"}, {"id": "detail", "title": "Örnek: talep detayı"}],
+    "entries": [
+      {"pageref": "list", "_resourceType": "xhr", "request": {"method": "GET", "url": "https://portal.example.com/api/requests?status=new&page=1", "headers": [], "queryString": [{"name": "status", "value": "new"}, {"name": "page", "value": "1"}]}, "response": {"status": 200, "content": {"mimeType": "application/json", "text": "{\"items\":[{\"id\":101,\"subject\":\"SENTETIK ORNEK\",\"status\":\"new\"}],\"total\":1}"}}},
+      {"pageref": "detail", "_resourceType": "xhr", "request": {"method": "GET", "url": "https://portal.example.com/api/requests/101", "headers": []}, "response": {"status": 200, "content": {"mimeType": "application/json", "text": "{\"id\":101,\"subject\":\"SENTETIK ORNEK\",\"status\":\"new\",\"assignee_id\":null}"}}},
+      {"pageref": "detail", "_resourceType": "xhr", "request": {"method": "POST", "url": "https://portal.example.com/api/requests/101/assign", "headers": [], "postData": {"mimeType": "application/json", "text": "{\"assignee_id\":9001}"}}, "response": {"status": 200, "content": {"mimeType": "application/json", "text": "{\"id\":101,\"assignee_id\":9001,\"status\":\"assigned\"}"}}},
+      {"request": {"method": "GET", "url": "https://portal.example.com/styles.css", "headers": []}, "response": {"status": 200, "content": {"mimeType": "text/css", "text": "body{}"}}}
+    ]
+  }
+}

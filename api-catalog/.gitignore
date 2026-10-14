@@ -1,0 +1,11 @@
+data/
+captures/
+exports/
+*.har
+*.db
+*.sqlite*
+settings.local.json
+__pycache__/
+*.pyc
+.env
+!.env.example
