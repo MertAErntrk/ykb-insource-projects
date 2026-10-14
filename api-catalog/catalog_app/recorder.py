@@ -76,12 +76,12 @@ async def response_entry(request, context):
 
 
 async def record(catalog, url, data_dir, application='', action='', hosts=(), channel=None, executable_path=None, duration=None, headless=False, mode='record', scan_wait=15, scroll=False):
-    if sys.version_info < (3, 10):
-        raise ValueError('Canlı kayıt için Python 3.10+ ve Playwright gerekli. Python 3.9 ile import komutunu/HAR yolunu kullanabilirsiniz.')
+    if sys.version_info < (3, 9):
+        raise ValueError('Canlı kayıt için Python 3.9+ gerekli.')
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        raise ValueError('Canlı kayıt için: python -m pip install -r requirements-record.txt. Kurulum yapılamıyorsa HAR import kullanın.') from None
+        raise ValueError('Playwright veya bağımlılığı yüklenemedi. Aynı Python ile: python -m pip install --upgrade -r requirements-record.txt. Python 3.9 için uyumlu sürümler dosyada sabitlenmiştir.') from None
     if urlsplit(url).scheme not in ('http', 'https'):
         raise ValueError('Kayıt başlangıç adresi HTTP/HTTPS olmalı.')
     run_id = uuid.uuid4().hex

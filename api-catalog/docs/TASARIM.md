@@ -35,7 +35,7 @@ Tarayıcı ayrı profil kullanır; kullanıcının açık günlük Chrome profil
 ## Kabul ölçütleri
 
 - Arayüz/web sunucusu olmadan CLI'dan çalışmalı.
-- HAR/Qwen/rapor çekirdeği Python 3.9 sözdizimiyle uyumlu olmalı; canlı tarayıcı için güncel Playwright'ın Python 3.10+ gereksinimi açık yazılmalı.
+- HAR/Qwen/rapor çekirdeği Python 3.9 sözdizimiyle uyumlu olmalı; canlı tarayıcı da Python 3.9'u desteklemeli; bu sürüm için Playwright/greenlet wheel sürümleri sabitlenmeli.
 - URL taraması sayfa yüklenmesindeki gerçek çağrıyı çıkarmalı ve tıklanmayan aksiyonu en fazla aday olarak göstermeli.
 - Kaydı açan kişi/CIF/açıklama alanları yanıtta varsa yol ve türleri katalogda aranabilmeli.
 - Normal soru-cevap model servisiyle, tool calling olmadan açıklama üretilmeli.

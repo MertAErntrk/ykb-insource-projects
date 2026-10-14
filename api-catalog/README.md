@@ -22,17 +22,32 @@ python --version
 python app.py doctor
 ```
 
-- **URL taraması / canlı kayıt:** Python 3.10+ ve isteğe bağlı Playwright paketi. Python 3.12 önerilir.
+- **URL taraması / canlı kayıt:** Python 3.9+ ve isteğe bağlı Playwright paketi. Python 3.9 için uyumlu paket sürümleri sabitlenmiştir.
 - **HAR/OpenAPI içe aktarma, Qwen ve raporlar:** Python 3.9+; üçüncü taraf paket gerekmez.
 - Node.js, Hermes, Ollama, ajan CLI'si veya yerel model kurulumu gerekmez.
 
 URL taraması için:
 
 ```powershell
-python -m pip install -r requirements-record.txt
+python -m pip install --upgrade -r requirements-record.txt
 ```
 
+Python 3.9'da Playwright 1.58.0, greenlet 3.2.4 ve typing-extensions 4.15.0 seçilir. Python 3.10+ için güncel Playwright aralığı kullanılır. Kurulum yalnızca hazır wheel paketlerini kabul eder; C/C++ derlemesi başlatmaz.
+
 Windows'ta kurulu Edge için `--channel msedge` kullanılır; ayrı Chromium indirmeniz gerekmez. Chrome için `--channel chrome`. Paket kurulumu kurumda mümkün değilse aşağıdaki HAR yolunu kullanın. İnternetsiz kurulumda kurumunuzun paket deposunu veya uygun Python/Windows sürümü için hazırlanmış wheel dosyalarını kullanabilirsiniz.
+
+## Kurulum hatası: greenlet wheel bulunamıyor
+
+`Building wheel for greenlet` eski kurulumun kaynak paket seçtiğini gösterir. Son satır `Microsoft Visual C++ 14.0 or greater is required` ise kaynak derlemesi için gereken C++ derleyicisi bulunmamıştır; hazır wheel kullanımı derleme ihtiyacını kaldırır. Uyumsuz paket sürümü, Python mimarisi, eski pip veya kurumsal depoda eksik wheel buna neden olabilir; derleme çıktısının son satırları olmadan kesin neden belirlenemez.
+
+Güncel `requirements-record.txt` kaynak paketleri kabul etmez. Güncel kodu `git pull` ile aldıktan sonra `python -m pip install --upgrade -r requirements-record.txt` kullanın. `No matching distribution found` gelirse, bildirilen paketin uyumlu hazır dosyası yapılandırılmış depoda bulunamamıştır. `python app.py doctor` Python yolu, bit sayısı ve kurulu paket sürümlerini gösterir.
+
+Python 3.9 Windows için greenlet 3.2.4 dosyaları:
+
+- 64 bit: `greenlet-3.2.4-cp39-cp39-win_amd64.whl`
+- 32 bit: `greenlet-3.2.4-cp39-cp39-win32.whl`
+
+Bu dosyaların kurumun paket deposunda erişilebilir olması gerekir. Günlük tarayıcıda F12 → HAR kaydı yolu hiçbir Playwright/greenlet kurulumu gerektirmez.
 
 ## 2. Qwen bağlantısı
 

@@ -2,7 +2,9 @@
 import argparse
 import asyncio
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -23,7 +25,7 @@ def _common(parser):
 
 def parser():
     root = argparse.ArgumentParser(description='API Atlas: URL, HAR veya OpenAPI üzerinden ekransız API kataloğu')
-    root.add_argument('--version', action='version', version='API Atlas 0.2.0')
+    root.add_argument('--version', action='version', version='API Atlas 0.2.1')
     sub = root.add_subparsers(dest='command', required=True)
     for command in ('scan', 'record', 'login'):
         p = sub.add_parser(command, help={'scan': 'URL açıp API çağrılarını ve JavaScript adaylarını otomatik çıkar', 'record': 'Siz gezinirken çağrıları kaydet', 'login': 'Ayrı kayıt profiline bir kez giriş yap'}[command])
@@ -87,6 +89,13 @@ def _print(value):
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _package_version(name):
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
 def _analyze(catalog, args):
     config = load_config(args.config)
     items = catalog.list(query=getattr(args, 'query', ''), application=getattr(args, 'app', ''))
@@ -112,7 +121,11 @@ def main(argv=None):
     try:
         if args.command == 'doctor':
             report = {'python': sys.version.split()[0], 'core_supported': sys.version_info >= (3, 9),
-                      'browser_python_supported': sys.version_info >= (3, 10),
+                      'browser_python_supported': sys.version_info >= (3, 9),
+                      'python_executable': sys.executable,
+                      'python_bits': struct.calcsize('P') * 8,
+                      'playwright_version': _package_version('playwright'),
+                      'greenlet_version': _package_version('greenlet'),
                       'playwright_installed': importlib.util.find_spec('playwright') is not None,
                       'qwen_tested': False, 'core_dependencies': 'Python standard library'}
             if args.qwen:

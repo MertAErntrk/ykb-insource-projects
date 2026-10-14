@@ -1,3 +1,8 @@
 # Optional browser capture. Core HAR/OpenAPI/Qwen uses no third-party packages.
-# Current Playwright requires Python >=3.10. Use HAR import on Python 3.9.
-playwright>=1.40,<2
+# Do not compile greenlet on locked-down corporate machines.
+# A missing wheel in the configured package index should be an explicit error.
+--only-binary=:all:
+playwright==1.58.0; python_version < "3.10"
+greenlet==3.2.4; python_version < "3.10"
+typing-extensions==4.15.0; python_version < "3.10"
+playwright>=1.64,<2; python_version >= "3.10"

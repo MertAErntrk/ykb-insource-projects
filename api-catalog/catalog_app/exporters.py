@@ -106,7 +106,7 @@ def openapi(items):
         if not operation['responses']:
             operation['responses']['default'] = {'description': 'Yanıt sözleşmesi bilinmiyor.'}
         path[key] = operation
-    return {'openapi': '3.1.0', 'info': {'title': 'API Atlas — gözlenen/belgelenen API', 'version': '0.2.0',
+    return {'openapi': '3.1.0', 'info': {'title': 'API Atlas — gözlenen/belgelenen API', 'version': '0.2.1',
             'description': 'Kısmi sözleşme. Örnek trafikten tüm alanlar, zorunluluklar ve iş kuralları belirlenemez. Qwen açıklamaları çıkarımdır.'}, 'paths': paths}
 
 
