@@ -1,0 +1,3 @@
+# Optional browser capture. Core HAR/OpenAPI/Qwen uses no third-party packages.
+# Current Playwright requires Python >=3.10. Use HAR import on Python 3.9.
+playwright>=1.40,<2

@@ -1,0 +1,11 @@
+{
+  "protocol": "openai",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "model": "SUNUCUNUN_BEKLEDIGI_MODEL_ID",
+  "api_key_env": "QWEN_API_KEY",
+  "headers_from_env": {},
+  "timeout": 90,
+  "max_input_chars": 24000,
+  "max_tokens": 1800,
+  "ca_bundle": ""
+}

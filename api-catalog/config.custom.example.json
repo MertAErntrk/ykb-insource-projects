@@ -1,0 +1,11 @@
+{
+  "protocol": "json_template",
+  "endpoint": "http://127.0.0.1:8000/ask",
+  "request_template": {"question": "$combined_prompt"},
+  "response_path": "/answer",
+  "api_key_env": "QWEN_API_KEY",
+  "headers_from_env": {"X-API-Key": "QWEN_GATEWAY_KEY"},
+  "timeout": 90,
+  "max_input_chars": 24000,
+  "ca_bundle": ""
+}
