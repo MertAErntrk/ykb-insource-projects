@@ -1,0 +1,60 @@
+/* Tasarım tokenları: tek kaynak. Bileşenler yalnız bu değişkenleri kullanır. */
+:root {
+  /* Yapı Kredi mavisi: kurumsal kılavuzla teyit edilecek. Beyaz üzerinde kontrast 8.9:1 (AA/AAA). */
+  --color-brand: #004b93;
+  --color-brand-hover: #003c76;
+  --color-brand-active: #002f5e;
+  --color-brand-soft: #e6eff8;
+  --color-on-brand: #ffffff;
+
+  --color-bg: #f4f6f9;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #eef1f5;
+  --color-border: #d3dae3;
+  --color-border-strong: #9aa7b8;
+
+  --color-text: #17202b;
+  --color-text-muted: #4d5a6b;
+  --color-text-disabled: #7b8696;
+
+  --color-danger: #b42318;
+  --color-danger-soft: #fdecea;
+  --color-warn: #7a4b00;
+  --color-warn-soft: #fff3d6;
+  --color-success: #17623a;
+  --color-success-soft: #e4f3ea;
+  --color-info: #004b93;
+  --color-info-soft: #e6eff8;
+
+  --focus-ring: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-brand);
+
+  /* Segoe UI öncelikli sistem yığını; harici font yok (CSP self). */
+  --font-sans: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --leading: 1.5;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --radius: 6px;
+  --radius-lg: 10px;
+  --shadow-overlay: 0 12px 32px rgba(23, 32, 43, 0.22);
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-fast: 120ms;
+  --dur: 180ms;
+
+  --header-h: 56px;
+  --content-w: 1120px;
+}

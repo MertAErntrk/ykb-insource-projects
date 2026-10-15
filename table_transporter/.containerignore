@@ -1,0 +1,14 @@
+.git
+.env*
+**/.env*
+config/tnsnames.ora
+config/service_accounts.toml
+data/
+*.db*
+backend/.venv
+frontend/node_modules
+frontend/dist
+__pycache__
+**/__pycache__
+.pytest_cache
+.playwright-cli

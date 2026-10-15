@@ -12,6 +12,7 @@ YKB'de insource olarak geliştirilen projelerin reposudur.
 | [`strateji-cevap/`](strateji-cevap/) | Strateji Cevap Motoru | Strateji çıktıları hakkındaki Smile çağrılarına otomatik cevap taslağı üreten motor |
 | [`risk-feature-workbench/`](risk-feature-workbench/) | Risk Feature Workbench | Excel değişkenlerinden gerçek Oracle şema/tablo/kolon adaylarını bulan yerel web uygulaması; [iş bilgisayarı rehberi](risk-feature-workbench/docs/IS_BILGISAYARINDA_BASLANGIC.md) |
 | [`api-catalog/`](api-catalog/) | API Atlas | Ekran URL’si, HAR ve OpenAPI üzerinden CLI ile API kataloğu; Qwen soru-cevap endpoint’iyle Türkçe açıklamalar |
+| [`table_transporter/`](table_transporter/) | VeriKöprü | Oracle DB'ler arasında kolon bazlı anonimleştirerek tablo taşıyan web uygulaması (LDAP girişi, en çok 5M satır, yalnız CREATE/INSERT, tablo silmez); [dağıtım rehberi](table_transporter/docs/DEPLOY.md) |
 
 Her proje kendi klasöründe durur. Yeni proje eklerken kök dizinde yeni bir klasör açıp bu tabloya bir satır ekle.
 

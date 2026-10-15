@@ -1,0 +1,42 @@
+# VeriKöprü - çok aşamalı imaj. Banka iç registry'si için ARG'ları --build-arg ile değiştirin.
+ARG NODE_IMAGE=node:24-slim
+ARG PYTHON_IMAGE=python:3.12-slim
+
+# --- 1) Frontend derleme ---
+FROM ${NODE_IMAGE} AS frontend
+WORKDIR /build/frontend
+RUN corepack enable
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY frontend/ ./
+RUN pnpm build
+
+# --- 2) Çalışma imajı (Oracle Thin mod: Instant Client yok) ---
+FROM ${PYTHON_IMAGE}
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TT_ENV=openshift \
+    TT_FRONTEND_DIST=/app/frontend/dist \
+    TT_SQLITE_PATH=/data/verikopru.db
+
+# requirements.lock varsa onunla, yoksa requirements.txt ile kur.
+COPY backend/requirements.txt backend/requirements.lock* /tmp/req/
+RUN if [ -f /tmp/req/requirements.lock ]; then \
+        pip install --no-cache-dir -r /tmp/req/requirements.lock; \
+    else \
+        pip install --no-cache-dir -r /tmp/req/requirements.txt; \
+    fi && rm -rf /tmp/req
+
+WORKDIR /app/backend
+COPY backend/app ./app
+COPY --from=frontend /build/frontend/dist /app/frontend/dist
+
+# OpenShift rastgele UID atar (grup 0): /app ve /data grup yazılabilir olmalı.
+RUN mkdir -p /data \
+    && chgrp -R 0 /app /data \
+    && chmod -R g=u /app /data
+
+USER 1001
+EXPOSE 8080
+# TEK worker: süreç içi oturum, SQLite ve hedef kilidi buna bağlı.
+CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--proxy-headers"]

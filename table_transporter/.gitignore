@@ -1,0 +1,25 @@
+# Gizli / ortama özel
+.env
+.env.*
+!.env.example
+config/tnsnames.ora
+config/service_accounts.toml
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Araçlar
+.playwright-cli/
+*.log

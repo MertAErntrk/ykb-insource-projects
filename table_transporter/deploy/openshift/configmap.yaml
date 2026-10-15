@@ -1,0 +1,29 @@
+# Gizli olmayan ayarlar. Gizliler (TT_SESSION_SECRET, TT_ANON_HMAC_KEY, service_accounts.toml) Secret'tadır.
+# LDAP_* değerleri config.py varsayılanlarıyla aynıdır (KFS AD).
+# TT_TARGET_DENY_ALIASES burada yok: "verikopru-site" ConfigMap'i oc ile yaratılır (docs/DEPLOY.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: verikopru-config
+  labels:
+    app: verikopru
+data:
+  LDAP_SERVER_URI: "ldaps://ldaps.kfs.local:636"
+  LDAP_BASE_DN: "OU=BTUsers,OU=GMUsers,OU=KFS,OU=Users,OU=KFS,DC=kfs,DC=local"
+  LDAP_DOMAIN: "KFS"
+  LDAP_TLS_VERIFY: "false"
+  LDAP_TIMEOUT_SEC: "10"
+  LDAP_ALLOWED_GROUPS: ""
+  LDAP_ADMIN_GROUPS: ""
+  TT_ENV: "openshift"
+  TT_COOKIE_SECURE: "true"
+  TT_ROW_LIMIT: "5000000"
+  TT_RETENTION_DAYS: "7"
+  TT_MAX_CONCURRENT_JOBS: "2"
+  # tnsnames.ora bu dizine "verikopru-tns" ConfigMap'inden bağlanır (deployment.yaml).
+  TT_TNS_ADMIN: "/etc/tt/tns"
+  # service_accounts.toml bu yola Secret'tan bağlanır (deployment.yaml).
+  TT_SERVICE_ACCOUNTS_FILE: "/etc/tt/secrets/service_accounts.toml"
+  # uvicorn --proxy-headers yalnız bu adreslerden gelen X-Forwarded-For'a güvenir.
+  # Küme ağınıza göre değiştirin (router pod'larının geldiği CIDR). "*" KULLANMAYIN.
+  FORWARDED_ALLOW_IPS: "10.128.0.0/14"

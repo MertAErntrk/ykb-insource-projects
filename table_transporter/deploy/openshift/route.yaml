@@ -1,0 +1,21 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: verikopru
+  labels:
+    app: verikopru
+  annotations:
+    # SSE ve uzun sayım sorguları için zaman aşımı.
+    haproxy.router.openshift.io/timeout: 10m
+spec:
+  # Web adresi: https://verikopru.<küme apps alan adı>. CHANGE_ME_APPS_DOMAIN'i değiştirin
+  # (oc get ingresses.config/cluster -o jsonpath='{.spec.domain}').
+  host: verikopru.CHANGE_ME_APPS_DOMAIN
+  to:
+    kind: Service
+    name: verikopru
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

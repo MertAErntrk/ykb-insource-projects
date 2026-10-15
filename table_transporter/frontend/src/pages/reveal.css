@@ -1,0 +1,7 @@
+.reveal-page { display: flex; flex-direction: column; gap: var(--space-4); }
+.reveal-values { resize: vertical; width: 100%; }
+.reveal-counter { margin: 0; font-size: var(--text-sm); color: var(--color-text-muted); }
+.reveal-error { color: var(--color-danger); font-weight: 500; }
+.reveal-actions { margin-top: var(--space-3); }
+/* Baş/son boşluk metin belirtecinde anlamlıdır; görünür kalsın. */
+.reveal-page td { white-space: pre-wrap; font-family: var(--font-mono); }

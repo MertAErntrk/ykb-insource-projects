@@ -1,0 +1,9 @@
+# secret.example.yaml bilerek yok: Secret'ı `oc create secret` ile yaratın (docs/DEPLOY.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - route.yaml

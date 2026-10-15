@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verikopru
+  labels:
+    app: verikopru
+spec:
+  # TEK pod: süreç içi oturum + SQLite + süreç içi hedef kilidi. Ölçeklendirmeyin.
+  replicas: 1
+  # RWO PVC + SQLite: eski ve yeni pod aynı anda çalışmamalı.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: verikopru
+  template:
+    metadata:
+      labels:
+        app: verikopru
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: CHANGE_ME_REGISTRY/verikopru:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: verikopru-config
+            # Ortama özgü, zorunlu (TT_TARGET_DENY_ALIASES); yoksa pod başlamaz.
+            - configMapRef:
+                name: verikopru-site
+          env:
+            - name: TT_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: verikopru-secrets
+                  key: TT_SESSION_SECRET
+            - name: TT_ANON_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: verikopru-secrets
+                  key: TT_ANON_HMAC_KEY
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          # 5M satırlık Arrow tamponu bellekte tutulur; limitleri iş yüküne göre ayarlayın.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tns
+              mountPath: /etc/tt/tns
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/tt/secrets
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: verikopru-data
+        - name: tns
+          configMap:
+            name: verikopru-tns
+            items:
+              - key: tnsnames.ora
+                path: tnsnames.ora
+        - name: secrets
+          secret:
+            secretName: verikopru-secrets
+            defaultMode: 0440
+            items:
+              - key: service_accounts.toml
+                path: service_accounts.toml
