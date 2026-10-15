@@ -1,0 +1,36 @@
+# VeriKöprü - ön yüzü önceden derlenmiş imaj: kümede Node/npm gerekmez, yalnız Python taban imajı.
+# prebuilt/frontend-dist = frontend'de "pnpm build" çıktısı. Ön yüz değişince yenileyin:
+#   cd frontend; pnpm build; cd ..; Remove-Item -Recurse prebuilt\frontend-dist; Copy-Item -Recurse frontend\dist prebuilt\frontend-dist
+# Taban imaj Python >= 3.11 olmalı; OpenShift'te build.yaml buildArgs (PYTHON_IMAGE) ile verilir.
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE}
+USER 0
+# İsteğe bağlı iç PyPI aynası (simple index adresi); boşsa taban imajın pip ayarı ya da pypi.org.
+ARG PIP_MIRROR=
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TT_ENV=openshift \
+    TT_FRONTEND_DIST=/app/frontend/dist \
+    TT_SQLITE_PATH=/data/verikopru.db
+
+COPY backend/requirements.txt backend/requirements.lock* /tmp/req/
+RUN if [ -n "$PIP_MIRROR" ]; then export PIP_INDEX_URL="$PIP_MIRROR"; fi; \
+    if [ -f /tmp/req/requirements.lock ]; then \
+        python3 -m pip install --no-cache-dir -r /tmp/req/requirements.lock; \
+    else \
+        python3 -m pip install --no-cache-dir -r /tmp/req/requirements.txt; \
+    fi && rm -rf /tmp/req
+
+WORKDIR /app/backend
+COPY backend/app ./app
+COPY prebuilt/frontend-dist /app/frontend/dist
+
+# OpenShift rastgele UID atar (grup 0): /app ve /data grup yazılabilir olmalı.
+RUN mkdir -p /data \
+    && chgrp -R 0 /app /data \
+    && chmod -R g=u /app /data
+
+USER 1001
+EXPOSE 8080
+# TEK worker: süreç içi oturum, SQLite ve hedef kilidi buna bağlı.
+CMD ["python3", "-m", "uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--proxy-headers"]

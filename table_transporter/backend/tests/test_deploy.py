@@ -179,3 +179,16 @@ def test_containerignore_excludes_secrets():
 def test_no_obvious_real_secrets(name):
     text = (OS_DIR / name).read_text(encoding="utf-8")
     assert "BEGIN " not in text and "password" not in text.lower().replace("passwords", "")
+
+
+def test_containerfile_prebuilt():
+    """Node'suz imaj: ön yüz önceden derlenmiş (prebuilt/frontend-dist) ve kopyalanır."""
+    text = (ROOT / "Containerfile.prebuilt").read_text(encoding="utf-8")
+    users = re.findall(r"^USER\s+(\S+)\s*$", text, re.M)
+    assert users and users[-1].isdigit() and int(users[-1]) != 0
+    assert "COPY prebuilt/frontend-dist /app/frontend/dist" in text
+    assert "--workers\", \"1\"" in text and "--proxy-headers" in text and "--factory" in text
+    assert "ARG PYTHON_IMAGE" in text and "ARG PIP_MIRROR=" in text
+    assert (ROOT / "prebuilt" / "frontend-dist" / "index.html").is_file()
+    ignored = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
+    assert "prebuilt" not in {ln.strip().rstrip("/") for ln in ignored}

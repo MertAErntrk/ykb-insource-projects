@@ -72,6 +72,28 @@ oc logs deployment/verikopru --tail=50
 ```
 Route adresi kümece verilir (`verikopru-<namespace>.<apps alan adı>`). Giriş zaman aşımına düşüyorsa pod'un LDAPS (636) ya da Oracle portlarına çıkışı kapalıdır (NetworkPolicy/egress); platform ekibine açtırın.
 
+**İç registry kapalıysa** (`oc get is verikopru -o jsonpath="{.status.dockerImageRepository}"` boş, build `InvalidOutputReference` verir): imaj kurum registry'sine gönderilir, ImageStream o imajı izler. Node/npm gerekmesin diye `Containerfile.prebuilt` (ön yüz `prebuilt/frontend-dist`'ten) kullanılır. `<REGISTRY>`, `<PUSH_YOLU>`, `<PYTHON_TABAN_IMAJ>` (Python ≥ 3.11) ve `<PULL_SECRET>` kurumunuza göre; adresler depoya yazılmaz:
+```powershell
+$patch = @"
+spec:
+  strategy:
+    dockerStrategy:
+      dockerfilePath: Containerfile.prebuilt
+      pullSecret: {name: <PULL_SECRET>}
+      buildArgs:
+        - {name: PYTHON_IMAGE, value: "<PYTHON_TABAN_IMAJ>"}
+  output:
+    to: {kind: DockerImage, name: "<REGISTRY>/<PUSH_YOLU>/verikopru:latest"}
+    pushSecret: {name: <PULL_SECRET>}
+"@
+[IO.File]::WriteAllText("$env:TEMP\bc-patch.yaml", $patch)
+oc patch bc/verikopru --type=merge --patch-file="$env:TEMP\bc-patch.yaml"
+oc secrets link default <PULL_SECRET> --for=pull
+# build (2. adım) bittikten sonra, bir kez:
+oc tag "<REGISTRY>/<PUSH_YOLU>/verikopru:latest" verikopru:latest --scheduled
+```
+Bu düzende güncelleme: build, ardından `oc import-image verikopru:latest` (ImageStream yeni imajı görür, pod yenilenir). `oc apply -f deploy\openshift\build.yaml` yeniden çalıştırılırsa patch da yinelenir.
+
 **Güncelleme:** `git pull`, ardından 2. adımdaki `git archive` ve `oc start-build` komutları; build bitince pod kendiliğinden yenilenir (`image.openshift.io/triggers`). Manifest ya da `configmap.yaml` değiştiyse `oc apply -k deploy\openshift`. Her ikisi de pod'u yeniden başlatır (`apply -k` imaj alanını geri yazdığı için iki kez olabilir) ve çalışan taşıma `failed`/`partial` olur: çalışan iş yokken yapın.
 
 ## X-Forwarded-For (`FORWARDED_ALLOW_IPS`)
