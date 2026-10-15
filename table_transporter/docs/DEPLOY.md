@@ -20,27 +20,64 @@ podman push registry.example.local/ns/verikopru:1
 ```
 `backend/requirements.lock` varsa onunla, yoksa `requirements.txt` ile kurulur. `.containerignore` gizli dosyaları (`.env*`, `config/tnsnames.ora`, `config/service_accounts.toml`) imaja sokmaz.
 
-## OpenShift
-```bash
-oc new-project verikopru
-# tnsnames.ora (Secret değil, ConfigMap; manifestlerde içerik yok)
-oc create configmap verikopru-tns --from-file=tnsnames.ora=config/tnsnames.ora
-# Hedef olamayacak canlı alias'lar (zorunlu; depoda tutulmaz, yoksa pod başlamaz)
-oc create configmap verikopru-site --from-literal=TT_TARGET_DENY_ALIASES=<CANLI_ALIAS>
-# Gizliler
-oc create secret generic verikopru-secrets \
-  --from-literal=TT_SESSION_SECRET="$(openssl rand -base64 48)" \
-  --from-literal=TT_ANON_HMAC_KEY="$(openssl rand -base64 48)" \
-  --from-file=service_accounts.toml=config/service_accounts.toml
-# Önce deploy/openshift/configmap.yaml (LDAP_*, FORWARDED_ALLOW_IPS), deployment.yaml (image) ve
-# route.yaml (host: verikopru.<apps alan adı>) düzenlenir
-oc apply -k deploy/openshift
-oc get route verikopru   # https://verikopru.<apps alan adı>
+## OpenShift (imaj kümede build edilir)
+PC'de yalnız `git` ve giriş yapılmış `oc` gerekir; Python, Node ve Docker gerekmez. Komutlar Windows PowerShell'de, `ykb-insource-projects` klonunun `table_transporter` klasöründen çalıştırılır (`cd ykb-insource-projects\table_transporter`). Gizli değerler depoya ve dosyaya yazılmaz; yalnız kümede (ConfigMap/Secret) durur.
+
+**0) Ortamı tanı**
+```powershell
+oc project -q                                   # doğru dev namespace'i mi?
+oc auth can-i create buildconfigs               # yes olmalı
+oc auth can-i create builds --subresource=docker   # yes olmalı (Docker stratejisi)
+oc auth can-i create buildconfigs --subresource=instantiatebinary   # yes olmalı (start-build --from-archive)
+oc describe quota                               # pod 0.5-2 CPU / 1-4 Gi, build 1 CPU / 2 Gi ister
+oc get storageclass                             # "(default)" yoksa pvc.yaml'a storageClassName gerekir
 ```
-`TT_ANON_HMAC_KEY` değişirse aynı veri farklı anonimleştirilir (join bozulur); yedekleyin, değiştirmeyin.
+
+**1) Ortama özgü ayarlar (bir kez)**
+```powershell
+# Hedef olamayacak canlı alias'lar, virgülle (zorunlu; yoksa pod başlamaz)
+oc create configmap verikopru-site --from-literal=TT_TARGET_DENY_ALIASES=<CANLI_ALIAS>
+# Kendi tnsnames.ora dosyan (içerik depoda yok)
+oc create configmap verikopru-tns --from-file=tnsnames.ora=<tnsnames.ora yolu>
+# Oturum ve anonimleştirme anahtarları: rastgele üretilir, ekrana yazılmaz
+function New-Key { $b = New-Object byte[] 48; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b) }
+$k1 = New-Key; $k2 = New-Key
+oc create secret generic verikopru-secrets "--from-literal=TT_SESSION_SECRET=$k1" "--from-literal=TT_ANON_HMAC_KEY=$k2"
+Remove-Variable k1, k2
+```
+tnsnames.ora ya da canlı alias listesi sonradan değişirse aynı komutu `--dry-run=client -o yaml | oc apply -f -` ile verip `oc rollout restart deployment/verikopru` çalıştırın.
+
+`TT_ANON_HMAC_KEY` değişirse aynı veri farklı anonimleştirilir (join bozulur) ve eski değerler çözülemez; şifre kasasına yedekleyin, değiştirmeyin: `oc extract secret/verikopru-secrets --keys=TT_ANON_HMAC_KEY --to=-`.
+
+İsteğe bağlı: `deploy\openshift\configmap.yaml` içinde `LDAP_ADMIN_GROUPS` (yönetici AD grubu; CN ya da tam DN, virgülle) ve `LDAP_ALLOWED_GROUPS` (boş = Base DN'deki herkes). Servis hesabı (7 gün kontrolü) sonradan eklenebilir; yoksa pod açılır, tablolar "doğrulanamadı" kalır:
+```powershell
+oc set data secret/verikopru-secrets --from-file=service_accounts.toml=<service_accounts.toml yolu>
+oc rollout restart deployment/verikopru
+```
+
+**2) İmajı build et**
+```powershell
+oc apply -f deploy\openshift\build.yaml
+git archive --format=tar -o "$env:TEMP\verikopru.tar" HEAD:table_transporter
+oc start-build verikopru --from-archive="$env:TEMP\verikopru.tar" --follow
+```
+`git archive` yalnız commit'li dosyaları paketler (`HEAD:table_transporter` = bu klasörün son commit'teki hali; proje kendi deposunun kökündeyse yalnız `HEAD`); yereldeki `tnsnames.ora`, `.env` ve `service_accounts.toml` kümeye gitmez. Küme Docker Hub, npm ya da PyPI'ye çıkamıyorsa build `FROM`, `pnpm install` ya da `pip install` adımında düşer: `build.yaml`'daki `buildArgs` bloğunu iç registry ve ayna adresleriyle açıp `oc apply -f deploy\openshift\build.yaml` ve `oc start-build` komutlarını yineleyin. Bu değerler BuildConfig'te düz metin durur: ayna adresine kullanıcı:şifre gömmeyin.
+
+**3) Uygula ve aç**
+```powershell
+oc apply -k deploy\openshift
+oc rollout status deployment/verikopru --timeout=5m
+oc get route verikopru -o jsonpath="{.spec.host}"   # https://<bu adres>
+oc logs deployment/verikopru --tail=50
+```
+Route adresi kümece verilir (`verikopru-<namespace>.<apps alan adı>`). Giriş zaman aşımına düşüyorsa pod'un LDAPS (636) ya da Oracle portlarına çıkışı kapalıdır (NetworkPolicy/egress); platform ekibine açtırın.
+
+**Güncelleme:** `git pull`, ardından 2. adımdaki `git archive` ve `oc start-build` komutları; build bitince pod kendiliğinden yenilenir (`image.openshift.io/triggers`). Manifest ya da `configmap.yaml` değiştiyse `oc apply -k deploy\openshift`. Her ikisi de pod'u yeniden başlatır (`apply -k` imaj alanını geri yazdığı için iki kez olabilir) ve çalışan taşıma `failed`/`partial` olur: çalışan iş yokken yapın.
 
 ## X-Forwarded-For (`FORWARDED_ALLOW_IPS`)
 Giriş kısıtlaması (`request.client.host`) gerçek istemci IP'sine bakar. Pod, Route/HAProxy arkasında olduğundan uvicorn `--proxy-headers` ile çalışır ve `FORWARDED_ALLOW_IPS`'i yerel olarak okur. Değer router pod'larının geldiği küme ağı CIDR'ı olmalıdır (varsayılan yer tutucu `10.128.0.0/14`; kümenize göre değiştirin).
+
+Doğrulama: bir giriş denemesinden sonra `oc logs deployment/verikopru --tail=20` satırındaki `POST /api/auth/login` isteğinin IP'si istemcinin (PC'nin) adresi olmalı. Küme içi bir adres görünüyorsa router bu aralığın dışından geliyordur; o zaman herkes aynı IP'den gelmiş sayılır ve 5 hatalı giriş herkesi 5 dakika kilitler. Görünen adresin ağını `FORWARDED_ALLOW_IPS`'e ekleyin.
 
 `*` kullanılmaz: uvicorn güvenilen her kaynakta zincirin en solundaki değeri alır; bu değeri istemci kendisi uydurabilir, böylece giriş kısıtlaması her istekte farklı sahte IP ile atlatılır. Güvenilen aralık dar tutulunca router'ın eklediği gerçek değer kullanılır.
 

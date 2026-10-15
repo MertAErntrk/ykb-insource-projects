@@ -8,9 +8,8 @@ metadata:
     # SSE ve uzun sayım sorguları için zaman aşımı.
     haproxy.router.openshift.io/timeout: 10m
 spec:
-  # Web adresi: https://verikopru.<küme apps alan adı>. CHANGE_ME_APPS_DOMAIN'i değiştirin
-  # (oc get ingresses.config/cluster -o jsonpath='{.spec.domain}').
-  host: verikopru.CHANGE_ME_APPS_DOMAIN
+  # host bilerek yok: OpenShift https://verikopru-<namespace>.<apps alan adı> adresini verir
+  # (oc get route verikopru). Özel ad gerekiyorsa buraya host: ekleyin.
   to:
     kind: Service
     name: verikopru

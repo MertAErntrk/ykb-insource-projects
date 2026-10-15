@@ -1,0 +1,56 @@
+# İmaj kümede build edilir (binary build); yerel Docker/Podman ve registry gerekmez.
+# Kustomization'a dahil değil: önce bu dosya uygulanır, sonra build başlatılır (docs/DEPLOY.md):
+#   oc apply -f deploy/openshift/build.yaml
+#   oc start-build verikopru --from-archive=<git archive tar> --follow
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: verikopru
+  labels:
+    app: verikopru
+spec:
+  # deployment.yaml imajı yalnız adla (verikopru:latest) verir; namespace içindeki bu ImageStream'den çözülür.
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: verikopru
+  labels:
+    app: verikopru
+spec:
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile
+      # Küme Docker Hub'a / npm / PyPI'ye çıkamıyorsa bu bloğu açıp iç adresleri yazın
+      # (ör. iç registry ve Artifactory/Nexus ayna adresleri). Değerler BuildConfig'te düz metin
+      # durur ve imaj geçmişine düşebilir: adrese kullanıcı:şifre gömmeyin (anonim okunan ayna kullanın).
+      # buildArgs:
+      #   - name: NODE_IMAGE
+      #     value: <iç registry>/node:24-slim
+      #   - name: PYTHON_IMAGE
+      #     value: <iç registry>/python:3.12-slim
+      #   - name: NPM_MIRROR
+      #     value: https://<ayna>/api/npm/npm-remote/
+      #   - name: PIP_MIRROR
+      #     value: https://<ayna>/api/pypi/pypi-remote/simple
+  output:
+    to:
+      kind: ImageStreamTag
+      name: verikopru:latest
+  # Ön yüz derlemesi için bellek; namespace kotası yetmezse düşürün.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  successfulBuildsHistoryLimit: 3
+  failedBuildsHistoryLimit: 3

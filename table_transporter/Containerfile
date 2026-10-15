@@ -1,18 +1,30 @@
-# VeriKöprü - çok aşamalı imaj. Banka iç registry'si için ARG'ları --build-arg ile değiştirin.
+# VeriKöprü - çok aşamalı imaj. Banka iç registry'si ve paket aynaları için ARG'ları --build-arg
+# ile (OpenShift'te deploy/openshift/build.yaml buildArgs) değiştirin.
 ARG NODE_IMAGE=node:24-slim
 ARG PYTHON_IMAGE=python:3.12-slim
 
 # --- 1) Frontend derleme ---
 FROM ${NODE_IMAGE} AS frontend
+# UBI gibi root olmayan taban imajlarda da derleme dizinine yazılabilsin (çalışma imajı aşağıda 1001).
+USER 0
+# İsteğe bağlı iç npm aynası (ör. Artifactory); boşsa registry.npmjs.org.
+ARG NPM_MIRROR=
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 WORKDIR /build/frontend
-RUN corepack enable
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
-RUN pnpm build
+# pnpm sürümü (ve sha512'si) package.json "packageManager" alanından gelir; corepack olmayan
+# taban imajlarda (bazı UBI nodejs imajları) aynı sürüm npm ile kurulur.
+RUN if [ -n "$NPM_MIRROR" ]; then export COREPACK_NPM_REGISTRY="$NPM_MIRROR" npm_config_registry="$NPM_MIRROR"; fi \
+    && if command -v corepack >/dev/null 2>&1; then corepack enable; \
+       else npm install -g "$(node -p "require('./package.json').packageManager.split('+')[0]")"; fi \
+    && pnpm install --frozen-lockfile \
+    && pnpm build
 
 # --- 2) Çalışma imajı (Oracle Thin mod: Instant Client yok) ---
 FROM ${PYTHON_IMAGE}
+USER 0
+# İsteğe bağlı iç PyPI aynası (simple index adresi); boşsa pypi.org.
+ARG PIP_MIRROR=
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TT_ENV=openshift \
@@ -21,7 +33,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 # requirements.lock varsa onunla, yoksa requirements.txt ile kur.
 COPY backend/requirements.txt backend/requirements.lock* /tmp/req/
-RUN if [ -f /tmp/req/requirements.lock ]; then \
+RUN if [ -n "$PIP_MIRROR" ]; then export PIP_INDEX_URL="$PIP_MIRROR"; fi; \
+    if [ -f /tmp/req/requirements.lock ]; then \
         pip install --no-cache-dir -r /tmp/req/requirements.lock; \
     else \
         pip install --no-cache-dir -r /tmp/req/requirements.txt; \

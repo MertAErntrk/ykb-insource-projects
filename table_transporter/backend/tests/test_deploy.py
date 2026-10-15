@@ -1,5 +1,6 @@
 """Dağıtım dosyaları: manifestler, Containerfile, .containerignore (ağ/kümeye gerek yok)."""
 
+import json
 import re
 from pathlib import Path
 
@@ -16,6 +17,11 @@ def _load(name: str) -> dict:
     docs = [d for d in yaml.safe_load_all((OS_DIR / name).read_text(encoding="utf-8")) if d]
     assert len(docs) == 1
     return docs[0]
+
+
+def _load_all(name: str) -> dict[str, dict]:
+    docs = [d for d in yaml.safe_load_all((OS_DIR / name).read_text(encoding="utf-8")) if d]
+    return {d["kind"]: d for d in docs}
 
 
 def _containerfile() -> str:
@@ -65,6 +71,33 @@ def test_deployment_probes_and_mounts():
     assert not any(s["configMapRef"].get("optional") for s in c["envFrom"] if "configMapRef" in s)
     secret_keys = {e["name"] for e in c["env"]}
     assert {"TT_SESSION_SECRET", "TT_ANON_HMAC_KEY"} <= secret_keys
+    # service_accounts.toml isteğe bağlı; anahtarlar env'de secretKeyRef ile zorunlu kalır.
+    assert sec_vol["secret"]["optional"] is True
+    assert not any(e["valueFrom"]["secretKeyRef"].get("optional") for e in c["env"] if "valueFrom" in e)
+
+
+def test_deployment_image_from_imagestream():
+    dep = _load("deployment.yaml")
+    c = dep["spec"]["template"]["spec"]["containers"][0]
+    assert c["image"] == "verikopru:latest"
+    triggers = json.loads(dep["metadata"]["annotations"]["image.openshift.io/triggers"])
+    assert triggers == [{
+        "from": {"kind": "ImageStreamTag", "name": "verikopru:latest"},
+        "fieldPath": f'spec.template.spec.containers[?(@.name=="{c["name"]}")].image',
+    }]
+
+
+def test_build_config():
+    docs = _load_all("build.yaml")
+    assert set(docs) == {"ImageStream", "BuildConfig"}
+    assert docs["ImageStream"]["metadata"]["name"] == "verikopru"
+    assert docs["ImageStream"]["spec"]["lookupPolicy"]["local"] is True
+    bc = docs["BuildConfig"]["spec"]
+    assert bc["source"]["type"] == "Binary"
+    assert bc["strategy"]["type"] == "Docker"
+    assert bc["strategy"]["dockerStrategy"]["dockerfilePath"] == "Containerfile"
+    assert (ROOT / bc["strategy"]["dockerStrategy"]["dockerfilePath"]).is_file()
+    assert bc["output"]["to"] == {"kind": "ImageStreamTag", "name": "verikopru:latest"}
 
 
 def test_pvc_and_service():
@@ -77,9 +110,11 @@ def test_pvc_and_service():
 
 
 def test_route_tls():
-    tls = _load("route.yaml")["spec"]["tls"]
-    assert tls["termination"] == "edge"
-    assert tls["insecureEdgeTerminationPolicy"] == "Redirect"
+    spec = _load("route.yaml")["spec"]
+    assert spec["tls"]["termination"] == "edge"
+    # Adres kümece verilir (verikopru-<namespace>.<apps alan adı>); yer tutucu host yok.
+    assert "host" not in spec
+    assert spec["tls"]["insecureEdgeTerminationPolicy"] == "Redirect"
 
 
 def test_secret_example_only_placeholders():
@@ -110,20 +145,23 @@ def test_configmap_keys_are_settings_fields():
 def test_kustomization_resources():
     res = _load("kustomization.yaml")["resources"]
     assert "secret.example.yaml" not in res
+    assert "build.yaml" not in res
     for r in res:
         assert (OS_DIR / r).is_file(), r
 
 
 def test_containerfile():
     text = _containerfile()
-    user = re.search(r"^USER\s+(\S+)\s*$", text, re.M)
-    assert user and user.group(1).isdigit() and int(user.group(1)) != 0
+    users = re.findall(r"^USER\s+(\S+)\s*$", text, re.M)
+    # Derleme aşamaları root olabilir; çalışma imajının son USER'ı root olmamalı.
+    assert users and users[-1].isdigit() and int(users[-1]) != 0
     cmd = re.search(r"^CMD\s+(.+)$", text, re.M)
     assert cmd
     flat = re.sub(r'[\[\]",]', " ", cmd.group(1))
     flat = re.sub(r"\s+", " ", flat)
     assert "--factory" in flat and "--proxy-headers" in flat and "--workers 1" in flat
     assert "ARG NODE_IMAGE" in text and "ARG PYTHON_IMAGE" in text
+    assert "ARG NPM_MIRROR=" in text and "ARG PIP_MIRROR=" in text
     assert "--frozen-lockfile" in text
     assert "TT_ENV=openshift" in text
 
@@ -137,7 +175,7 @@ def test_containerignore_excludes_secrets():
     assert any(ln.startswith(".env") for ln in lines)
 
 
-@pytest.mark.parametrize("name", ["configmap.yaml", "deployment.yaml", "secret.example.yaml"])
+@pytest.mark.parametrize("name", ["configmap.yaml", "deployment.yaml", "secret.example.yaml", "build.yaml"])
 def test_no_obvious_real_secrets(name):
     text = (OS_DIR / name).read_text(encoding="utf-8")
     assert "BEGIN " not in text and "password" not in text.lower().replace("passwords", "")

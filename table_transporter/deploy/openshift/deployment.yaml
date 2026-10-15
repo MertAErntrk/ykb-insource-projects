@@ -4,6 +4,9 @@ metadata:
   name: verikopru
   labels:
     app: verikopru
+  annotations:
+    # Yeni build bitince (verikopru:latest değişince) imaj alanı güncellenir ve pod yeniden başlar.
+    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"verikopru:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]'
 spec:
   # TEK pod: süreç içi oturum + SQLite + süreç içi hedef kilidi. Ölçeklendirmeyin.
   replicas: 1
@@ -24,7 +27,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: CHANGE_ME_REGISTRY/verikopru:latest
+          # build.yaml'daki ImageStream'den çözülür (lookupPolicy.local); registry/namespace yazılmaz.
+          image: verikopru:latest
           ports:
             - containerPort: 8080
               name: http
@@ -94,6 +98,9 @@ spec:
           secret:
             secretName: verikopru-secrets
             defaultMode: 0440
+            # service_accounts.toml isteğe bağlı: yoksa pod açılır, 7 gün kontrolü "doğrulanamadı" kalır.
+            # Secret'ın kendisi yine zorunlu (TT_SESSION_SECRET / TT_ANON_HMAC_KEY yukarıda).
+            optional: true
             items:
               - key: service_accounts.toml
                 path: service_accounts.toml
