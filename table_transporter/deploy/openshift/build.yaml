@@ -44,13 +44,15 @@ spec:
     to:
       kind: ImageStreamTag
       name: verikopru:latest
-  # Ön yüz derlemesi için bellek; namespace kotası yetmezse düşürün.
+  # Ön yüz derlemesi için bellek ve disk (kota limits.ephemeral-storage istiyor); yetmezse düşürün.
   resources:
     requests:
       cpu: 250m
       memory: 1Gi
+      ephemeral-storage: 2Gi
     limits:
       cpu: "1"
       memory: 2Gi
+      ephemeral-storage: 10Gi
   successfulBuildsHistoryLimit: 3
   failedBuildsHistoryLimit: 3
