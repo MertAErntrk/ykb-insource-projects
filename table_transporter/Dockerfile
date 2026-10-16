@@ -1,9 +1,9 @@
-# VeriKöprü - ön yüzü önceden derlenmiş imaj: kümede Node/npm gerekmez, yalnız Python taban imajı.
-# prebuilt/frontend-dist = frontend'de "pnpm build" çıktısı. Ön yüz değişince yenileyin:
+# VeriKöprü - YKB OpenShift imajı: kurum Python 3.11 + Oracle Client taban imajı, ön yüz önceden derlenmiş
+# (prebuilt/frontend-dist), kümede Node/npm gerekmez. Taban imaj registrypullsecret ile çekilir (build.yaml).
+# Ön yüz değişince prebuilt'i yenileyin:
 #   cd frontend; pnpm build; cd ..; Remove-Item -Recurse prebuilt\frontend-dist; Copy-Item -Recurse frontend\dist prebuilt\frontend-dist
-# Taban imaj Python >= 3.11 olmalı; OpenShift'te build.yaml buildArgs (PYTHON_IMAGE) ile verilir.
-ARG PYTHON_IMAGE=python:3.12-slim
-FROM ${PYTHON_IMAGE}
+# Node aşamalı genel imaj: Containerfile.
+FROM sdlc.yapikredi.com.tr/internal-docker-ops/ykb/base-images/python:3.11-oracle-client.29
 USER 0
 # İsteğe bağlı iç PyPI aynası (simple index adresi); boşsa taban imajın pip ayarı ya da pypi.org.
 ARG PIP_MIRROR=
@@ -12,6 +12,9 @@ ENV PYTHONUNBUFFERED=1 \
     TT_ENV=openshift \
     TT_FRONTEND_DIST=/app/frontend/dist \
     TT_SQLITE_PATH=/data/verikopru.db
+
+# Uygulama Python >= 3.11 ister; taban imajdaki python3 daha eskiyse burada açık hatayla durur.
+RUN python3 -c "import sys; assert sys.version_info >= (3, 11), 'Python >= 3.11 gerekli: ' + sys.version"
 
 COPY backend/requirements.txt backend/requirements.lock* /tmp/req/
 RUN if [ -n "$PIP_MIRROR" ]; then export PIP_INDEX_URL="$PIP_MIRROR"; fi; \

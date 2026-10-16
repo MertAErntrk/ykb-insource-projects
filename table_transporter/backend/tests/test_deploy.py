@@ -95,9 +95,14 @@ def test_build_config():
     bc = docs["BuildConfig"]["spec"]
     assert bc["source"]["type"] == "Binary"
     assert bc["strategy"]["type"] == "Docker"
-    assert bc["strategy"]["dockerStrategy"]["dockerfilePath"] == "Containerfile"
-    assert (ROOT / bc["strategy"]["dockerStrategy"]["dockerfilePath"]).is_file()
-    assert bc["output"]["to"] == {"kind": "ImageStreamTag", "name": "verikopru:latest"}
+    ds = bc["strategy"]["dockerStrategy"]
+    assert ds["dockerfilePath"] == "Dockerfile"
+    assert (ROOT / ds["dockerfilePath"]).is_file()
+    assert ds["pullSecret"]["name"] == "registrypullsecret"
+    # Push yolu belli olana kadar output yok; taban imaj adresi asla çıktı olamaz.
+    base = re.search(r"^FROM\s+(\S+)", (ROOT / "Dockerfile").read_text(encoding="utf-8"), re.M).group(1)
+    out = (bc.get("output") or {}).get("to") or {}
+    assert out.get("name") != base and "base-images" not in out.get("name", "")
 
 
 def test_pvc_and_service():
@@ -181,14 +186,16 @@ def test_no_obvious_real_secrets(name):
     assert "BEGIN " not in text and "password" not in text.lower().replace("passwords", "")
 
 
-def test_containerfile_prebuilt():
-    """Node'suz imaj: ön yüz önceden derlenmiş (prebuilt/frontend-dist) ve kopyalanır."""
-    text = (ROOT / "Containerfile.prebuilt").read_text(encoding="utf-8")
+def test_dockerfile_ykb():
+    """Kurum taban imajlı Dockerfile: Node'suz, ön yüz önceden derlenmiş (prebuilt/frontend-dist)."""
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    froms = re.findall(r"^FROM\s+(\S+)", text, re.M)
+    assert len(froms) == 1 and "python:3.11" in froms[0]
     users = re.findall(r"^USER\s+(\S+)\s*$", text, re.M)
     assert users and users[-1].isdigit() and int(users[-1]) != 0
     assert "COPY prebuilt/frontend-dist /app/frontend/dist" in text
     assert "--workers\", \"1\"" in text and "--proxy-headers" in text and "--factory" in text
-    assert "ARG PYTHON_IMAGE" in text and "ARG PIP_MIRROR=" in text
+    assert "sys.version_info >= (3, 11)" in text and "ARG PIP_MIRROR=" in text
     assert (ROOT / "prebuilt" / "frontend-dist" / "index.html").is_file()
     ignored = (ROOT / ".containerignore").read_text(encoding="utf-8").splitlines()
     assert "prebuilt" not in {ln.strip().rstrip("/") for ln in ignored}

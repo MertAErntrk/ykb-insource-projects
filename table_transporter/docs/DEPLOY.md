@@ -61,7 +61,7 @@ oc apply -f deploy\openshift\build.yaml
 git archive --format=tar.gz -o "$env:TEMP\verikopru.tar.gz" HEAD
 oc start-build verikopru --from-archive="$env:TEMP\verikopru.tar.gz" --follow
 ```
-`git archive` yalnız commit'li dosyaları paketler (bu klasörden çalıştırılınca yalnız bu klasörü, kökte olacak biçimde paketler; `HEAD:table_transporter` yazmayın, alt klasörde boş arşiv üretir); yereldeki `tnsnames.ora`, `.env` ve `service_accounts.toml` kümeye gitmez. Küme Docker Hub, npm ya da PyPI'ye çıkamıyorsa build `FROM`, `pnpm install` ya da `pip install` adımında düşer: `build.yaml`'daki `buildArgs` bloğunu iç registry ve ayna adresleriyle açıp `oc apply -f deploy\openshift\build.yaml` ve `oc start-build` komutlarını yineleyin. Bu değerler BuildConfig'te düz metin durur: ayna adresine kullanıcı:şifre gömmeyin.
+`Dockerfile` bankanın Python 3.11 + Oracle Client taban imajını (`registrypullsecret` ile) kullanır; ön yüz `prebuilt/frontend-dist`'ten gelir, kümede Node/npm gerekmez. `git archive` yalnız commit'li dosyaları, bu klasörden çalıştırılınca kökte olacak biçimde paketler (`HEAD:table_transporter` yazmayın: alt klasörde boş arşiv üretir); yereldeki `tnsnames.ora`, `.env` ve `service_accounts.toml` kümeye gitmez. `pip install` adımı düşerse `Dockerfile`'daki `PIP_MIRROR` için iç PyPI aynası gerekir (adrese kullanıcı:şifre gömmeyin). `build.yaml`'da push yolu (output) yazılana kadar build imajı üretir ama göndermez: deneme build'idir.
 
 **3) Uygula ve aç**
 ```powershell
@@ -72,27 +72,12 @@ oc logs deployment/verikopru --tail=50
 ```
 Route adresi kümece verilir (`verikopru-<namespace>.<apps alan adı>`). Giriş zaman aşımına düşüyorsa pod'un LDAPS (636) ya da Oracle portlarına çıkışı kapalıdır (NetworkPolicy/egress); platform ekibine açtırın.
 
-**İç registry kapalıysa** (`oc get is verikopru -o jsonpath="{.status.dockerImageRepository}"` boş, build `InvalidOutputReference` verir): imaj kurum registry'sine gönderilir, ImageStream o imajı izler. Node/npm gerekmesin diye `Containerfile.prebuilt` (ön yüz `prebuilt/frontend-dist`'ten) kullanılır. `<REGISTRY>`, `<PUSH_YOLU>`, `<PYTHON_TABAN_IMAJ>` (Python ≥ 3.11) ve `<PULL_SECRET>` kurumunuza göre; adresler depoya yazılmaz:
+**İmajı sdlc'ye göndermek** (bu kümede iç registry kapalı: `oc get is verikopru -o jsonpath="{.status.dockerImageRepository}"` boş): `build.yaml`'daki `output` bloğu uygulamanın kendi push yoluyla açılır, `oc apply -f deploy\openshift\build.yaml` ve build yinelenir; ardından bir kez:
 ```powershell
-$patch = @"
-spec:
-  strategy:
-    dockerStrategy:
-      dockerfilePath: Containerfile.prebuilt
-      pullSecret: {name: <PULL_SECRET>}
-      buildArgs:
-        - {name: PYTHON_IMAGE, value: "<PYTHON_TABAN_IMAJ>"}
-  output:
-    to: {kind: DockerImage, name: "<REGISTRY>/<PUSH_YOLU>/verikopru:latest"}
-    pushSecret: {name: <PULL_SECRET>}
-"@
-[IO.File]::WriteAllText("$env:TEMP\bc-patch.yaml", $patch)
-oc patch bc/verikopru --type=merge --patch-file="$env:TEMP\bc-patch.yaml"
-oc secrets link default <PULL_SECRET> --for=pull
-# build (2. adım) bittikten sonra, bir kez:
-oc tag "<REGISTRY>/<PUSH_YOLU>/verikopru:latest" verikopru:latest --scheduled
+oc secrets link default registrypullsecret --for=pull
+oc tag "sdlc.yapikredi.com.tr/<PUSH_YOLU>/verikopru:latest" verikopru:latest --scheduled
 ```
-`<PUSH_YOLU>` uygulamanın kendi imaj yeridir; taban imajın adresi ASLA yazılmaz (build başarılı olursa ortak taban imajın üzerine yazar). Bu düzende güncelleme: build, ardından `oc import-image verikopru:latest` (ImageStream yeni imajı görür, pod yenilenir). `oc apply -f deploy\openshift\build.yaml` yeniden çalıştırılırsa patch da yinelenir.
+`<PUSH_YOLU>` uygulamanın kendi imaj yeridir; taban imajın adresi ASLA yazılmaz (build başarılı olursa ortak taban imajın üzerine yazar). Bu düzende güncelleme: build, ardından `oc import-image verikopru:latest` (ImageStream yeni imajı görür, pod yenilenir).
 
 **Güncelleme:** `git pull`, ardından 2. adımdaki `git archive` ve `oc start-build` komutları; build bitince pod kendiliğinden yenilenir (`image.openshift.io/triggers`). Manifest ya da `configmap.yaml` değiştiyse `oc apply -k deploy\openshift`. Her ikisi de pod'u yeniden başlatır (`apply -k` imaj alanını geri yazdığı için iki kez olabilir) ve çalışan taşıma `failed`/`partial` olur: çalışan iş yokken yapın.
 
