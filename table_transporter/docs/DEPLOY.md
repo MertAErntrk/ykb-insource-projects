@@ -72,10 +72,10 @@ oc logs deployment/verikopru --tail=50
 ```
 Route adresi kümece verilir (`verikopru-<namespace>.<apps alan adı>`). Giriş zaman aşımına düşüyorsa pod'un LDAPS (636) ya da Oracle portlarına çıkışı kapalıdır (NetworkPolicy/egress); platform ekibine açtırın.
 
-**İmajı sdlc'ye göndermek** (bu kümede iç registry kapalı: `oc get is verikopru -o jsonpath="{.status.dockerImageRepository}"` boş): `build.yaml`'daki `output` bloğu uygulamanın kendi push yoluyla açılır, `oc apply -f deploy\openshift\build.yaml` ve build yinelenir; ardından bir kez:
+**İmajı sdlc'ye göndermek** (bu kümede iç registry kapalı: `oc get is verikopru -o jsonpath="{.status.dockerImageRepository}"` boş): `build.yaml`'daki `output` uygulamanın kendi push yoludur (`internal-docker-app/com/ykb/datawarehouse/riskdwh/verikopru`); build bitince bir kez:
 ```powershell
 oc secrets link default registrypullsecret --for=pull
-oc tag "sdlc.yapikredi.com.tr/<PUSH_YOLU>/verikopru:latest" verikopru:latest --scheduled
+oc tag "sdlc.yapikredi.com.tr/internal-docker-app/com/ykb/datawarehouse/riskdwh/verikopru:latest" verikopru:latest --scheduled
 ```
 `<PUSH_YOLU>` uygulamanın kendi imaj yeridir; taban imajın adresi ASLA yazılmaz (build başarılı olursa ortak taban imajın üzerine yazar). Bu düzende güncelleme: build, ardından `oc import-image verikopru:latest` (ImageStream yeni imajı görür, pod yenilenir).
 

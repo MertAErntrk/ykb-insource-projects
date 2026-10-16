@@ -33,14 +33,14 @@ spec:
       dockerfilePath: Dockerfile
       pullSecret:
         name: registrypullsecret
-  # output bilerek yok: push yolu belli olana kadar build imajı üretir ama hiçbir yere göndermez.
-  # Push yolu ASLA taban imajın adresi olmaz (ortak taban imajın üzerine yazar). Yol belli olunca:
-  # output:
-  #   to:
-  #     kind: DockerImage
-  #     name: sdlc.yapikredi.com.tr/<PUSH_YOLU>/verikopru:latest
-  #   pushSecret:
-  #     name: registrypullsecret
+  # Uygulama imajının kendi yeri (kurum düzeni: internal-docker-app/com/ykb/<birim>/<proje>/<uygulama>).
+  # Push yolu ASLA taban imajın adresi olmaz (ortak taban imajın üzerine yazar).
+  output:
+    to:
+      kind: DockerImage
+      name: sdlc.yapikredi.com.tr/internal-docker-app/com/ykb/datawarehouse/riskdwh/verikopru:latest
+    pushSecret:
+      name: registrypullsecret
   # Bellek ve disk (kota limits.ephemeral-storage istiyor); yetmezse düşürün.
   resources:
     requests:
