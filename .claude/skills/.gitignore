@@ -1,0 +1,4 @@
+# Kök .gitignore build/ ve dist/ klasörlerini yok sayar; bazı skill'ler
+# derlenmiş dosyalarını bu klasörlerde taşır, burada geri alınır.
+!build/
+!dist/
