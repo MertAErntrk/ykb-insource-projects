@@ -150,9 +150,14 @@ def _dolgu(cell) -> str:
     return dolgu.patternType
 
 
-def dokum_hucreler(yol: str, limit: int = 3000) -> str:
+SABIT = re.compile(r"(?<![A-Za-z$])\d+(?:[.,]\d+)?")   # formüldeki sabitler (B12 gibi hücre adresleri kalır)
+
+
+def dokum_hucreler(yol: str, limit: int = 3000, degersiz: bool = False) -> str:
     """Her dolu hücre: koordinat, değer, dolgu rengi, formül, sayı biçimi; sayfa başına birleşik alanlar.
-    Sayısal hücreler tutar/eşik sayıldığı için maskelenmez; metin hücrelerindeki 6+ haneli sayılar maskelenir."""
+    Sayısal hücreler tutar/eşik sayıldığı için maskelenmez; metin hücrelerindeki 6+ haneli sayılar maskelenir.
+    degersiz=True: sayı ve tarih hücreleri yalnız tipiyle ('sayı', 'tarih'), formüldeki sabitler '#' ile yazılır;
+    düzen (hangi hücre sarı/yeşil, başlıklar, birleşik alanlar) görünür, eşik tutarları dışarı çıkmaz."""
     from openpyxl import load_workbook
     wb = load_workbook(yol, data_only=True)
     wb_f = load_workbook(yol, data_only=False)
@@ -178,9 +183,13 @@ def dokum_hucreler(yol: str, limit: int = 3000) -> str:
                 if deger is None:
                     deger_m = "(hesaplanmamış)" if formul else ""
                 elif isinstance(deger, (int, float)) and not isinstance(deger, bool):
-                    deger_m = deger
+                    deger_m = "sayı" if degersiz else deger
+                elif isinstance(deger, (dt.datetime, dt.date)) and degersiz:
+                    deger_m = "tarih"
                 else:
                     deger_m = _deger_metni(deger)
+                if formul and degersiz:
+                    formul = SABIT.sub("#", formul)
                 parcalar = ["{} | {}".format(cell.coordinate, deger_m)]
                 dolgu = _dolgu(cell)
                 if dolgu:
@@ -206,6 +215,8 @@ def main(argv=None) -> int:
     p.add_argument("--hucreler", action="store_true",
                    help="her dolu hücreyi değer, dolgu rengi ve formülüyle yaz (müşteri verisi olmayan dosya için)")
     p.add_argument("--limit", type=int, default=3000, help="--hucreler: sayfa başına en çok hücre")
+    p.add_argument("--degersiz", action="store_true",
+                   help="--hucreler: sayı/tarih değerlerini ve formül sabitlerini gizle, yalnız düzen ve renkleri yaz")
     p.add_argument("--ornek", type=int, default=0, help="serbest metin sütunundan maskeli örnek sayısı (KVKK onayı varsa)")
     p.add_argument("--baslik-satir", type=int, help="başlık satırı numarası (1 tabanlı); verilmezse tahmin edilir")
     p.add_argument("--cikti", help="çıktı dosyası (varsayılan <dosya>.dokum.txt)")
@@ -218,7 +229,7 @@ def main(argv=None) -> int:
     if not os.path.isfile(a.dosya):
         print("dosya bulunamadı: " + a.dosya, file=sys.stderr)
         return 2
-    metin = dokum_hucreler(a.dosya, a.limit) if a.hucreler else dokum_yapi(a.dosya, a.ornek, a.baslik_satir)
+    metin = dokum_hucreler(a.dosya, a.limit, a.degersiz) if a.hucreler else dokum_yapi(a.dosya, a.ornek, a.baslik_satir)
     cikti = a.cikti or (a.dosya + ".dokum.txt")
     with open(cikti, "w", encoding="utf-8") as f:
         f.write(metin)

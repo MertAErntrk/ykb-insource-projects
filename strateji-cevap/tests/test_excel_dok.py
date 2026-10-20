@@ -63,6 +63,14 @@ def test_hucreler_renk_formul_birlesik(dosya):
     assert "A2 | Müşteri ###### notu" in out                 # metindeki numara maskelenir
 
 
+def test_hucreler_degersiz_tutar_gizler(dosya):
+    out = excel_dok.dokum_hucreler(dosya, degersiz=True)
+    assert "B1 | sayı | dolgu=FFFFFF00" in out and "C1 | sayı | dolgu=FF00FF00" in out
+    assert "5000000" not in out
+    assert "formül==B1*#" in out                              # sabit gizli, hücre adresi kalır
+    assert "A1 | Nominal Limit | kalın" in out                # başlık görünür
+
+
 def test_hucreler_limit_notu(dosya):
     out = excel_dok.dokum_hucreler(dosya, limit=2)
     assert "dolu hücre daha yazılmadı (--limit 2)" in out

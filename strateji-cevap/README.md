@@ -62,6 +62,8 @@ python analiz_smile.py veri/smile2025.xlsx --rapor veri/smile_analiz.md --csv ve
 python excel_dok.py veri/smile2025.xlsx
 # müşteri verisi OLMAYAN dosyada her hücre: değer, dolgu rengi (sarı/yeşil), formül, birleşik alanlar
 python excel_dok.py "veri/Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx" --hucreler
+# aynı döküm ama eşik tutarları gizli: sayı/tarih yalnız tipiyle, formül sabitleri '#'; düzen ve renkler görünür
+python excel_dok.py "veri/Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx" --hucreler --degersiz
 ```
 
 Çıktı: sınıf, kurallar, müşteri numarası, durum (`otomatik` / `inceleme_gerekli`), inceleme notları ve
