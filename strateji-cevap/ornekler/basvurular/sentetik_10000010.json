@@ -1,0 +1,34 @@
+{
+  "_not": "SENTETİK başvuru: SEGMENT alanı yok.",
+  "BasvuruNo": "SENTETIK-0010",
+  "CIF": "10000010",
+  "BasvuruTarihi": "2026-03-17",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000010"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 2,
+    "AUTHLEVELFORMATRIX": 2,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 405000.0,
+      "WEIGHTEDLIMWCASHCOLL": 900000.0,
+      "NOMINALLIMIT": 3000000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      }
+    ]
+  }
+}

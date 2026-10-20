@@ -1,0 +1,40 @@
+{
+  "_not": "SENTETİK başvuru: yetki seviyesini H kuralı belirlemiş.",
+  "BasvuruNo": "SENTETIK-0005",
+  "CIF": "10000005",
+  "BasvuruTarihi": "2026-03-12",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000005"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 5,
+    "AUTHLEVELFORMATRIX": 1,
+    "AUTHLEVELFORHRULES": 5,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 180000.0,
+      "WEIGHTEDLIMWCASHCOLL": 400000.0,
+      "NOMINALLIMIT": 900000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      },
+      {
+        "Code": "H150",
+        "Hit": 1,
+        "AuthLevel": 5
+      }
+    ],
+    "SEGMENT": "TICARI"
+  }
+}

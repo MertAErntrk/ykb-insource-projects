@@ -83,6 +83,19 @@ def test_kural_listesi_yoksa_uyari(motor, tmp_path):
     assert t.durum == "otomatik" and any("doğrulanamadı" in u for u in t.uyarilar)
 
 
+def test_kaynak_hatasi_nota_duser(motor):
+    class Bozuk:
+        etiket = "db"
+
+        def bul(self, cif, tarih=None, kanal="hizli_tahsis"):
+            raise RuntimeError("bağlantı yok")
+
+    m = Motor(motor.katalog, motor.matris, Bozuk(), motor.ayar)
+    t = m.cevapla(cagri("h221"))
+    assert t.durum == "inceleme_gerekli" and t.metin == ""
+    assert any("başvuru kaynağı hatası (RuntimeError)" in n for n in t.notlar)
+
+
 def test_cli(capsys):
     from motor import main
     assert main(["--cagri", os.path.join(KOK, "ornekler", "cagrilar", "h221.json"),

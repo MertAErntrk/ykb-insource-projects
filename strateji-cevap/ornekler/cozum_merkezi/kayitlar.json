@@ -1,0 +1,242 @@
+[
+  {
+    "Kayıt Numarası": "I1000001",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-06 09:12",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Kredi Tahsis",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000001 numaralı müşterimizde H221 kuralı çalışıyor ve bağımsız denetim raporu isteniyor, neden talep ediliyor?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "otomatik"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000002",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-06 10:41",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Kredi Tahsis",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000003 numaralı müşteride H221 neden çalıştı, bağımsız denetim raporu neden isteniyor?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000003",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-07 11:05",
+    "Durum": "Açık",
+    "Kanal": "Web",
+    "Öncelik": 5,
+    "Kategori": "Kredi Tahsis",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000002 numaralı müşteride H221 neden çalıştı, bağımsız denetim raporu neden isteniyor?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000004",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-07 14:20",
+    "Durum": "Kapalı",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Kurumsal Satış",
+    "Kayıt Açıklaması": "10000004 numaralı müşterinin onay yetki seviyesi neden 3 çıktı?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000005",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-08 08:55",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Kurumsal Satış",
+    "Kayıt Açıklaması": "10000005 numaralı müşterinin onay yetki seviyesi limitlere göre düşük olmalıydı, neden 5 çıktı?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000006",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-08 13:30",
+    "Durum": "Açık",
+    "Kanal": "Harmoni",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Ticari Satış",
+    "Kayıt Açıklaması": "10000006 numaralı müşteride ağırlıklı limit yüksek ama yetki seviyesi neden 2, limit yetki seviyesini neden belirlemiyor?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000007",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-09 09:40",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000007 numaralı müşteri için neden Otomatik Onay çıktı, yetki seviyesi neden 0?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000008",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-09 15:10",
+    "Durum": "Kapalı",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Kurumsal Satış",
+    "Kayıt Açıklaması": "10000008 numaralı müşterinin yetki seviyesi neden 1 çıktı, limit karar sonucu nasıl belirlendi?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000009",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-10 10:25",
+    "Durum": "Açık",
+    "Kanal": "Web",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Bireysel Satış",
+    "Kayıt Açıklaması": "10000009 numaralı müşterinin onay yetki seviyesi neden 2 çıktı, ağırlıklı limit seviyeyi neden yükseltmedi?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000010",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-10 16:00",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Yetki",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000010 numaralı müşterinin onay yetki seviyesi neden 2 geldi?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000011",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-13 09:05",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Kredi Tahsis",
+    "Kaydın İlk Grubu": "Kurumsal Satış",
+    "Kayıt Açıklaması": "10000011 numaralı müşteride hem H221 çalıştı hem de onay yetki seviyesi 4 geldi, ikisinin de gerekçesi nedir?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000012",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-13 11:50",
+    "Durum": "Kapalı",
+    "Kanal": "Harmoni",
+    "Öncelik": 5,
+    "Kategori": "Teknik",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000004 numaralı müşteri için strateji çalıştırınca ekran hata veriyor, sonuç gelmedi.",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "hata",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000013",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-14 09:30",
+    "Durum": "Açık",
+    "Kanal": "Web",
+    "Öncelik": 5,
+    "Kategori": "Veri",
+    "Kaydın İlk Grubu": "Ticari Satış",
+    "Kayıt Açıklaması": "10000012 numaralı müşterinin bilanço verisi stratejiye yanlış geliyor, kaynağı nedir?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "girdi",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000014",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-14 13:45",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Kredi Tahsis",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "Bir müşterimizde H221 kuralı çalışıyor, bağımsız denetim raporu neden isteniyor?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  },
+  {
+    "Kayıt Numarası": "I1000015",
+    "Kaydın Havuza Giriş Tarihi": "2026-04-15 10:15",
+    "Durum": "Açık",
+    "Kanal": "IVR",
+    "Öncelik": 5,
+    "Kategori": "Kredi Tahsis",
+    "Kaydın İlk Grubu": "Şube Operasyon",
+    "Kayıt Açıklaması": "10000099 numaralı müşteride H221 neden çalıştı, rapor neden isteniyor?",
+    "Kapama Açıklaması": "",
+    "Transfer Nedeni": "",
+    "_beklenen": {
+      "sinif": "cikti",
+      "durum": "inceleme_gerekli"
+    }
+  }
+]

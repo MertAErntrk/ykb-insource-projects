@@ -1,82 +1,79 @@
 # Strateji Cevap Motoru
 
-Kurumsal ve ticari kredi karar motorunun ("strateji") çıktıları hakkında Smile üzerinden gelen çağrılara
-("H221 neden çalıştı?", "onay yetki seviyesi neden 8?") otomatik **cevap taslağı** üreten motor. Olgular
-(tarih, tutar, seviye, kural kodu) başvurunun strateji JSON'undan ve strateji ekibinin onayladığı
+Smile'dan Çözüm Merkezi'ne gelen strateji sorularına ("H221 neden çalıştı?", "onay yetki seviyesi neden 8?")
+cevap taslağı hazırlar. Sayı, tarih ve kural kodu başvurunun strateji JSON'undan ve ekibin onayladığı
 şablonlardan gelir; LLM yalnızca soruyu anlamak ve birden çok kuralı tek metne toplamak için kullanılır.
-Taslak gönderilmez, insan onayına gider. Mimari ve akış: [`docs/MIMARI.md`](docs/MIMARI.md). Plan ve açık
-sorular: [`docs/UYGULAMA_PLANI.md`](docs/UYGULAMA_PLANI.md).
+Taslak kendiliğinden gitmez: ekran listesinden ekipten biri onaylar ya da düzeltir.
 
-Durum: prototip iskeleti, sentetik veriyle çalışıyor. smile2025 dökümü, yetki seviyeleri Excel'i ve gerçek
-başvuru JSON'u gelince katalog yolları ve matris güncellenecek (planda bölüm 12).
-
-## Akış
-
-```
-çağrı ─► siniflandirici.py ─► veri.py ─► cozumleyici.py ─► yazici.py ─► taslak + durum ─► insan onayı
-          sınıf, kural kodu,   başvuru      katalog kuralı     tek selamlama/kapanış,
-          CIF (regex; LLM      JSON'u       → olgular          guardrail (LLM metni taslağa
-          isteğe bağlı)        (dosya)      (+ matris.py)      sadık mı), isteğe bağlı LLM
-```
-
-| Dosya | Görev |
-|---|---|
-| `motor.py` | Boru hattı ve komut satırı |
-| `siniflandirici.py` | Sınıf (girdi / cikti / hata), kural kodları, müşteri numaraları |
-| `katalog.py`, `katalog/kurallar.json` | Kural kataloğu: veri yolu, koşul, şablonlar, onay durumu, geçerlilik tarihi |
-| `cozumleyici.py` | Kuralı başvuru JSON'una uygular, olguları çıkarır (`liste_kosul`, `yetki_matrisi`, `sabit`) |
-| `matris.py`, `katalog/yetki_matrisi.json` | Limit → onay yetki seviyesi; nihai = max(matris, H kuralları). Matris SENTETİK |
-| `yazici.py` | Taslak kurma, guardrail doğrulaması, isteğe bağlı LLM yeniden yazımı |
-| `llm.py` | Kurum içi OpenAI uyumlu LLM istemcisi (Qwen, vLLM); BriefMind'dan sadeleştirildi |
-| `veri.py` | Başvuru JSON'u kaynağı (klasör); hedefte DB/API uyarlayıcısı |
-| `analiz_smile.py` | Smile dökümü analizi: aylık hacim, sınıflar, kural sıklığı, kapsama |
-| `excel_dok.py` | Excel yapı/hücre dökümü (maskeli, dışarı verilebilir); iş bilgisayarından çıkmayan dosyaların yapısını paylaşmak için |
-| `ornekler/` | Sentetik başvuru JSON'ları ve çağrılar |
-| `tests/` | 67 test, LLM ya da ağ gerektirmez |
+Akış ve ayrıntı: `docs/MIMARI.md`, plan ve açık sorular: `docs/UYGULAMA_PLANI.md`.
 
 ## Kurulum
 
-Motor yalnızca standart kütüphane kullanır. LLM için `openai httpx`, analiz için `pandas openpyxl`:
-
 ```bash
-pip install -r requirements.txt
-copy config.example.json config.json      # LLM adresi, bankamızın KKB kodu, başvuru klasörü
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+copy config.example.json config.json
 ```
 
-Python 3.9 uyumlu (iş bilgisayarı). `config.json` repoya girmez.
+İş PC'sinde Python 3.9 yeter. Motor ve ekran yalnızca standart kütüphane kullanır; `openai`/`httpx` yalnız
+`--llm` için, `pandas`/`openpyxl` Excel ve Smile analizi için, `oracledb` yalnız `kaynak: "db"` için.
 
-## Kullanım
-
-```bash
-# tek çağrı, sentetik örnekle (config.example.json: kendi_banka_kodu dolu)
-python motor.py --cagri ornekler/cagrilar/h221.json --config config.example.json
-python motor.py --cagri ornekler/cagrilar/iki_kural.json --config config.example.json --json
-
-# LLM ile (config.json'daki route/model): sınıflandırma ve çok kurallı yeniden yazım
-python motor.py --cagri ornekler/cagrilar/iki_kural.json --llm
-
-# Smile dökümü analizi (dosya veri/ altında, repoya girmez)
-python analiz_smile.py veri/smile2025.xlsx --rapor veri/smile_analiz.md --csv veri/smile_siniflar.csv
-
-# Excel yapı dökümü: sayfa, başlık, tip, dağılım; 6+ haneli sayılar maskeli, serbest metin yazılmaz
-python excel_dok.py veri/smile2025.xlsx
-# müşteri verisi OLMAYAN dosyada her hücre: değer, dolgu rengi (sarı/yeşil), formül, birleşik alanlar
-python excel_dok.py "veri/Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx" --hucreler
-# aynı döküm ama eşik tutarları gizli: sayı/tarih yalnız tipiyle, formül sabitleri '#'; düzen ve renkler görünür
-python excel_dok.py "veri/Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx" --hucreler --degersiz
-```
-
-Çıktı: sınıf, kurallar, müşteri numarası, durum (`otomatik` / `inceleme_gerekli`), inceleme notları ve
-taslak metin. Onaysız (`taslak`) şablon, çalışmamış kural, veri tutarsızlığı ya da bilinmeyen kural her
-zaman `inceleme_gerekli` üretir.
-
-## Testler
+## Komutlar
 
 ```bash
+python motor.py --cagri ornekler/cagrilar/h221.json [--config config.json] [--llm] [--json]
+python ekran.py [--config config.json] [--port 8765]     # http://127.0.0.1:8765
+python matris_excel.py --excel veri/<yetki-excel>.xlsx --cikti veri/yetki_matrisi.json
+python matris_excel.py --excel veri/<yetki-excel>.xlsx --dogrula ANAHTAR=DEGER ...
+python excel_dok.py veri/<dosya>.xlsx [--hucreler] [--degersiz]   # yapı dökümü, maskeli
+python analiz_smile.py veri/smile2025.xlsx --rapor veri/smile_analiz.md
+python json_yapi.py veri/<kayit>.json [--cikti agac.txt]   # JSON anahtar ağacı, değersiz
 python -m pytest tests -q
 ```
 
-## Gerçek veri
+## config.json
 
-`veri/` klasörü ve tüm `.xlsx/.csv` dosyaları `.gitignore` ile dışarıda; müşteri verisi commit edilmez.
-Gerçek başvuru JSON'ları `veri/basvurular/` altına konup `--basvurular veri/basvurular` ile kullanılır.
+`config.example.json` kopyalanır. Göreli yollar config dosyasının klasörüne göredir.
+
+| Alan | Anlamı |
+|---|---|
+| `route`, `model`, `ca_bundle`, `zaman_asimi` | LLM adresi, model, TLS sertifikası, zaman aşımı (yalnız `--llm`) |
+| `kaynak` | `dosya` (örnek klasör) ya da `db` (Hızlı Tahsis / Smile+ veritabanı) |
+| `basvurular` | `kaynak: dosya` iken başvuru JSON klasörü |
+| `cif_yolu`, `tarih_yolu`, `h_kurallari_yolu` | Başvuru JSON'unda müşteri no, tarih, çalışan kural listesi yolları |
+| `kendi_banka_kodu` | KKB kayıtlarında bankamızın kodu (H221 farklı banka dalı) |
+| `db.hizli_tahsis`, `db.smile_plus` | `dsn`, `kullanici`, `parola`: kullanıcı doldurur |
+| `db.tablolar.identity`, `db.tablolar.evaluation` | Hızlı Tahsis kimlik ve değerlendirme tablo adları: kullanıcı doldurur |
+| `db.tablolar.io_log`, `pc_log`, `proposals`, `rule_lkp` | Hazır geliyor; farklıysa değiştirilir |
+| `db.sutunlar.cif`, `basvuru_no`, `tarih` | Sorgu sütunları: kullanıcı doldurur |
+| `db.sutunlar.indata`, `outdata`, `action_code` | JSON ve aksiyon sütunları |
+| `matris_dosya` | Boşsa sentetik `katalog/yetki_matrisi.json`; iş PC'sinde `veri/yetki_matrisi.json` |
+| `varsayilan_segment`, `unvan_seviye` | JSON'da segment yoksa kullanılacak segment; unvan - seviye eşlemesi |
+| `kayitlar_dosya`, `onaylar_dosya`, `ekran_port` | Çözüm Merkezi kayıtları, onay dosyası, ekran portu |
+
+DB'ye geçmek için: DSN, kullanıcı ve parolayı, `identity`/`evaluation` tablo adlarını ve `cif`,
+`basvuru_no`, `tarih` sütun adlarını doldur, `matris_dosya` ver, `"kaynak": "db"` yap.
+
+## Durum modeli
+
+| Durum | Anlamı |
+|---|---|
+| `otomatik` | Motor onaylı şablonla, tutarsızlık görmeden üretti |
+| `onaya_gitti` | Motor inceleme istedi (taslak şablon, veri tutarsızlığı, çalışmamış kural, hata/girdi sınıfı) |
+| `duzeltildi` | Ekip metni düzeltti, notla birlikte kaydedildi |
+| `gonderildi` | Ekip onayladı |
+| `kapsam_disi` | Ekip kapsam dışı işaretledi |
+
+Ekibin kararları `veri/onaylar.json` dosyasına yazılır; ekran yeniden açılınca durumlar korunur.
+
+## Gizlilik
+
+`veri/`, `*.xlsx`, `*.csv` ve `config.json` git dışıdır (`.gitignore`). Gerçek müşteri verisi, Smile dökümü,
+yetki Excel'i ve parolalar repoya girmez. `ornekler/` altındaki her şey sentetiktir.
+
+## Sınırlar
+
+- `katalog/yetki_matrisi.json` sentetik; gerçek Excel gelince `matris_excel.py` ile üretilecek.
+- `AUTHLEVELFORMATRIX` ile unvan eşlemesi ve başvuru JSON'undaki segment alanı doğrulanmadı.
+- Hızlı Tahsis ve Smile+ sütun adları, kayıt alan yapısı kullanıcıdan gelecek.
+- Girdi sınıfı sorularda yalnız kural açıklaması verilir; veri kaynağı açıklaması sonraki faz.

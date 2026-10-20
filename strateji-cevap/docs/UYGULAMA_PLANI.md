@@ -1,4 +1,9 @@
-# Strateji Cevap Motoru — Uygulama planı v1
+# Strateji Cevap Motoru — Uygulama planı v2
+
+v2 (2026-10-20) durum notu: v1 (2026-10-06) planı geçerli; bu sürümde değişenler bölüm 17-21'de. Prototip
+artık veritabanından okuyabilir, yetki matrisini Excel'den üretebilir, onay ekranı ve 15 sentetik Çözüm
+Merkezi kaydıyla uçtan uca testi var. Gerçek veri, gerçek Excel ve DB sütun adları hâlâ yok; her şey
+sentetik veri ve yapılandırmayla çalışıyor.
 
 Tarih: 2026-10-06. Kaynaklar: 2026-09-23 toplantı notu ("Strateji Çıktılarının AI ile Yorumlanması ve
 Soru-Cevap Mekanizması"), Boran'ın 2026-10 maili (smile2025, "Kurumsal ve Ticari Kredi Onay Yetki
@@ -249,3 +254,59 @@ kaynağı; komut satırı; Smile analiz scripti; 62 test; CI (Linux Python 3.11 
 Yok (sırayla gelecek): gerçek JSON yolları (V1–V4), Excel'den matris, MVP kural listesi ve şablon onayları,
 toplu değerlendirme scripti (taslak ile ekip cevabını yan yana), onay listesi arayüzü, Smile entegrasyonu,
 girdi sınıfı veri kaynağı açıklamaları.
+
+## 17. Veri erişimi (v2)
+
+`config.json` `kaynak: "db"` olunca başvuru JSON'u veritabanından gelir; `dosya` iken örnek klasör kullanılır.
+Tablo ve sütun adları config'den okunur, kodda sabit değildir.
+
+| Kaynak | Ne için | Config |
+|---|---|---|
+| Hızlı Tahsis `EVA_STRATEGY_IO_LOG` | Strateji girdi/çıktı JSON'u (`INDATA`, `OUTDATA`, `ACTION_CODE`) | `db.hizli_tahsis`, `db.tablolar.io_log`, `db.sutunlar.*` |
+| Hızlı Tahsis kimlik ve değerlendirme tabloları | CIF, başvuru no, tarih eşlemesi | `db.tablolar.identity`, `db.tablolar.evaluation` (boş, doldurulacak) |
+| Smile+ `uwr_app_pc_log` ve `UWR_PRO_PROPOSALS` | Smile+ başvuru kaydı ve teklif | `db.smile_plus`, `db.tablolar.pc_log`, `db.tablolar.proposals` |
+| `APP_POLICY_RULE_LKP` | Kural açıklamaları (katalog `aciklama` için kaynak) | `db.tablolar.rule_lkp` |
+
+Bağlantı bilgisi (dsn, kullanıcı, parola) yalnız `config.json`'da durur, repoya girmez.
+
+## 18. Yetki matrisi (v2)
+
+`matris_excel.py` Excel'den matrisi konumsal okur: segment bloğu, onay makamı sütunu, limit sütunları.
+Okunanlar: segment blokları, onay makamı satırları, alt koşul, tavan kuralı, Otomatik Onay satırı. Çıktı v2
+JSON'dur (`veri/yetki_matrisi.json`); eski tek tablolu biçim okunmaya devam eder. `--dogrula ANAHTAR=DEGER`
+ile Excel'in verdiği seviye motorun hesabıyla karşılaştırılır. Cevaba giren olgular: segment, segment
+kaynağı (json/varsayılan), tavan uygulandı mı, matris seviyesi, hesap ayrıntısı, para birimi.
+
+## 19. Ekran (v2)
+
+`ekran.py` (yalnız 127.0.0.1) ve `ekran.html`: kayıtlar açılışta motorla çözülür, liste önce onaya gidenleri
+gösterir. API: `GET /api/kayitlar`, `GET /api/kayit/<no>`, `POST /api/kayit/<no>/{onayla,duzelt,kapsam_disi}`.
+Kararlar `veri/onaylar.json` dosyasına atomik yazılır (durum, metin, not, zaman, motorun ilk durumu).
+Durumlar: otomatik, onaya gitti, düzeltildi, gönderildi, kapsam dışı. Düzeltmeler faz 2'nin değerlendirme
+verisidir.
+
+## 20. Sentetik kayıtlar ve uçtan uca test (v2)
+
+`ornekler/cozum_merkezi/kayitlar.json`: smile2025 sütun düzeninde 15 sentetik kayıt (H221 dalları, yetki
+seviyesi, tavan, Otomatik Onay, farklı segment, birden çok kural, hata ve girdi sınıfı, başvurusu olmayan
+numara). Her kaydın beklenen sınıf ve durumu kayıtta durur. `tests/test_uctan_uca.py` her kaydı motordan
+geçirir, sınıf ve durumu karşılaştırır; yetki olgularını (segment, tavan, hesap matrisi) ve ekran akışını
+(liste, onay, dosyadan geri yükleme) doğrular. LLM ve ağ gerekmez.
+
+## 21. Açık sorular ve sıradaki adımlar (v2)
+
+| Soru | Kim |
+|---|---|
+| `AUTHLEVELFORMATRIX` seviyesi ile unvan eşlemesi nasıl? | Boran |
+| Segment alanı başvuru JSON'unda nerede? Yoksa nereden gelir? | Boran / BT |
+| Otomatik Onay seviye 0 mı? | Boran |
+| Matriste para birimi hangisi? | Boran |
+| Hızlı Tahsis ve Smile+ kayıt alan yapısı: başvuru no, CIF ve tarih nasıl bağlanıyor? | BT |
+| `Eva_Identity`, `Eva_Evaluation` ve `pc_log` gerçek sütun adları | BT |
+
+Sıradaki adımlar:
+1. DB tablo ve sütun adları gelince `config.json` doldurulur, `kaynak: "db"` ile okuma denenir.
+2. Gerçek yetki Excel'i `matris_excel.py` ile okunur, `--dogrula` ile örnekler karşılaştırılır.
+3. Segment alanı ve unvan eşlemesi netleşince segment yolu ve `unvan_seviye` ayarlanır.
+4. Taslak şablonlar workshop'ta onaylanır; ekran pilotta ekiple denenir.
+5. Toplu değerlendirme scripti (taslak ile ekip cevabı yan yana).

@@ -1,5 +1,6 @@
-# Motor (motor.py ve altındakiler) yalnızca standart kütüphane kullanır.
+# Motor (motor.py ve altındakiler) ve ekran (ekran.py) yalnızca standart kütüphane kullanır.
 openai          # --llm: kurum içi OpenAI uyumlu LLM
 httpx
 pandas          # analiz_smile.py
-openpyxl        # analiz_smile.py (xlsx)
+openpyxl        # analiz_smile.py, excel_dok.py, matris_excel.py (xlsx)
+# oracledb      # isteğe bağlı: config.json "kaynak": "db" için (yoksa cx_Oracle denenir, o da yoksa dosya kaynağı)

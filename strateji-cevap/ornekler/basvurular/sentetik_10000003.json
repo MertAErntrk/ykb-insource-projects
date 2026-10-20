@@ -1,0 +1,42 @@
+{
+  "_not": "SENTETİK başvuru: H221 çalışmış, kayıt kendi bankadan (0067).",
+  "BasvuruNo": "SENTETIK-0003",
+  "CIF": "10000003",
+  "BasvuruTarihi": "2026-03-10",
+  "Indata": {
+    "CRBNotice": [
+      {
+        "CIF": "10000003",
+        "Status": 1,
+        "NoticeDate": "2025-10-02",
+        "BankCode": "0067"
+      }
+    ]
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000003"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 1,
+    "AUTHLEVELFORMATRIX": 1,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 135000.0,
+      "WEIGHTEDLIMWCASHCOLL": 300000.0,
+      "NOMINALLIMIT": 800000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 1,
+        "AuthLevel": null
+      }
+    ],
+    "SEGMENT": "TICARI"
+  }
+}

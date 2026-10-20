@@ -1,0 +1,40 @@
+{
+  "_not": "SENTETİK başvuru: yetki seviyesini matris belirlemiş.",
+  "BasvuruNo": "SENTETIK-0004",
+  "CIF": "10000004",
+  "BasvuruTarihi": "2026-03-11",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000004"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 3,
+    "AUTHLEVELFORMATRIX": 3,
+    "AUTHLEVELFORHRULES": 2,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 270000.0,
+      "WEIGHTEDLIMWCASHCOLL": 600000.0,
+      "NOMINALLIMIT": 4000000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      },
+      {
+        "Code": "H150",
+        "Hit": 1,
+        "AuthLevel": 2
+      }
+    ],
+    "SEGMENT": "TICARI"
+  }
+}

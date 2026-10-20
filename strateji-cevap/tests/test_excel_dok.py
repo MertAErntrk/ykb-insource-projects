@@ -82,3 +82,45 @@ def test_main_dosya_yazar(dosya, tmp_path, capsys):
     with open(cikti, encoding="utf-8") as f:
         assert "# Yapı dökümü: ornek.xlsx" in f.read()
     assert excel_dok.main([str(tmp_path / "yok.xlsx")]) == 2
+
+
+def test_maskele_karisik_belirtec():
+    m = excel_dok.maskele
+    assert m("kod U0T123456 ve AB12345 var") == "kod *** ve *** var"
+    assert m("2025-01-02 02.01.2025 09:15 H221 2025 123") == "2025-01-02 02.01.2025 09:15 H221 2025 123"
+
+
+@pytest.fixture
+def dosya2(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Personel Adı", "Adres", "Kategori", "Kod"])
+    for i in range(5):
+        ws.append(["Kisi{}".format(i), "Yer{}".format(i), "K{}".format(i % 2), "A"])
+    ws["F1"] = "Nominal < 3.000.000 USD"
+    ws["F2"] = "Şube Müdürü"
+    ws["F3"] = "Limit >= 500 ve 250 TL, toplam 1.250,50 ile 02.01.2025"
+    yol = tmp_path / "o2.xlsx"
+    wb.save(yol)
+    return str(yol)
+
+
+def test_kisi_sutunu_dagilim_yazmaz(dosya2):
+    out = excel_dok.dokum_yapi(dosya2)
+    assert "içerik yazılmadı (kişi/kimlik sütunu)" in out and "Kisi0" not in out
+    assert "dağılım: Yer0 (1)" in out and "dağılım: K0 (3); K1 (2)" in out   # adres, kategori eşleşmez
+
+
+def test_dagilim_bayragi(dosya2):
+    out = excel_dok.dokum_yapi(dosya2, dagilim=["kod", "PERSONEL ADI", "Personel Adı"])
+    assert "dağılım: A (5)" in out
+    assert "dagilim yok sayıldı (kişi sütunu)" in out and "Kisi0" not in out
+    assert excel_dok.main([dosya2, "--dagilim", "Kod", "--cikti", dosya2 + ".t"]) == 0
+
+
+def test_hucreler_degersiz_tutar_kalibi(dosya2):
+    out = excel_dok.dokum_hucreler(dosya2, degersiz=True)
+    assert "F1 | Nominal < # USD" in out and "F2 | Şube Müdürü" in out
+    assert "F3 | Limit >= # ve # TL, toplam # ile 02.01.2025" in out
+    assert "3.000.000" not in out
+    assert "3.000.000" in excel_dok.dokum_hucreler(dosya2)

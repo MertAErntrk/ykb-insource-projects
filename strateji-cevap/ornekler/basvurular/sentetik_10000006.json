@@ -1,0 +1,35 @@
+{
+  "_not": "SENTETİK başvuru: tavan kuralı: nominal küçük, ağırlıklı büyük.",
+  "BasvuruNo": "SENTETIK-0006",
+  "CIF": "10000006",
+  "BasvuruTarihi": "2026-03-13",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000006"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 2,
+    "AUTHLEVELFORMATRIX": 2,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 5400000.0,
+      "WEIGHTEDLIMWCASHCOLL": 12000000.0,
+      "NOMINALLIMIT": 2000000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      }
+    ],
+    "SEGMENT": "TICARI"
+  }
+}

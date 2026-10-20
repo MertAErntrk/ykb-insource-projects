@@ -1,0 +1,35 @@
+{
+  "_not": "SENTETİK başvuru: KURUMSAL segment.",
+  "BasvuruNo": "SENTETIK-0008",
+  "CIF": "10000008",
+  "BasvuruTarihi": "2026-03-15",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000008"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 1,
+    "AUTHLEVELFORMATRIX": 1,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 618750.0,
+      "WEIGHTEDLIMWCASHCOLL": 1375000.0,
+      "NOMINALLIMIT": 4250000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      }
+    ],
+    "SEGMENT": "KURUMSAL"
+  }
+}

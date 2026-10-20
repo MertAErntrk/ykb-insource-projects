@@ -157,6 +157,18 @@ def _yetki_matrisi(kural: dict, basvuru: dict, ayar: dict) -> Sonuc:
     nihai_json = _tam(yol_al(basvuru, c.get("nihai", "")))
     olgular.update({"nominal": tl_bicim(nominal), "agirlikli": tl_bicim(agirlikli),
                     "matris_seviyesi": m_json, "h_seviyesi": h_json, "nihai": nihai_json, "h_kodlari": "ilgili H"})
+    # Segment başvurudan (büyük harfe çevrilir); yoksa ayardaki varsayılan kullanılır ve not düşülür:
+    # tahmini segment yanlışsa matris de yanlış olur, taslak insan onayı olmadan gitmemeli.
+    segment = yol_al(basvuru, c.get("segment", "Outdata.SEGMENT"))
+    olgular["segment_kaynak"] = "json" if segment else "varsayilan"
+    if segment:
+        segment = str(segment).strip().upper()
+    else:
+        segment = str(ayar.get("varsayilan_segment") or "TICARI")
+        notlar.append("segment başvuru JSON'unda yok; varsayılan {} ile hesaplandı".format(segment))
+    olgular["segment"] = segment
+    olgular["tavan"] = False
+    olgular["para_birimi"] = (ayar.get("matris") or {}).get("para_birimi") or "TL"
     if nominal is None or agirlikli is None:
         notlar.append("limit alanları başvuru JSON'unda bulunamadı")
         return _sonuc(kural, "veri_eksik", olgular, notlar)
@@ -165,9 +177,10 @@ def _yetki_matrisi(kural: dict, basvuru: dict, ayar: dict) -> Sonuc:
     matris = ayar.get("matris")
     if matris is not None:
         try:
-            hesap, ayrinti = seviye_bul(matris, nominal, agirlikli)
+            hesap, ayrinti = seviye_bul(matris, nominal, agirlikli, segment)
             olgular["hesap_matris"] = hesap
             olgular["hesap_ayrinti"] = ayrinti
+            olgular["tavan"] = bool(ayrinti.get("tavan_uygulandi"))
         except (MatrisHatasi, TypeError, ValueError) as e:
             notlar.append("matris hesabı: {}".format(e))
     if hesap is not None and m_json is not None and hesap != m_json:
@@ -199,7 +212,8 @@ def _yetki_matrisi(kural: dict, basvuru: dict, ayar: dict) -> Sonuc:
         if not yukselten:
             notlar.append("seviyeyi yükselten H kuralı çıktı listesinde bulunamadı")
         return _sonuc(kural, "h_kurali_belirleyici", olgular, notlar)
-    return _sonuc(kural, "matris_belirleyici", olgular, notlar)
+    # Tavan uygulandıysa "daha yüksek seviyeye çıkaran esas alınır" cümlesi yanlış olur: ayrı şablon.
+    return _sonuc(kural, "matris_belirleyici_tavan" if olgular["tavan"] else "matris_belirleyici", olgular, notlar)
 
 
 def _sabit(kural: dict, basvuru: dict, ayar: dict) -> Sonuc:

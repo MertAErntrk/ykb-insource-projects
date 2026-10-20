@@ -1,0 +1,35 @@
+{
+  "_not": "SENTETİK başvuru: OBI segment, tavan.",
+  "BasvuruNo": "SENTETIK-0009",
+  "CIF": "10000009",
+  "BasvuruTarihi": "2026-03-16",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000009"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 2,
+    "AUTHLEVELFORMATRIX": 2,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 4050000.0,
+      "WEIGHTEDLIMWCASHCOLL": 9000000.0,
+      "NOMINALLIMIT": 1200000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      }
+    ],
+    "SEGMENT": "OBI"
+  }
+}

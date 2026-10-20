@@ -24,6 +24,7 @@
     },
     "HRules": [
       {"Code": "H221", "Hit": 0, "AuthLevel": null}
-    ]
+    ],
+    "SEGMENT": "TICARI"
   }
 }

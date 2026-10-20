@@ -1,15 +1,55 @@
 {
-  "_not": "SENTETİK eşikler. 'Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx' gelince gerçek değerlerle değiştirilecek. Doğrulama hedefi: Boran'ın mailindeki örnek limitler → matris seviyesi 3 (tutarlar repoya yazılmadı). Hangi ağırlıklı limitin (nakit teminat dahil/hariç) kullanıldığı ve segment/yola göre ayrı tablo olup olmadığı Excel ile netleşecek.",
-  "surum": "sentetik-2026-10-06",
+  "_not": "SENTETİK eşikler (sayılar uydurma). 'Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx' gelince gerçek değerlerle değiştirilecek. Her alan (nominal, ağırlıklı) için sırayla koşulu sağlayan ilk uyan satır; seviye = ikisinin büyüğü; koşulu sağlanan tavan satırı seviyeyi sınırlar. Üst sınırı null olan satır o alan için atlanır; iki üst sınırı da null olan koşulsuz son satır sınırsızdır.",
+  "surum": "sentetik-v2-2026-10-20",
+  "kaynak": "sentetik",
+  "para_birimi": "USD",
   "agirlikli_alan": "WEIGHTEDLIMWCASHCOLL",
-  "seviyeler": [
-    {"seviye": 1, "nominal_ust": 1000000, "agirlikli_ust": 500000},
-    {"seviye": 2, "nominal_ust": 3000000, "agirlikli_ust": 1000000},
-    {"seviye": 3, "nominal_ust": 10000000, "agirlikli_ust": 5000000},
-    {"seviye": 4, "nominal_ust": 25000000, "agirlikli_ust": 12500000},
-    {"seviye": 5, "nominal_ust": 50000000, "agirlikli_ust": 25000000},
-    {"seviye": 6, "nominal_ust": 100000000, "agirlikli_ust": 50000000},
-    {"seviye": 7, "nominal_ust": 250000000, "agirlikli_ust": 125000000},
-    {"seviye": 8, "nominal_ust": null, "agirlikli_ust": null}
-  ]
+  "otomatik_onay_seviyesi": 0,
+  "unvan_seviye": {
+    "Otomatik Onay": 0,
+    "Şube Müdürü": 1,
+    "Bölge Direktörü": 2,
+    "Tahsis Direktörü": 3,
+    "Tahsis Grup Direktörü": 4,
+    "Genel Müdür Yardımcısı": 5,
+    "Genel Müdür": 6,
+    "Kredi Komitesi": 7,
+    "Yönetim Kurulu": 8
+  },
+  "segmentler": {
+    "TICARI": [
+      {"sira": 1, "unvan": "Otomatik Onay", "seviye": 0, "nominal_ust": 250000, "agirlikli_ust": 150000},
+      {"sira": 2, "unvan": "Şube Müdürü", "seviye": 1, "nominal_ust": 1000000, "agirlikli_ust": 500000},
+      {"sira": 3, "unvan": "Bölge Direktörü", "seviye": 2, "nominal_ust": 3000000, "agirlikli_ust": null,
+       "kosul": {"alan": "nominal", "op": "<", "deger": 3000000}, "tavan": true},
+      {"sira": 4, "unvan": "Bölge Direktörü", "seviye": 2, "nominal_ust": 3000000, "agirlikli_ust": 1000000,
+       "kosul": {"alan": "nominal", "op": ">=", "deger": 3000000}},
+      {"sira": 5, "unvan": "Tahsis Direktörü", "seviye": 3, "nominal_ust": 10000000, "agirlikli_ust": 5000000},
+      {"sira": 6, "unvan": "Tahsis Grup Direktörü", "seviye": 4, "nominal_ust": 25000000, "agirlikli_ust": 12500000},
+      {"sira": 7, "unvan": "Genel Müdür Yardımcısı", "seviye": 5, "nominal_ust": 50000000, "agirlikli_ust": 25000000},
+      {"sira": 8, "unvan": "Genel Müdür", "seviye": 6, "nominal_ust": 100000000, "agirlikli_ust": 50000000},
+      {"sira": 9, "unvan": "Kredi Komitesi", "seviye": 7, "nominal_ust": 250000000, "agirlikli_ust": 125000000},
+      {"sira": 10, "unvan": "Yönetim Kurulu", "seviye": 8, "nominal_ust": null, "agirlikli_ust": null}
+    ],
+    "KURUMSAL": [
+      {"sira": 1, "unvan": "Şube Müdürü", "seviye": 1, "nominal_ust": 5000000, "agirlikli_ust": 2500000},
+      {"sira": 2, "unvan": "Bölge Direktörü", "seviye": 2, "nominal_ust": 15000000, "agirlikli_ust": 7500000},
+      {"sira": 3, "unvan": "Tahsis Direktörü", "seviye": 3, "nominal_ust": 40000000, "agirlikli_ust": 20000000},
+      {"sira": 4, "unvan": "Genel Müdür Yardımcısı", "seviye": 5, "nominal_ust": 100000000, "agirlikli_ust": 50000000},
+      {"sira": 5, "unvan": "Kredi Komitesi", "seviye": 7, "nominal_ust": 250000000, "agirlikli_ust": 125000000},
+      {"sira": 6, "unvan": "Yönetim Kurulu", "seviye": 8, "nominal_ust": null, "agirlikli_ust": null}
+    ],
+    "OBI": [
+      {"sira": 1, "unvan": "Otomatik Onay", "seviye": 0, "nominal_ust": 100000, "agirlikli_ust": 50000},
+      {"sira": 2, "unvan": "Şube Müdürü", "seviye": 1, "nominal_ust": 500000, "agirlikli_ust": 250000},
+      {"sira": 3, "unvan": "Bölge Direktörü", "seviye": 2, "nominal_ust": 1500000, "agirlikli_ust": null,
+       "kosul": {"alan": "nominal", "op": "<", "deger": 1500000}, "tavan": true},
+      {"sira": 4, "unvan": "Bölge Direktörü", "seviye": 2, "nominal_ust": 1500000, "agirlikli_ust": 750000,
+       "kosul": {"alan": "nominal", "op": ">=", "deger": 1500000}},
+      {"sira": 5, "unvan": "Tahsis Direktörü", "seviye": 3, "nominal_ust": 5000000, "agirlikli_ust": 2500000},
+      {"sira": 6, "unvan": "Tahsis Grup Direktörü", "seviye": 4, "nominal_ust": 12500000, "agirlikli_ust": 6000000},
+      {"sira": 7, "unvan": "Genel Müdür", "seviye": 6, "nominal_ust": 25000000, "agirlikli_ust": 12500000},
+      {"sira": 8, "unvan": "Yönetim Kurulu", "seviye": 8, "nominal_ust": null, "agirlikli_ust": null}
+    ]
+  }
 }

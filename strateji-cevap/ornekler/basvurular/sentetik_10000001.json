@@ -29,6 +29,7 @@
       {"Code": "H221", "Hit": 1, "AuthLevel": null},
       {"Code": "H999", "Hit": 1, "AuthLevel": 8},
       {"Code": "H100", "Hit": 0, "AuthLevel": null}
-    ]
+    ],
+    "SEGMENT": "TICARI"
   }
 }

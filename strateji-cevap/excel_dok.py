@@ -23,13 +23,31 @@ import sys
 from typing import Any, Dict, List, Optional
 
 MASKE = re.compile(r"\d{6,}")
+# içinde en az 4 rakam olan harf-rakam karışık belirteç (ör. kayıt/sicil kodu); tarih, saat, yıl etkilenmez
+KARISIK = re.compile(r"\b(?=(?:[A-Za-z]*\d){4})(?=\d*[A-Za-z])[A-Za-z0-9]+\b")
+KISI_KELIME = {"kisi", "ad", "adi", "soyad", "soyadi", "sicil", "personel", "kullanici", "musteri", "isim", "unvan"}
+_TR = str.maketrans("ışğüöçâîû", "isguocaiu")
+TUTAR_SAYI = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\d)")
+TUTAR_ISARET = re.compile(r"([<>]=?\s*)\d+(?:[.,]\d+)*")
+TUTAR_EK = re.compile(r"\d+(?:[.,]\d+)*(?=\s*(?:TL|USD|EUR)\b)")
 DUSUK_KARDINALITE = 25     # bu kadar ya da daha az farklı değer: dağılım yazılır...
 KISA_DEGER = 40            # ...ama yalnız değerler bu uzunluğu aşmıyorsa (uzun metin serbest metindir)
 ORNEK_UZUNLUK = 160
 
 
 def maskele(metin: str) -> str:
-    return MASKE.sub("######", metin)
+    return MASKE.sub("######", KARISIK.sub("***", metin))
+
+
+def _kisi_sutunu(baslik: Any) -> bool:
+    ad = str(baslik).replace("İ", "i").lower().translate(_TR)
+    return bool(KISI_KELIME & set(re.findall(r"[a-z0-9]+", ad)))
+
+
+def tutar_gizle(metin: str) -> str:
+    metin = TUTAR_SAYI.sub("#", metin)
+    metin = TUTAR_ISARET.sub(r"\1#", metin)
+    return TUTAR_EK.sub("#", metin)
 
 
 def tip(deger: Any) -> str:
@@ -58,7 +76,7 @@ def _deger_metni(deger: Any) -> str:
     return maskele(str(deger).replace("\n", " ").strip())
 
 
-def sutun_ozet(baslik: Any, degerler: List[Any], ornek: int = 0) -> List[str]:
+def sutun_ozet(baslik: Any, degerler: List[Any], ornek: int = 0, dagilim_zorla: bool = False) -> List[str]:
     """Tek sütunun özeti: tip sayıları, farklı değer sayısı, tipine göre aralık ya da dağılım."""
     tipler = collections.Counter(tip(d) for d in degerler)
     dolu = [d for d in degerler if tip(d) != "boş"]
@@ -83,7 +101,10 @@ def sutun_ozet(baslik: Any, degerler: List[Any], ornek: int = 0) -> List[str]:
         s.append("  tarih: en eski {}, en yeni {}".format(tarih_m[0], tarih_m[-1]))
         s.append("  aylık: " + ", ".join("{} {}".format(ay, n) for ay, n in sorted(aylar.items())))
     kisa = max(len(_deger_metni(d)) for d in dolu) <= KISA_DEGER
-    if farkli <= DUSUK_KARDINALITE and kisa:
+    if _kisi_sutunu(baslik):
+        s.append("  dagilim yok sayıldı (kişi sütunu)" if dagilim_zorla
+                 else "  içerik yazılmadı (kişi/kimlik sütunu)")
+    elif dagilim_zorla or (farkli <= DUSUK_KARDINALITE and kisa):
         dagilim = collections.Counter(_deger_metni(d) for d in dolu)
         s.append("  dağılım: " + "; ".join("{} ({})".format(v, n) for v, n in dagilim.most_common()))
     elif metinler:
@@ -104,7 +125,9 @@ def baslik_satiri_bul(satirlar: List[List[Any]]) -> int:
     return 0
 
 
-def dokum_yapi(yol: str, ornek: int = 0, baslik_satir: Optional[int] = None) -> str:
+def dokum_yapi(yol: str, ornek: int = 0, baslik_satir: Optional[int] = None,
+               dagilim: Optional[List[str]] = None) -> str:
+    zorla = {str(d).strip().casefold() for d in (dagilim or [])}
     from openpyxl import load_workbook
     wb = load_workbook(yol, read_only=True, data_only=True)
     s = ["# Yapı dökümü: {}".format(os.path.basename(yol)),
@@ -128,7 +151,8 @@ def dokum_yapi(yol: str, ornek: int = 0, baslik_satir: Optional[int] = None) -> 
             if tip(baslik) == "boş" and all(tip(r[j]) == "boş" for r in veri if j < len(r)):
                 continue
             degerler = [r[j] if j < len(r) else None for r in veri]
-            s += sutun_ozet(baslik if tip(baslik) != "boş" else "(sütun {})".format(j + 1), degerler, ornek)
+            s += sutun_ozet(baslik if tip(baslik) != "boş" else "(sütun {})".format(j + 1), degerler, ornek,
+                            tip(baslik) != "boş" and str(baslik).strip().casefold() in zorla)
         s.append("")
     wb.close()
     return "\n".join(s) + "\n"
@@ -188,6 +212,8 @@ def dokum_hucreler(yol: str, limit: int = 3000, degersiz: bool = False) -> str:
                     deger_m = "tarih"
                 else:
                     deger_m = _deger_metni(deger)
+                    if degersiz:
+                        deger_m = tutar_gizle(deger_m)
                 if formul and degersiz:
                     formul = SABIT.sub("#", formul)
                 parcalar = ["{} | {}".format(cell.coordinate, deger_m)]
@@ -219,6 +245,8 @@ def main(argv=None) -> int:
                    help="--hucreler: sayı/tarih değerlerini ve formül sabitlerini gizle, yalnız düzen ve renkleri yaz")
     p.add_argument("--ornek", type=int, default=0, help="serbest metin sütunundan maskeli örnek sayısı (KVKK onayı varsa)")
     p.add_argument("--baslik-satir", type=int, help="başlık satırı numarası (1 tabanlı); verilmezse tahmin edilir")
+    p.add_argument("--dagilim", action="append", metavar="SUTUN",
+                   help="bu başlıklı sütunun dağılımını kardinaliteye bakmadan yaz (tekrarlanabilir; kişi sütunu hariç)")
     p.add_argument("--cikti", help="çıktı dosyası (varsayılan <dosya>.dokum.txt)")
     a = p.parse_args(argv)
     try:
@@ -229,7 +257,7 @@ def main(argv=None) -> int:
     if not os.path.isfile(a.dosya):
         print("dosya bulunamadı: " + a.dosya, file=sys.stderr)
         return 2
-    metin = dokum_hucreler(a.dosya, a.limit, a.degersiz) if a.hucreler else dokum_yapi(a.dosya, a.ornek, a.baslik_satir)
+    metin = dokum_hucreler(a.dosya, a.limit, a.degersiz) if a.hucreler else dokum_yapi(a.dosya, a.ornek, a.baslik_satir, a.dagilim)
     cikti = a.cikti or (a.dosya + ".dokum.txt")
     with open(cikti, "w", encoding="utf-8") as f:
         f.write(metin)

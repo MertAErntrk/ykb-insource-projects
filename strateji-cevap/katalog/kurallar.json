@@ -47,15 +47,20 @@
         "matris_seviyesi": "Outdata.AUTHLEVELFORMATRIX",
         "h_seviyesi": "Outdata.AUTHLEVELFORHRULES",
         "nihai": "Outdata.APPROVALAUTHORITY",
-        "h_kurallari": "Outdata.HRules"
+        "h_kurallari": "Outdata.HRules",
+        "segment": "Outdata.SEGMENT"
       },
       "sablonlar": {
         "matris_belirleyici": {
-          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. Nominal limit {nominal} TL ve ağırlıklı limit {agirlikli} TL için onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; iki limitten daha yüksek seviyeye çıkaran esas alınmaktadır.",
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. {segment} segmenti için nominal limit {nominal} {para_birimi} ve ağırlıklı limit {agirlikli} {para_birimi} ile onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; iki limitten daha yüksek seviyeye çıkaran esas alınmaktadır.",
+          "onay": "taslak"
+        },
+        "matris_belirleyici_tavan": {
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. {segment} segmenti için nominal limit {nominal} {para_birimi} ve ağırlıklı limit {agirlikli} {para_birimi} ile onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; iki limitten daha yüksek seviyeye çıkaran esas alınmakla birlikte nominal limit tutarı {segment} segmentinin tavan kuralı kapsamında olduğundan seviye {matris_seviyesi} ile sınırlandırılmıştır.",
           "onay": "taslak"
         },
         "h_kurali_belirleyici": {
-          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. Nominal limit {nominal} TL ve ağırlıklı limit {agirlikli} TL için onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; ancak {h_kodlari} kuralı yetki seviyesini {h_seviyesi}. seviyeye yükselttiği için nihai seviye {nihai} olmuştur.",
+          "metin": "Merhaba, \"{cif}\" numaralı müşterinin onay yetki seviyesi {nihai} olarak belirlenmiştir. {segment} segmenti için nominal limit {nominal} {para_birimi} ve ağırlıklı limit {agirlikli} {para_birimi} ile onay yetki matrisi {matris_seviyesi}. seviyeyi vermektedir; ancak {h_kodlari} kuralı yetki seviyesini {h_seviyesi}. seviyeye yükselttiği için nihai seviye {nihai} olmuştur.",
           "onay": "taslak"
         },
         "veri_eksik": {

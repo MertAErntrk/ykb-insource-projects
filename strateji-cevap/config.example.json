@@ -1,4 +1,5 @@
 {
+  "_not": "config.json olarak kopyalayıp doldur; config.json repoya girmez. Boş alanlar DB bağlantı ve sütun adlarıdır (BT/Boran verir). Göreli yollar bu dosyanın klasörüne göredir.",
   "route": "https://<llm-adresi>/v1",
   "model": "Qwen3.8-27B-FP8",
   "ca_bundle": "",
@@ -7,5 +8,32 @@
   "tarih_yolu": "BasvuruTarihi",
   "h_kurallari_yolu": "Outdata.HRules",
   "kendi_banka_kodu": "0067",
-  "basvurular": "ornekler/basvurular"
+  "basvurular": "ornekler/basvurular",
+  "kaynak": "dosya",
+  "db": {
+    "hizli_tahsis": {"dsn": "", "kullanici": "", "parola": ""},
+    "smile_plus": {"dsn": "", "kullanici": "", "parola": ""},
+    "tablolar": {
+      "io_log": "EVA_STRATEGY_IO_LOG",
+      "identity": "",
+      "evaluation": "",
+      "pc_log": "uwr_app_pc_log",
+      "proposals": "UWR_PRO_PROPOSALS",
+      "rule_lkp": "APP_POLICY_RULE_LKP"
+    },
+    "sutunlar": {
+      "cif": "",
+      "basvuru_no": "",
+      "indata": "INDATA",
+      "outdata": "OUTDATA",
+      "action_code": "ACTION_CODE",
+      "tarih": ""
+    }
+  },
+  "matris_dosya": "",
+  "varsayilan_segment": "TICARI",
+  "unvan_seviye": {},
+  "kayitlar_dosya": "ornekler/cozum_merkezi/kayitlar.json",
+  "onaylar_dosya": "veri/onaylar.json",
+  "ekran_port": 8765
 }

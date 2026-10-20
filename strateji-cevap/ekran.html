@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cevap onay ekranı</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:14px;color:#222;background:#f4f4f4}
+header{padding:10px 16px;background:#fff;border-bottom:1px solid #ccc;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+header h1{font-size:1.05rem;margin:0}
+#sayac{color:#444}
+#serit{position:fixed;top:0;left:0;right:0;z-index:10;background:#b71c1c;color:#fff;padding:8px 16px;font-weight:600}
+#serit[hidden]{display:none}
+main{display:grid;grid-template-columns:40% 60%;gap:12px;padding:12px 16px;align-items:start}
+@media (max-width:1200px){main{grid-template-columns:1fr}}
+section.panel{background:#fff;border:1px solid #ccc;border-radius:6px;padding:10px;min-width:0}
+.filtre{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.filtre button{border:1px solid #888;background:#fff;border-radius:4px;padding:3px 10px;cursor:pointer;font:inherit}
+.filtre button[aria-pressed="true"]{background:#222;color:#fff;border-color:#222}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:5px 6px;border-bottom:1px solid #e3e3e3;vertical-align:top;overflow-wrap:anywhere}
+th{font-size:.8rem;color:#555}
+tbody#liste tr{cursor:pointer}
+tr.d-onaya_gitti{background:#fff3cd}
+tr.d-otomatik{background:#e8f5e9}
+tr.d-duzeltildi{background:#e3f0fb}
+tr.d-gonderildi{background:#eee}
+tr.d-kapsam_disi{background:#fde4e4}
+tbody#liste tr[aria-selected="true"]{outline:3px solid #1a4f8b;outline-offset:-3px;font-weight:600}
+tbody#liste tr:focus-visible{outline:3px solid #1a4f8b;outline-offset:-3px}
+.rozet{display:inline-block;border:1px solid #777;border-radius:10px;padding:0 8px;font-size:.8rem;background:#fff;margin:1px 4px 1px 0}
+.rozet.kural{background:#f0f0f0;font-family:Consolas,monospace}
+.blok{margin:0 0 12px}
+.blok h2{font-size:.95rem;margin:0 0 4px;color:#333}
+.kutu{border:1px solid #bbb;border-radius:4px;padding:8px;background:#fafafa;white-space:pre-wrap;overflow-wrap:anywhere}
+.soluk{color:#666}
+dl.meta{display:grid;grid-template-columns:max-content 1fr;gap:2px 10px;margin:6px 0 0}
+dl.meta dt{color:#555}
+dl.meta dd{margin:0;overflow-wrap:anywhere}
+ul{margin:0;padding-left:20px}
+textarea{width:100%;min-height:110px;font:inherit;padding:6px}
+input[type=text]{width:100%;font:inherit;padding:6px}
+label{display:block;margin:6px 0 2px;color:#444}
+.islem{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.islem button{font:inherit;padding:5px 14px;border-radius:4px;border:1px solid #555;background:#fff;cursor:pointer}
+.islem button.onay{border-color:#2e7d32;color:#2e7d32}
+.islem button:disabled{opacity:.5;cursor:not-allowed}
+.islem button:focus-visible,.filtre button:focus-visible{outline:3px solid #1a4f8b}
+</style>
+</head>
+<body>
+<div id="serit" role="alert" hidden></div>
+<header>
+  <h1>Cevap onay ekranı</h1>
+  <span id="sayac" aria-live="polite"></span>
+</header>
+<main>
+  <section class="panel" aria-labelledby="liste-baslik">
+    <h2 id="liste-baslik" style="font-size:.95rem;margin:0 0 6px">Kayıtlar</h2>
+    <div class="filtre" id="filtre" role="group" aria-label="Durum filtresi"></div>
+    <table>
+      <thead><tr><th>Kayıt no</th><th>Tarih</th><th>Kanal</th><th>Kategori</th><th>Durum</th></tr></thead>
+      <tbody id="liste"></tbody>
+    </table>
+  </section>
+  <section class="panel" id="detay" aria-live="polite" aria-labelledby="detay-baslik">
+    <h2 id="detay-baslik" style="font-size:.95rem;margin:0 0 6px">Detay</h2>
+    <div id="detay-icerik" class="soluk">Soldan bir kayıt seçin.</div>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+  var ETIKET = {
+    onaya_gitti: "Onaya gitti", otomatik: "Otomatik", duzeltildi: "Düzeltildi",
+    gonderildi: "Gönderildi", kapsam_disi: "Kapsam dışı"
+  };
+  var FILTRELER = [["", "Tümü"], ["onaya_gitti", "Onaya gitti"], ["otomatik", "Otomatik"],
+    ["duzeltildi", "Düzeltildi"], ["gonderildi", "Gönderildi"], ["kapsam_disi", "Kapsam dışı"]];
+  var KARARLI = { gonderildi: 1, duzeltildi: 1, kapsam_disi: 1 };
+  var kayitlar = [], secili = null, filtre = "", seritZaman = null, mesgul = false;
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+  function etiket(d) { return ETIKET[d] || String(d); }
+  function metinYap(v) {
+    if (v !== null && typeof v === "object") return JSON.stringify(v, null, 1);
+    return String(v);
+  }
+
+  function hataGoster(msg) {
+    var s = document.getElementById("serit");
+    s.textContent = msg;
+    s.hidden = false;
+    if (seritZaman) clearTimeout(seritZaman);
+    seritZaman = setTimeout(function () { s.textContent = ""; s.hidden = true; }, 5000);
+  }
+
+  function istek(yol, govde) {
+    var secenek = { headers: { "Accept": "application/json" } };
+    if (govde !== undefined) {
+      secenek.method = "POST";
+      secenek.headers["Content-Type"] = "application/json; charset=utf-8";
+      secenek.body = JSON.stringify(govde);
+    }
+    return fetch(yol, secenek).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) throw new Error((j && j.hata) || ("İstek başarısız (" + r.status + ")"));
+        return j;
+      });
+    });
+  }
+
+  function sayacYaz() {
+    var say = {};
+    kayitlar.forEach(function (k) { say[k.durum] = (say[k.durum] || 0) + 1; });
+    var parca = [kayitlar.length + " kayıt"];
+    ["onaya_gitti", "otomatik", "duzeltildi", "gonderildi", "kapsam_disi"].forEach(function (d) {
+      if (say[d]) parca.push(say[d] + " " + etiket(d).toLowerCase());
+    });
+    document.getElementById("sayac").textContent = parca.join(", ");
+  }
+
+  function filtreYaz() {
+    var kap = document.getElementById("filtre");
+    kap.replaceChildren();
+    FILTRELER.forEach(function (f) {
+      var b = el("button", "", f[1]);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(filtre === f[0]));
+      b.addEventListener("click", function () { filtre = f[0]; filtreYaz(); listeYaz(); });
+      kap.appendChild(b);
+    });
+  }
+
+  function rozet(durum) { return el("span", "rozet", etiket(durum)); }
+
+  function listeYaz() {
+    var tb = document.getElementById("liste");
+    tb.replaceChildren();
+    var gorunen = kayitlar.filter(function (k) { return !filtre || k.durum === filtre; });
+    if (!gorunen.length) {
+      var tr0 = el("tr"), td0 = el("td", "soluk", "Bu filtrede kayıt yok.");
+      td0.colSpan = 5; tr0.appendChild(td0); tb.appendChild(tr0);
+      return;
+    }
+    gorunen.forEach(function (k) {
+      var tr = el("tr", "d-" + k.durum);
+      tr.tabIndex = 0;
+      tr.setAttribute("aria-selected", String(k.kayit_no === secili));
+      [k.kayit_no, k.tarih, k.kanal, k.kategori].forEach(function (v) {
+        tr.appendChild(el("td", "", v == null ? "" : v));
+      });
+      var td = el("td"); td.appendChild(rozet(k.durum)); tr.appendChild(td);
+      tr.addEventListener("click", function () { sec(k.kayit_no); });
+      tr.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sec(k.kayit_no); }
+      });
+      tb.appendChild(tr);
+    });
+  }
+
+  function listeYukle() {
+    return istek("/api/kayitlar").then(function (liste) {
+      kayitlar = liste;
+      sayacYaz(); listeYaz();
+    }).catch(function (e) { hataGoster(e.message); });
+  }
+
+  function sec(no) {
+    secili = no;
+    listeYaz();
+    return detayYukle(no);
+  }
+
+  function detayYukle(no) {
+    return istek("/api/kayit/" + encodeURIComponent(no)).then(function (d) {
+      if (secili === no) detayYaz(d);
+    }).catch(function (e) { hataGoster(e.message); });
+  }
+
+  function blok(baslik) {
+    var b = el("div", "blok");
+    b.appendChild(el("h2", "", baslik));
+    return b;
+  }
+
+  function liste(oge, bos) {
+    if (!oge || !oge.length) return el("div", "soluk", bos);
+    var ul = el("ul");
+    oge.forEach(function (x) { ul.appendChild(el("li", "", x)); });
+    return ul;
+  }
+
+  function meta(satirlar) {
+    var dl = el("dl", "meta");
+    satirlar.forEach(function (s) {
+      dl.appendChild(el("dt", "", s[0]));
+      dl.appendChild(el("dd", "", s[1] == null || s[1] === "" ? "-" : s[1]));
+    });
+    return dl;
+  }
+
+  function detayYaz(d) {
+    var kok = document.getElementById("detay-icerik");
+    kok.replaceChildren();
+    kok.className = "";
+    var cagri = d.cagri || {}, taslak = d.taslak || {}, kayit = d.kayit || {};
+    var no = kayit.kayit_no != null ? kayit.kayit_no : secili;
+
+    var b1 = blok("Sorulan soru");
+    b1.appendChild(el("div", "kutu", cagri.metin || "Soru metni yok"));
+    b1.appendChild(meta([["Kayıt no", no], ["Tarih", cagri.tarih || kayit.tarih],
+      ["Kanal", cagri.kanal || kayit.kanal], ["Kategori", cagri.kategori || kayit.kategori],
+      ["Talep eden", cagri.talep_eden]]));
+    kok.appendChild(b1);
+
+    var b2 = blok("Motorun taslağı");
+    b2.appendChild(el("div", "kutu", taslak.metin ? taslak.metin : "Cevap metni yok"));
+    kok.appendChild(b2);
+
+    var b3 = blok("Olgular ve kurallar");
+    var kr = el("div");
+    (taslak.kurallar || []).forEach(function (k) { kr.appendChild(el("span", "rozet kural", k)); });
+    if (!kr.childNodes.length) kr.appendChild(el("span", "soluk", "Çalışan kural yok"));
+    b3.appendChild(kr);
+    var olgu = taslak.olgular || {}, anahtar = Object.keys(olgu);
+    if (anahtar.length) {
+      var t = el("table"), th = el("thead"), thr = el("tr");
+      thr.appendChild(el("th", "", "Anahtar")); thr.appendChild(el("th", "", "Değer"));
+      th.appendChild(thr); t.appendChild(th);
+      var tb = el("tbody");
+      anahtar.forEach(function (a) {
+        // Kural başına olgu sözlüğü bir düzey açılır: "YETKI › nominal" gibi satırlar; daha derini JSON metni.
+        var v = olgu[a];
+        var satirlar = (v !== null && typeof v === "object" && !Array.isArray(v))
+          ? Object.keys(v).map(function (k) { return [a + " › " + k, v[k]]; })
+          : [[a, v]];
+        satirlar.forEach(function (s) {
+          var tr = el("tr");
+          tr.appendChild(el("td", "", s[0]));
+          tr.firstChild.style.whiteSpace = "nowrap";
+          var td = el("td"); td.appendChild(el("span", "", metinYap(s[1])));
+          td.firstChild.style.whiteSpace = "pre-wrap";
+          tr.appendChild(td); tb.appendChild(tr);
+        });
+      });
+      t.appendChild(tb); b3.appendChild(t);
+    } else {
+      b3.appendChild(el("div", "soluk", "Olgu yok"));
+    }
+    kok.appendChild(b3);
+
+    var b4 = blok("Notlar ve uyarılar");
+    b4.appendChild(el("div", "soluk", "Notlar"));
+    b4.appendChild(liste(taslak.notlar, "Not yok"));
+    b4.appendChild(el("div", "soluk", "Uyarılar"));
+    b4.appendChild(liste(taslak.uyarilar, "Uyarı yok"));
+    kok.appendChild(b4);
+
+    var b5 = blok("Durum");
+    var drm = el("div"); drm.appendChild(rozet(d.durum)); b5.appendChild(drm);
+    var onay = d.onay;
+    if (onay) {
+      var sat = [["Karar zamanı", onay.zaman], ["Not", onay.not]];
+      if (onay.orijinal_durum) sat.push(["Orijinal durum", etiket(onay.orijinal_durum)]);
+      b5.appendChild(meta(sat));
+    }
+    kok.appendChild(b5);
+
+    var b6 = blok("Kaynak");
+    b6.appendChild(el("span", "rozet", d.kaynak || "-"));
+    kok.appendChild(b6);
+
+    islemYaz(kok, d, no, taslak);
+  }
+
+  function islemYaz(kok, d, no, taslak) {
+    var b = blok("İşlem");
+    var kararli = !!KARARLI[d.durum];
+    var ta, nt;
+    if (kararli && d.onay && d.onay.metin) {
+      b.appendChild(el("div", "soluk", "Verilen karar metni"));
+      b.appendChild(el("div", "kutu", d.onay.metin));
+    } else if (kararli) {
+      b.appendChild(el("div", "soluk", "Karar verildi, ayrı bir metin kaydı yok."));
+    }
+    if (!kararli) {
+      var l1 = el("label", "", "Düzeltilecek cevap metni"); l1.htmlFor = "duzelt-metin";
+      ta = el("textarea"); ta.id = "duzelt-metin"; ta.value = taslak.metin || "";
+      var l2 = el("label", "", "Not (Düzelt için isteğe bağlı, Kapsam dışı için isteğe bağlı)"); l2.htmlFor = "duzelt-not";
+      nt = el("input"); nt.type = "text"; nt.id = "duzelt-not";
+      b.appendChild(l1); b.appendChild(ta); b.appendChild(l2); b.appendChild(nt);
+    }
+    var islem = el("div", "islem");
+    function dugme(ad, cls, fn) {
+      var x = el("button", cls, ad); x.type = "button"; x.disabled = kararli;
+      x.addEventListener("click", fn); islem.appendChild(x);
+    }
+    dugme("Onayla", "onay", function () { gonder(no, "onayla", {}); });
+    dugme("Düzelt", "", function () {
+      var m = ta.value.trim();
+      if (!m) { hataGoster("Düzeltilmiş cevap metni boş olamaz."); return; }
+      var g = { metin: ta.value };
+      if (nt.value.trim()) g.not = nt.value.trim();
+      gonder(no, "duzelt", g);
+    });
+    dugme("Kapsam dışı", "", function () {
+      var g = {};
+      if (nt.value.trim()) g.not = nt.value.trim();
+      gonder(no, "kapsam_disi", g);
+    });
+    b.appendChild(islem);
+    kok.appendChild(b);
+  }
+
+  function gonder(no, islem, govde) {
+    if (mesgul) return;
+    mesgul = true;
+    istek("/api/kayit/" + encodeURIComponent(no) + "/" + islem, govde)
+      .then(function () { return Promise.all([listeYukle(), detayYukle(no)]); })
+      .catch(function (e) { hataGoster(e.message); })
+      .then(function () { mesgul = false; });
+  }
+
+  filtreYaz();
+  listeYukle();
+})();
+</script>
+</body>
+</html>

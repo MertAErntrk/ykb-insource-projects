@@ -78,8 +78,13 @@ def test_yetki_h_kurali_belirleyici():
 
 def test_yetki_matris_belirleyici():
     s = coz(K.bul("YETKI"), basvuru("10000002"), AYAR)
-    assert s.sablon == "matris_belirleyici" and not s.notlar
+    assert s.sablon == "matris_belirleyici_tavan" and not s.notlar      # ağırlıklı 3 verirdi, tavan 2'de kesti
     assert s.olgular["nominal"] == "2.400.000,00" and s.olgular["nihai"] == 2
+    assert s.olgular["tavan"] is True and "tavan kuralı" in s.metin
+    b = basvuru("10000002")
+    b["Outdata"]["CORPCOMMMATRIXOUTPUTS"]["WEIGHTEDLIMWCASHCOLL"] = 400000   # tavan düşürmez: düz şablon
+    s = coz(K.bul("YETKI"), b, AYAR)
+    assert s.sablon == "matris_belirleyici" and s.olgular["tavan"] is False
 
 
 def test_yetki_tutarsizliklar_not_olur():
@@ -142,3 +147,36 @@ def test_kural_calisti_mi():
     assert kural_calisti_mi(b, "H100") is False
     assert kural_calisti_mi(b, "H777") is False
     assert kural_calisti_mi({"Outdata": {}}, "H221") is None
+
+
+def test_yetki_segment_varsayilan_ticari():
+    for no in ("10000001", "10000002"):
+        b = basvuru(no)
+        b["Outdata"].pop("SEGMENT", None)
+        s = coz(K.bul("YETKI"), b, AYAR)
+        assert s.olgular["segment"] == "TICARI" and s.olgular["segment_kaynak"] == "varsayilan"
+        assert any("varsayılan TICARI" in n for n in s.notlar) and "TICARI segmenti için" in s.metin
+    assert s.olgular["hesap_matris"] == 2 and s.olgular["tavan"] is True
+
+
+def test_yetki_segment_jsondan_ve_ayardan():
+    b = basvuru("10000001")
+    b["Outdata"]["SEGMENT"] = "KURUMSAL"                         # KURUMSAL matrisi 1 diyor, JSON 3
+    s = coz(K.bul("YETKI"), b, AYAR)
+    assert s.olgular["segment_kaynak"] == "json" and s.olgular["hesap_matris"] == 1
+    assert any("matris seviyesi JSON'da 3" in n for n in s.notlar)
+    b["Outdata"].pop("SEGMENT")
+    s = coz(K.bul("YETKI"), b, dict(AYAR, varsayilan_segment="KURUMSAL"))
+    assert s.olgular["segment"] == "KURUMSAL" and s.olgular["segment_kaynak"] == "varsayilan"
+    b["Outdata"]["SEGMENT"] = " ticari "                             # harf ve boşluk normalize edilir
+    s = coz(K.bul("YETKI"), b, AYAR)
+    assert s.olgular["segment"] == "TICARI" and s.olgular["segment_kaynak"] == "json"
+    assert s.olgular["hesap_matris"] == 3 and not s.notlar
+
+
+def test_yetki_bilinmeyen_segment_not():
+    b = basvuru("10000001")
+    b["Outdata"]["SEGMENT"] = "BILINMEYEN"
+    s = coz(K.bul("YETKI"), b, AYAR)
+    assert "hesap_matris" not in s.olgular and any("bilinmeyen segment" in n for n in s.notlar)
+    assert s.olgular["matris_seviyesi"] == 3                      # JSON seviyesiyle devam eder

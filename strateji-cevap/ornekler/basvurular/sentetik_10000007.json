@@ -1,0 +1,35 @@
+{
+  "_not": "SENTETİK başvuru: Otomatik Onay (seviye 0).",
+  "BasvuruNo": "SENTETIK-0007",
+  "CIF": "10000007",
+  "BasvuruTarihi": "2026-03-14",
+  "Indata": {
+    "CRBNotice": []
+  },
+  "Outdata": {
+    "Musteriler": [
+      {
+        "CALCSBUCREDITCLASSFLAG": "21",
+        "APPROVALAUTHLEVELCIF": "10000007"
+      }
+    ],
+    "CDF": [],
+    "APPROVALAUTHORITY": 0,
+    "AUTHLEVELFORMATRIX": 0,
+    "AUTHLEVELFORHRULES": 0,
+    "PATHID": "UWR_CG_YK",
+    "CORPCOMMMATRIXOUTPUTS": {
+      "WEIGHTEDLIMWOCASHCOLL": 45000.0,
+      "WEIGHTEDLIMWCASHCOLL": 100000.0,
+      "NOMINALLIMIT": 200000.0
+    },
+    "HRules": [
+      {
+        "Code": "H221",
+        "Hit": 0,
+        "AuthLevel": null
+      }
+    ],
+    "SEGMENT": "TICARI"
+  }
+}
