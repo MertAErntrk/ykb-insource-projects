@@ -1,0 +1,28 @@
+<h2 id="b20"><span class="no">20</span>Yol haritası</h2>
+<p>Takvim, veri erişiminin ve kural bilgisinin ilk iki haftada sağlanmasına bağlı. Çalışmalar birbirinden
+bağımsız olduğu için paralel yürür; pilotun başlangıcı değerlendirme setinin hazır olmasına, dağıtım ise
+bilgi güvenliği görüşmelerine bağlı.</p>
+<!--SVG:11_yol_haritasi|maxw=178|baslik=Yol haritası: 2027 planlama dönemine kadar-->
+
+<table>
+  <thead><tr><th>Aşama</th><th>Süre</th><th>Çıktı</th><th>Bağımlılık</th></tr></thead>
+  <tbody>
+    <tr><td>1. Veri erişimi ve doğrulama</td><td>2 hafta</td><td>Salt okunur DB erişimi; sorguların gerçek tablolarla denenmesi; başvuru JSON'undaki alan adlarının doğrulanması; segment ve seviye eşlemesi</td><td>BT erişimi, strateji ekibinden alan bilgisi</td></tr>
+    <tr><td>2. Katalog çalışması</td><td>1 hafta + 3 hafta</td><td>Workshop: en sık kurallar, her biri için veri yolu, koşul ve onaylı şablon; kataloğun genişletilmesi</td><td>Kayıt listesinin analizi; strateji ekibinin zamanı</td></tr>
+    <tr><td>3. Değerlendirme seti ve ölçüm</td><td>2 hafta</td><td>100–200 kayıt; toplu çalıştırma; ölçüt tablosunun ilk değerleri</td><td>Aşama 1 ve 2</td></tr>
+    <tr><td>4. Pilot</td><td>3 hafta</td><td>Ekip onay ekranıyla gerçek kayıtlar üzerinde; haftalık gözden geçirme; düzeltme verisi</td><td>Aşama 3; ekran erişimi</td></tr>
+    <tr><td>5. Platform ve uyum</td><td>Paralel, 4 + 3 hafta</td><td>Bilgi güvenliği, KVKK ve model risk görüşmeleri; kurum içi dağıtım; kimlik, loglama, izleme</td><td>İlgili ekiplerin takvimi</td></tr>
+    <tr><td>6. Kapanış</td><td>1,5 hafta</td><td>Ölçüm raporu; faz 2 kapsamı ve kararı; 2027 planlama sunumu</td><td>Aşama 4</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b20-1">20.1 Karar noktaları</h3>
+<ol>
+  <li><b>Veri erişimi sağlandı mı?</b> (2. hafta sonu) Sağlanmadıysa pilot, dışa aktarılmış kayıt listesi ve
+  elle alınmış başvuru kayıtlarıyla daha küçük hacimde yürür.</li>
+  <li><b>Katalog kapsaması yeterli mi?</b> (5. hafta) Değerlendirme setinde kapsama %70'in altındaysa pilot
+  kapsamı en sık üç kuralla sınırlanır ve katalog pilot boyunca büyütülür.</li>
+  <li><b>Pilot sonucu.</b> (9. hafta) Düzeltmesiz gönderim ve olgu doğruluğu hedefleri tutuyorsa faz 2'de
+  Çözüm Merkezi bağlantısı ve kısmi otomatik gönderim önerilir; tutmuyorsa katalog ve sınıflandırıcı
+  iyileştirmesiyle ikinci pilot.</li>
+</ol>

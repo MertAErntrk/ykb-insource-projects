@@ -1,0 +1,108 @@
+<h2 id="b16"><span class="no">16</span>Eksikler ve yapılmayanlar</h2>
+<p>Bu bölüm, prototipi pilota ve kurum içi kullanıma taşımak için kapatılması gereken boşlukları alan alan
+listeler. Öncelik: <span class="etiket yuksek">yüksek</span> pilot bunsuz başlayamaz ya da ciddi risk taşır;
+<span class="etiket orta">orta</span> pilot sırasında ya da öncesinde gerekli; <span class="etiket dusuk">düşük</span>
+faz 2'ye bırakılabilir. Her satırın "ne gerekiyor" sütunu bölüm 17 ve 18'deki soru ve ihtiyaçlara bağlanır.</p>
+
+<h3 id="b16-1">16.1 Veri erişimi ve doğrulama</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Oracle kaynağı gerçek bağlantıyla hiç çalıştırılmadı; kimlik ve değerlendirme tablo adları ile müşteri no, başvuru no ve tarih sütunları ayarda boş</td><td>Motor sentetik dosyalarla çalışmaya devam ediyor; gerçek kayıt üzerinde tek bir taslak üretilmedi</td><td><span class="etiket yuksek">yüksek</span></td><td>Salt okunur hesap, DSN, tablo ve sütun adları (soru 11–12); Python için Oracle sürücüsü</td></tr>
+    <tr><td>Başvuru JSON'undaki alan adları varsayım: müşteri no, başvuru tarihi, <code>Indata.CRBNotice</code> alanları, çalışan kural listesi, segment alanı</td><td>Katalogdaki veri yolları gerçek yapıya uymazsa çözümleyici kayıt bulamaz ve her şey onaya düşer</td><td><span class="etiket yuksek">yüksek</span></td><td>Her kanaldan birer örnek kayıt yapısı; alan sözlüğü (soru 2, 5, 6)</td></tr>
+    <tr><td>Kanal seçimi motorda sabit: başvuru her zaman Hızlı Tahsis kaynağından aranıyor; Smile+ sorgusu yazıldı ama kayıttan kanal bilgisi türetilip kullanılmıyor</td><td>Smile+ başvuruları bulunamaz ya da yanlış kanalda aranır</td><td><span class="etiket yuksek">yüksek</span></td><td>Çözüm Merkezi kaydında kanalı gösteren alan (soru 15); motorda kanal parametresinin bağlanması</td></tr>
+    <tr><td>Hızlı Tahsis ve Smile+ JSON yapıları farklı olabilir; katalog tek yapıya göre yazıldı</td><td>Aynı kural iki kanalda farklı yolla okunmalı</td><td><span class="etiket orta">orta</span></td><td>İki kanaldan örnek kayıt; gerekirse katalogda kanal bazlı yol</td></tr>
+    <tr><td>Birden çok başvurusu olan müşteri ve grup teklifi: "kayıt tarihinden önceki son başvuru" kuralı varsayım</td><td>Yanlış başvuru seçilirse cevap başka bir başvuruyu anlatır</td><td><span class="etiket orta">orta</span></td><td>Strateji ekibiyle seçim kuralının teyidi; kayıtta başvuru numarası varsa onun kullanılması</td></tr>
+    <tr><td><code>APP_POLICY_RULE_LKP</code> henüz okunmuyor; katalog açıklamaları ve sınıflandırıcının kural adları elle</td><td>Katalog genişlemesi yavaş, açıklamalar tutarsız olabilir</td><td><span class="etiket orta">orta</span></td><td>Tablonun kod ve açıklama sütunları; kataloğu besleyen küçük bir betik</td></tr>
+    <tr><td>Sorgu zaman aşımı, bağlantı yenileme ve standby gecikmesi ele alınmıyor</td><td>Kapalı bağlantıda ekran açılışı uzar; eski veri okunabilir</td><td><span class="etiket orta">orta</span></td><td>Bağlantı süresi ve yeniden bağlanma; standby gecikmesinin öğrenilmesi (soru 13)</td></tr>
+    <tr><td>Veritabanı parolaları ayar dosyasında düz metin</td><td>Kurum sunucusunda kabul edilmez</td><td><span class="etiket yuksek">yüksek</span></td><td>Gizli bilgi deposu (Secret ya da kurum kasası) ve uygulamaya özel hesap</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-2">16.2 Kural bilgisi ve katalog</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Katalogda iki kural var; en sık sorulan kuralların listesi ve her biri için veri yolu, koşul ve onaylı şablon yok</td><td>Kapsama hedefi (%70) tutmaz; kayıtların çoğu "kural bulunamadı" ile onaya düşer</td><td><span class="etiket yuksek">yüksek</span></td><td>Kayıt analiziyle sıklık listesi; strateji ekibiyle workshop (soru 7)</td></tr>
+    <tr><td>Yetki seviyesi şablonlarının tamamı ve H221'in iki dalı taslak</td><td>Bu kurallar için hiçbir taslak "otomatik" sayılmaz</td><td><span class="etiket yuksek">yüksek</span></td><td>Şablon metinlerinin ekip onayı</td></tr>
+    <tr><td>H221 ayrıntıları: durum kodlarının (1, 2) anlamı, "farklı banka" ayrımının hangi alandan yapılacağı, bankamızın kodu</td><td>Yanlış dal seçilir; cevap yanlış bankayı gösterebilir</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 5</td></tr>
+    <tr><td>"liste_kosul" türü tek liste ve tek alan koşulu destekliyor; birleşik koşul, hesaplama ya da iki listeyi birleştiren kurallar tanımlanamıyor</td><td>Bazı sık kurallar kataloğa giremez ya da yeni tür gerekir</td><td><span class="etiket orta">orta</span></td><td>MVP kural listesi çıkınca ihtiyaç duyulan türlerin belirlenmesi; türlerin eklenmesi</td></tr>
+    <tr><td>CR ve D kuralları ile ret gerekçeleri (<code>ActionCode</code>) kapsam dışı; şube bunları da soruyor</td><td>Kapsama düşer; "strateji neden ret verdi" soruları elle kalır</td><td><span class="etiket orta">orta</span></td><td>Soru 9; faz 2 kapsam kararı</td></tr>
+    <tr><td>Girdi sınıfı sorular için veri kaynağı açıklamaları yok</td><td>"KKB verisi yanlış" gibi sorular yalnız yönlendirilir</td><td><span class="etiket dusuk">düşük</span></td><td>Faz 2: veri kaynağı tablosu (kaynak sistem, güncelleme, düzeltme kanalı)</td></tr>
+    <tr><td>Katalog değişiklik süreci tanımsız: kural değişince kim bildirir, kim yeni sürüm satırı ekler, nasıl doğrulanır</td><td>Motor eski kuralla cevap yazabilir; tutarsızlık notu bunu ancak kısmen yakalar</td><td><span class="etiket orta">orta</span></td><td>Katalog sahibi ve değişiklik akışı kararı (soru 8)</td></tr>
+    <tr><td>Katalog JSON elle yazılıyor; ekip için düzenleme aracı ya da şablon yok</td><td>Katalogun ekip tarafından yönetilmesi ilkesi pratikte teknik ekibe kalır</td><td><span class="etiket orta">orta</span></td><td>Basit tablo biçiminde katalog düzenleme ve doğrulama aracı</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-3">16.3 Yetki matrisi</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Gerçek matris üretilmedi; motor sentetik matrisle çalışıyor</td><td>Yetki cevapları gerçek başvuruda tutarsızlık notuna düşer</td><td><span class="etiket yuksek">yüksek</span></td><td>Belgenin okuyucuyla işlenmesi ve örnek başvurularla doğrulama</td></tr>
+    <tr><td>Seviye numarası ile onay makamı eşlemesi, Otomatik Onay satırının numarası, para birimi, yola (<code>PATHID</code>) göre farklı matris olup olmadığı</td><td>Matris doğru okunsa bile JSON'daki seviyeyle karşılaştırma yanlış olur</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 1, 4</td></tr>
+    <tr><td>Segment alanı başvuru JSON'unda bulunamıyor; varsayılan segmentle hesap yapılıyor</td><td>Her yetki cevabı onaya düşer</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 2</td></tr>
+    <tr><td>Matrise giren ağırlıklı limit alanı varsayım (nakit teminat düşülmüş)</td><td>Yanlış alan yanlış seviye</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 3</td></tr>
+    <tr><td>Matris sürüm takibi: belge güncellenince kim yeniler, eski başvurular hangi sürümle açıklanır</td><td>Eski başvuruda bugünkü eşikle yanlış açıklama</td><td><span class="etiket orta">orta</span></td><td>Matris dosyasına geçerlilik tarihi; yenileme sorumlusu</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-4">16.4 Sınıflandırma ve dil modeli</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Anahtar kelime listeleri ve sınıf kuralları sentetik örneklerle ayarlandı; gerçek kayıtlarla kalibre edilmedi</td><td>Sınıf hataları: hata kaydı çıktı sorusu sanılır ya da tersi</td><td><span class="etiket yuksek">yüksek</span></td><td>Etiketli değerlendirme seti; sınıflandırma doğruluğu ölçümü</td></tr>
+    <tr><td>Başvuru numarası deseni yok; müşteri numarasının sekiz hane olduğu varsayım; kayıtta numara yoksa eşleme yapılamıyor</td><td>Kimlik bulunamayan her kayıt onaya düşer</td><td><span class="etiket orta">orta</span></td><td>Çözüm Merkezi kayıt alanları (soru 15); numara için zorunlu alan önerisi</td></tr>
+    <tr><td>Dil modeli ucuyla hiç denenmedi: JSON şema desteği, Türkçe kalite, gecikme, kota</td><td>Pilotta sınıflandırma ve yeniden yazım beklenmedik davranabilir; her hatada şablona dönüş var ama ölçülmedi</td><td><span class="etiket orta">orta</span></td><td>Platform ekibinden uç bilgileri (soru 18); küçük bir deneme seti</td></tr>
+    <tr><td>İstemler kodda sabit metin; sürümleme ve değişiklik kaydı yok</td><td>İstem değişince etkisi izlenemez</td><td><span class="etiket dusuk">düşük</span></td><td>İstemlerin ayrı dosyada sürümlenmesi</td></tr>
+    <tr><td>Dil modeli istem ve cevapları kaydedilmiyor</td><td>Denetim ve hata ayıklama zor; model risk gereksinimi olabilir</td><td><span class="etiket orta">orta</span></td><td>Kişisel veri içermeyen istem ve cevap logu; platform kuralı (soru 19)</td></tr>
+    <tr><td>Olgu denetimi sayı, tarih ve kodu yakalar; anlam kayması, yanlış nedensellik ve ton denetlenmez</td><td>Çok kurallı yeniden yazımda olgular doğru ama cümle yanıltıcı olabilir</td><td><span class="etiket orta">orta</span></td><td>Faz 1'de insan onayı ile telafi; pilotta düzeltme nedenlerinin izlenmesi</td></tr>
+    <tr><td>Model risk yönetimi açısından dil modeli bileşeninin sınıflandırılması yapılmadı</td><td>Kurum süreci gerektiriyorsa dağıtım gecikir</td><td><span class="etiket orta">orta</span></td><td>Soru 22</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-5">16.5 Çözüm Merkezi bağlantısı ve iş süreci</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Kayıtlar Çözüm Merkezi'nden otomatik okunmuyor; onaylı cevap kayda yazılmıyor</td><td>Pilotta kayıt listesi elle aktarılır, cevap elle yapıştırılır</td><td><span class="etiket yuksek">yüksek</span> (faz 2 için)</td><td>Soru 16; faz 1'de dışa aktarım düzeni</td></tr>
+    <tr><td>Kayıttan kanal (Hızlı Tahsis / Smile+) ve müşteri ya da başvuru numarası güvenilir biçimde çıkmıyor</td><td>Yanlış kaynakta arama ya da kimlik bulunamaması</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 15; kayıt açılışında zorunlu alanlar</td></tr>
+    <tr><td>Pilot akışı tanımsız: kim onaylar, günde kaç kez bakar, düzeltme notu nasıl yazılır</td><td>Pilot ölçümü karşılaştırılabilir olmaz</td><td><span class="etiket orta">orta</span></td><td>Soru 10; pilot çalışma kılavuzu</td></tr>
+    <tr><td>Yanlış ekibe transfer sorunu bu sistemin kapsamında değil; motor yalnız strateji ekibine düşen kayıtları görür</td><td>Kapanış süresindeki iyileşme sınırlı kalır</td><td><span class="etiket dusuk">düşük</span></td><td>Çözüm Merkezi yönlendirme kurallarının ayrıca ele alınması (soru 17)</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-6">16.6 Mimari, dağıtım ve işletim</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Servis yalnız yerel adreste, tek bilgisayarda çalışıyor; kurum sunucusu ya da OpenShift dağıtımı yok</td><td>Ekip ortak kullanamaz</td><td><span class="etiket yuksek">yüksek</span></td><td>Sunucu / OpenShift alanı; imaj ve dağıtım tanımları</td></tr>
+    <tr><td>Kimlik doğrulama ve yetkilendirme yok; ekran tek kullanıcı varsayıyor; eşzamanlı onaylarda onay dosyasında yarış olabilir</td><td>Çok kullanıcılı pilotta kararlar birbirini ezebilir; kim onayladı bilinmez</td><td><span class="etiket yuksek">yüksek</span></td><td>Kurum kimlik entegrasyonu; onay kayıtlarının veritabanına taşınması ya da kilitleme</td></tr>
+    <tr><td>Kayıtlar açılışta çözülüp bellekte tutuluyor; yeni kayıt için yeniden başlatma gerekiyor; zamanlayıcı yok</td><td>Pilotta günlük yeniden başlatma</td><td><span class="etiket orta">orta</span></td><td>Belirli aralıkla kayıt okuma ve artımlı çözme</td></tr>
+    <tr><td>Uygulama logu, izleme ve uyarı yok</td><td>Sorunlar geç fark edilir; ölçüm elle</td><td><span class="etiket orta">orta</span></td><td>Yapılandırılmış log (müşteri numarası gizlenmiş), temel sayaçlar</td></tr>
+    <tr><td>Yapılandırma ve gizli bilgi yönetimi yerel dosyada</td><td>Dağıtımda standartlara uymaz</td><td><span class="etiket orta">orta</span></td><td>ConfigMap / Secret düzeni</td></tr>
+    <tr><td>Yedekleme ve geri yükleme düzeni yok</td><td>Onay kayıtları kaybolabilir</td><td><span class="etiket dusuk">düşük</span></td><td>Günlük yedek</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-7">16.7 Güvenlik, gizlilik ve uyum</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Tarihsel kayıtların değerlendirme setinde kullanımı için KVKK değerlendirmesi yapılmadı</td><td>Değerlendirme seti kurulamaz</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 20</td></tr>
+    <tr><td>Yeni servis için bilgi güvenliği değerlendirmesi (veritabanı erişimi, dil modeline giden veri, ekran) yapılmadı</td><td>Dağıtım onayı gecikir</td><td><span class="etiket yuksek">yüksek</span></td><td>Soru 21</td></tr>
+    <tr><td>Denetim izinde karar veren kullanıcı kimliği yok; gönderilen cevabın kopyası kayıt sisteminde değil</td><td>Sorumluluk zinciri izlenemez</td><td><span class="etiket orta">orta</span></td><td>Kimlik entegrasyonu; cevabın kayda yazılması</td></tr>
+    <tr><td>Ekran ve log çıktılarında müşteri numarası maskelenmiyor</td><td>Gereksiz kişisel veri görünürlüğü</td><td><span class="etiket orta">orta</span></td><td>Maskeleme kuralı</td></tr>
+    <tr><td>Kod deposunun erişim düzeyi kurum politikasıyla gözden geçirilmedi; depoda gerçek veri yok ama tablo adları ve iç yapı bilgisi var</td><td>Bilgi sızıntısı riski</td><td><span class="etiket orta">orta</span></td><td>Depo erişiminin kurum içine sınırlanması kararı</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b16-8">16.8 Kalite, ölçüm ve teknik borç</h3>
+<table>
+  <thead><tr><th>Eksik</th><th>Etkisi</th><th>Öncelik</th><th>Ne gerekiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Değerlendirme seti ve toplu ölçüm betiği yok</td><td>Kapsama ve olgu doğruluğu ölçülemez; pilot başarı eşiği belirsiz</td><td><span class="etiket yuksek">yüksek</span></td><td>100–200 kayıt + cevaplar + başvuru JSON'ları; taslak ile cevabı yan yana koyan betik</td></tr>
+    <tr><td>Gerçek bağlantı ve uç testleri yok (Oracle, dil modeli, Excel)</td><td>Entegrasyon hataları pilotta çıkar</td><td><span class="etiket orta">orta</span></td><td>Erişimler sağlanınca entegrasyon testi</td></tr>
+    <tr><td>Uzun açıklama, Türkçe karakter varyasyonları, tarih biçimleri ve çoklu numara gibi sınır durumları gerçek kayıtlarla test edilmedi</td><td>Beklenmedik sınıflandırma hataları</td><td><span class="etiket orta">orta</span></td><td>Gerçek kayıt örnekleri</td></tr>
+    <tr><td>Kullanıcı kabul testi ve pilot ölçüm düzeni tanımsız</td><td>Pilot sonucu karara dönüşmez</td><td><span class="etiket orta">orta</span></td><td>Bölüm 14.3'ün ekip ile onaylanması</td></tr>
+  </tbody>
+</table>

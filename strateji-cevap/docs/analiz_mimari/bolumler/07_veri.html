@@ -1,0 +1,38 @@
+<h2 id="b7"><span class="no">7</span>Veri kaynakları ve erişim zinciri</h2>
+<p>Strateji motoru her başvuru için gördüğü veriyi (indata) ve ürettiği sonucu (outdata) log tablosuna JSON
+olarak yazıyor. İki kanal var ve ikisi de yalnız okunuyor.</p>
+<!--SVG:05_veri_zinciri|maxw=150|baslik=Müşteri numarasından başvurunun strateji JSON'una-->
+
+<table>
+  <thead><tr><th>Kaynak</th><th>Ne için</th><th>Nasıl ulaşılıyor</th><th>Yapılandırma</th></tr></thead>
+  <tbody>
+    <tr><td>Hızlı Tahsis <code>EVA_STRATEGY_IO_LOG</code> (edwlive)</td><td>Başvurunun strateji girdi ve çıktısı, karar kodu</td><td>Müşteri numarası → kimlik ve değerlendirme tabloları → başvuru numarası → log satırı; kayıt tarihinden önceki son başvuru</td><td><code>db.hizli_tahsis</code>, <code>db.tablolar.io_log / identity / evaluation</code>, <code>db.sutunlar.*</code></td></tr>
+    <tr><td>Smile+ <code>uwr_app_pc_log</code> (YKBARC_STANDBY)</td><td>Smile+ tekliflerinin strateji kaydı</td><td>Teklif tablosu üzerinden grup teklif numarasıyla; üye müşteriden girilen tekliflerde log grup numarasında</td><td><code>db.smile_plus</code>, <code>db.tablolar.pc_log / proposals</code></td></tr>
+    <tr><td><code>APP_POLICY_RULE_LKP</code></td><td>Kural kodlarının açıklamaları</td><td>Katalogdaki açıklama alanının kaynağı; sınıflandırıcıya kural adlarını da verir</td><td><code>db.tablolar.rule_lkp</code></td></tr>
+    <tr><td>Dosya kaynağı</td><td>Geliştirme ve testler</td><td>Klasördeki sentetik başvuru JSON'ları; aynı arayüz</td><td><code>kaynak: "dosya"</code>, <code>basvurular</code></td></tr>
+  </tbody>
+</table>
+
+<p>Veri katmanı tek bir arayüz sunuyor: müşteri numarası ve tarih ver, başvuru JSON'unu al. Ayar dosyasında
+kaynak "db" seçilmiş ama bağlantı bilgisi, sürücü ya da tablo adı eksikse motor dosya kaynağına düşer ve
+ekran bunu "kaynak: dosya" etiketiyle gösterir. Böylece bağlantı gelene kadar aynı kod sentetik veriyle
+çalışmaya devam ediyor.</p>
+
+<div class="kutu uyari"><p><b>Dikkat edilmesi gereken bir ayrıntı:</b> Sparx ekranında yalnız D ve H kuralları
+görünüyor; logdaki çıktı alanında CR gibi başka kural kümeleri de var. Şubenin sorduğu kuralla logdaki kural
+kümesi her zaman örtüşmeyebilir; motor sorulan kuralın başvuruda gerçekten çalışıp çalışmadığını kontrol
+eder, çalışmamışsa taslağı onaya düşürür ve notunu yazar.</p></div>
+
+<h3 id="b7-1">7.1 Başvuru JSON'unda kullanılan alanlar</h3>
+<table>
+  <thead><tr><th>Alan</th><th>Kullanım</th><th>Durum</th></tr></thead>
+  <tbody>
+    <tr><td><code>CIF</code>, başvuru tarihi</td><td>Kimlik ve geçerli kural sürümünün seçimi; "son 5 yıl" gibi pencerelerin referansı</td><td>Alan adları ayardan okunur; gerçek adlar doğrulanacak</td></tr>
+    <tr><td><code>Indata.CRBNotice</code> (durum, tarih, banka kodu)</td><td>H221 çözümü</td><td>Alan adları doğrulanacak; durum kodlarının anlamı teyit edilecek</td></tr>
+    <tr><td><code>Outdata.CORPCOMMMATRIXOUTPUTS</code> (nominal, ağırlıklı limit)</td><td>Yetki matrisi hesabı</td><td>Hangi ağırlıklı limitin matrise girdiği teyit edilecek</td></tr>
+    <tr><td><code>AUTHLEVELFORMATRIX</code>, <code>AUTHLEVELFORHRULES</code>, <code>APPROVALAUTHORITY</code></td><td>Motorun hesabıyla karşılaştırma (tutarlılık kontrolü)</td><td>Seviye numarası ile unvan eşlemesi netleşecek</td></tr>
+    <tr><td>Çalışan kural listesi (<code>Outdata.HRules</code> varsayımı)</td><td>Sorulan kural çalışmış mı; seviyeyi yükselten H kuralı hangisi</td><td>Gerçek yapı doğrulanacak</td></tr>
+    <tr><td>Segment alanı (<code>Outdata.SEGMENT</code> varsayımı)</td><td>Segment matrisinin seçimi</td><td>Alanın yeri belirsiz; yoksa varsayılan segmentle hesap yapılır ve kayıt onaya düşer</td></tr>
+    <tr><td><code>ActionCode</code></td><td>Ret gerekçesi (faz 2)</td><td>Okunuyor, henüz yorumlanmıyor</td></tr>
+  </tbody>
+</table>

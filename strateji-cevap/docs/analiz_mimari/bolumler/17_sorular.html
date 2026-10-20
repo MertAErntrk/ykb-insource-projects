@@ -1,0 +1,69 @@
+<h2 id="b17"><span class="no">17</span>Netleşmesi gerekenler: sorular</h2>
+<p>Aşağıdaki sorular bölüm 16'daki boşlukları kapatmak için kime, ne sorduğumuzu ve hangi biçimde cevap
+beklediğimizi tek listede toplar. Cevaplar geldikçe ayar dosyası, katalog ve matris doğrudan güncellenir.</p>
+
+<h3 id="b17-1">17.1 Strateji ekibi</h3>
+<table>
+  <thead><tr><th>#</th><th>Soru</th><th>Neden önemli</th><th>Beklenen cevap</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>AUTHLEVELFORMATRIX</code> ve <code>APPROVALAUTHORITY</code> alanlarındaki seviye numaraları matristeki onay makamlarına nasıl eşleniyor?</td><td>Motorun hesabı JSON'daki seviyeyle karşılaştırılıyor</td><td>Seviye numarası ↔ onay makamı tablosu</td></tr>
+    <tr><td>2</td><td>Müşteri segmenti strateji JSON'unda hangi alanda? JSON'da yoksa nereden alınmalı?</td><td>Segment matrisi seçimi</td><td>Alan yolu ya da kaynak tablo ve sütun</td></tr>
+    <tr><td>3</td><td>Matrise giren ağırlıklı limit nakit teminat dahil mi, hariç mi (<code>WEIGHTEDLIMWCASHCOLL</code> / <code>WEIGHTEDLIMWOCASHCOLL</code>)?</td><td>Yanlış alan yanlış seviye</td><td>Alan adı</td></tr>
+    <tr><td>4</td><td>Otomatik Onay satırının seviye numarası nedir; matris hangi para birimiyle okunmalı; yola (<code>PATHID</code>) göre farklı matris var mı?</td><td>Matris JSON'unun doğruluğu</td><td>Üç kısa cevap</td></tr>
+    <tr><td>5</td><td>CRBNotice kayıtlarında durum 1 ve 2 ne anlama geliyor; raporu alan bankanın bizden farklı olduğu hangi alandan anlaşılıyor; bankamızın kodu nedir?</td><td>H221 şablon dalı</td><td>Durum kodları tablosu, alan adı, banka kodu</td></tr>
+    <tr><td>6</td><td>Başvuruda çalışan kurallar çıktı JSON'unda hangi alanda ve hangi biçimde tutuluyor (kod, çalıştı bilgisi, seviye etkisi)?</td><td>Kural çalıştı mı kontrolü; seviyeyi yükselten H kuralının adı</td><td>Örnek yapı</td></tr>
+    <tr><td>7</td><td>Çözüm Merkezi'nde en sık sorulan kurallar hangileri; her biri için koşul (JSON'da nereye bakılıyor) ve onaylı cevap metni ne olmalı?</td><td>Katalog kapsamı</td><td>Workshop çıktısı: kural listesi, koşul, şablon</td></tr>
+    <tr><td>8</td><td>Kural değişiklikleri nasıl duyuruluyor; kataloğun sahibi ve değişiklik onayı kimde olacak?</td><td>Sürümleme ve tutarlılık</td><td>Sorumlu ve akış</td></tr>
+    <tr><td>9</td><td>Ret gerekçeleri (<code>ActionCode</code>), CR ve D kuralları kapsama alınsın mı; bunlar için hazır gerekçe metinleri var mı?</td><td>Kapsam kararı</td><td>Evet / hayır ve varsa metinler</td></tr>
+    <tr><td>10</td><td>Pilotta taslakları kim onaylayacak; "düzeltmesiz gönderim" için başarı eşiği ne olmalı?</td><td>Pilot tasarımı ve ölçüm</td><td>İsimler ve yüzde</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b17-2">17.2 BT ve veritabanı yönetimi</h3>
+<table>
+  <thead><tr><th>#</th><th>Soru</th><th>Neden önemli</th><th>Beklenen cevap</th></tr></thead>
+  <tbody>
+    <tr><td>11</td><td>edwlive ve YKBARC_STANDBY için uygulamaya özel salt okunur hesap ve DSN alabilir miyiz; Python Oracle sürücüsü kurulabilir mi?</td><td>Veritabanı kaynağının çalışması</td><td>Hesap bilgileri (güvenli kanaldan), sürücü onayı</td></tr>
+    <tr><td>12</td><td>Hızlı Tahsis kimlik ve değerlendirme tablolarının gerçek adları; müşteri no, başvuru no ve tarih sütunları; Smile+ log ve teklif tablolarının sütun adları nelerdir?</td><td>Sorguların doğru kurulması</td><td>Tablo ve sütun listesi</td></tr>
+    <tr><td>13</td><td>Standby veritabanındaki gecikme ne kadar; log tablolarında indata/outdata alanlarının boyutu ve sorgu süresi beklentisi nedir?</td><td>Güncellik ve performans</td><td>Süre ve boyut bilgileri</td></tr>
+    <tr><td>14</td><td>Log tablolarında kayıtlar ne kadar süre saklanıyor?</td><td>Eski başvuru sorularına cevap verilebilirliği</td><td>Saklama süresi</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b17-3">17.3 Çözüm Merkezi sahibi</h3>
+<table>
+  <thead><tr><th>#</th><th>Soru</th><th>Neden önemli</th><th>Beklenen cevap</th></tr></thead>
+  <tbody>
+    <tr><td>15</td><td>Kayıt alanlarında kanal (Hızlı Tahsis / Smile+) ve müşteri ya da başvuru numarası için ayrı alan var mı; yoksa eklenebilir mi?</td><td>Doğru kaynakta arama ve kimlik eşleme</td><td>Alan listesi; zorunlu alan kararı</td></tr>
+    <tr><td>16</td><td>Kayıtları okumak ve onaylı cevabı kayda yazmak için bir servis ya da arayüz var mı; yoksa düzenli dışa aktarım nasıl sağlanır?</td><td>Faz 1 çalışma düzeni, faz 2 bağlantısı</td><td>Servis tanımı ya da dışa aktarım yöntemi</td></tr>
+    <tr><td>17</td><td>Strateji kayıtlarının doğru ekibe düşmesi için yönlendirme kuralları gözden geçirilebilir mi?</td><td>Transfer sayısı ve kapanış süresi</td><td>Evet / hayır ve sahibi</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b17-4">17.4 Dil modeli platform ekibi</h3>
+<table>
+  <thead><tr><th>#</th><th>Soru</th><th>Neden önemli</th><th>Beklenen cevap</th></tr></thead>
+  <tbody>
+    <tr><td>18</td><td>Qwen 3.8 ucunun adresi, kota ve zaman aşımı; JSON şemalı (yapılandırılmış) çıktı desteği; bağlam penceresi ve servis seviyesi nedir?</td><td>Sınıflandırma ve yeniden yazımın güvenilirliği</td><td>Uç bilgileri ve limitler</td></tr>
+    <tr><td>19</td><td>İstem ve cevapların uygulama tarafında kaydedilmesi konusunda platform kuralı var mı?</td><td>Denetim izi</td><td>Kural ya da öneri</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b17-5">17.5 Bilgi güvenliği, KVKK ve model risk yönetimi</h3>
+<table>
+  <thead><tr><th>#</th><th>Soru</th><th>Neden önemli</th><th>Beklenen cevap</th></tr></thead>
+  <tbody>
+    <tr><td>20</td><td>Geçmiş Çözüm Merkezi kayıtlarının ve başvuru verilerinin değerlendirme setinde kullanılması için hangi onay gerekiyor; hangi alanlar maskelenmeli?</td><td>Değerlendirme seti</td><td>Onay ve maskeleme kuralı</td></tr>
+    <tr><td>21</td><td>Yeni servis için güvenlik değerlendirmesi hangi adımlardan geçecek (veritabanı erişimi, dil modeline giden veri, ekran kimliği)?</td><td>Dağıtım onayı</td><td>Süreç ve takvim</td></tr>
+    <tr><td>22</td><td>Dil modeli bileşeni model risk yönetimi kapsamına giriyor mu; giriyorsa hangi belgeler isteniyor?</td><td>Dağıtım onayı</td><td>Kapsam kararı ve belge listesi</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b17-6">17.6 Yönetim</h3>
+<table>
+  <thead><tr><th>#</th><th>Soru</th><th>Neden önemli</th><th>Beklenen cevap</th></tr></thead>
+  <tbody>
+    <tr><td>23</td><td>Pilot kapsamı (hangi kurallar, hangi ekip, ne kadar süre) ve faz 2'ye geçiş için karar ölçütü ne olacak?</td><td>Hedef ve kaynak planı</td><td>Kapsam ve eşikler</td></tr>
+    <tr><td>24</td><td>Sistemin kalıcı sahibi (işletim ve katalog) hangi ekip olacak?</td><td>Sürdürülebilirlik</td><td>Ekip adı</td></tr>
+  </tbody>
+</table>

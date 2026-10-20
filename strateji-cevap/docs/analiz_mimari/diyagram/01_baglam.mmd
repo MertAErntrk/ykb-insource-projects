@@ -1,0 +1,11 @@
+flowchart TB
+    S["Şube / Satış / Tahsis<br/>soruyu soran"] -->|"çağrı"| K["Çözüm Merkezi (Smile)<br/>kayıt: kanal, kategori, açıklama"]
+    K -->|"kayıt metni"| M["Strateji Cevap Motoru<br/>sınıflandırma · yorumlama · guardrail"]
+    M --> E["Onay ekranı<br/>Onayla / Düzelt / Kapsam dışı"]
+    ST["Strateji ekibi<br/>onaylar, düzeltir, kataloğu yönetir"] --> E
+    E -->|"onaylı cevap"| K
+    K -->|"cevap"| S
+    M -->|"salt okunur"| HT[("Hızlı Tahsis logu<br/>EVA_STRATEGY_IO_LOG")]
+    M -->|"salt okunur"| SP[("Smile+ logu<br/>uwr_app_pc_log")]
+    M -.->|"kural açıklaması"| RL[("APP_POLICY_RULE_LKP")]
+    M -.->|"sınıflandırma<br/>yeniden yazım"| Q["Qwen 3.8 27B<br/>vLLM · kurum içi"]

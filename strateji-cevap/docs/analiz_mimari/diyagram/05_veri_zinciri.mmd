@@ -1,0 +1,12 @@
+flowchart TB
+    subgraph HT["Hızlı Tahsis (edwlive)"]
+        direction LR
+        C1["Müşteri no"] --> I["Eva_Identity"] --> EV["Eva_Evaluation"] -->|"APPLICATION_NO"| L1[("EVA_STRATEGY_IO_LOG")]
+    end
+    subgraph SP["Smile+ (YKBARC_STANDBY)"]
+        direction LR
+        C2["Müşteri no"] --> PR["UWR_PRO_PROPOSALS"] -->|"GROUP_PROPOSAL_ID"| L2[("uwr_app_pc_log")]
+    end
+    L1 --> J["Başvuru JSON'u<br/>CIF · tarih · Indata · Outdata · ActionCode"]
+    L2 --> J
+    RL[("APP_POLICY_RULE_LKP")] -.->|"kural açıklaması"| J

@@ -1,0 +1,13 @@
+flowchart TB
+    KY["kayitlar.py<br/>Çözüm Merkezi kaydı → çağrı"] --> SN["siniflandirici.py<br/>sınıf · kural kodu · müşteri no"]
+    SN --> VR["veri.py<br/>dosya kaynağı / Oracle kaynağı"]
+    VR --> CZ["cozumleyici.py<br/>kural → olgular"]
+    CZ --> YZ["yazici.py<br/>taslak · guardrail · durum"]
+    YZ --> EK["ekran.py + ekran.html<br/>liste · detay · onay API"]
+    EK --> ON[("veri/onaylar.json<br/>ekip kararları")]
+    VR --> DB[("Oracle<br/>edwlive · YKBARC_STANDBY")]
+    CZ --> KT["katalog.py<br/>katalog/kurallar.json"]
+    CZ --> MT["matris.py<br/>yetki_matrisi.json"]
+    MX["matris_excel.py<br/>Excel → matris JSON"] -.-> MT
+    SN -.-> LLM["llm.py → Qwen 3.8<br/>isteğe bağlı"]
+    YZ -.-> LLM

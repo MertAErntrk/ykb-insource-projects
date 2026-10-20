@@ -1,0 +1,31 @@
+<h2 id="b2"><span class="no">2</span>Bugünkü durum: sorun nerede</h2>
+<p>Çözüm Merkezi'ne ayda ortalama 54 strateji kaydı düşüyor. Kayıtların yaklaşık yarısı IVR'dan, üçte birinden
+fazlası Web'den geliyor. Ekip bu kayıtların 34 kadarını kendisi kapatıyor; kalanı başka ekiplere gidiyor ve
+bir kayıt kapanana kadar ortalama altı kez el değiştiriyor. Transfer nedenleri arasında "hatalı ekibe
+transfer" üçüncü sırada. Yani sorun iki katmanlı: soruyu doğru ekibe düşürmek, sonra da cevabı her
+seferinde başvuru kaydını açıp JSON içinden kural kodu, limit ve seviye okuyarak elle yazmak.</p>
+
+<table>
+  <thead><tr><th>Adım</th><th>Bugün nasıl yapılıyor</th><th>Nerede zaman gidiyor</th></tr></thead>
+  <tbody>
+    <tr><td>Kaydı anlamak</td><td>Serbest metinden hangi müşteri, hangi başvuru ve hangi kural sorulduğu çıkarılıyor</td><td>Eksik numara ya da belirsiz soru için geri dönüş</td></tr>
+    <tr><td>Başvuruyu bulmak</td><td>Müşteri numarasından Hızlı Tahsis ya da Smile+ logunda ilgili başvuru aranıyor</td><td>İki ayrı kaynak, elle sorgu</td></tr>
+    <tr><td>Kuralı yorumlamak</td><td>JSON'daki girdi ve çıktı alanlarına bakılıp kuralın neden çalıştığı anlaşılıyor</td><td>Kural bilgisi kişiye bağlı, tutarsız yorum riski</td></tr>
+    <tr><td>Cevabı yazmak</td><td>Benzer cümleler her seferinde yeniden kuruluyor</td><td>Tekrar, ton ve içerik farklılıkları</td></tr>
+    <tr><td>Kapatmak</td><td>Cevap kayda yazılıyor; yanlış ekibe düşen kayıt transfer ediliyor</td><td>Transfer zinciri, kapanış süresi</td></tr>
+  </tbody>
+</table>
+
+<p>Cevapların çoğu şablon niteliğinde: olgular (hangi kural, hangi tarihte, hangi limitle, hangi seviye)
+başvurunun strateji log kaydında zaten duruyor; metin kalıbı da ekibin elinde. Otomatikleştirilebilir olan
+tam olarak bu: olguları veriden çekmek, kalıbı doldurmak, ekibe onaya sunmak.</p>
+
+<h3 id="b2-1">2.1 Soru tipleri</h3>
+<table>
+  <thead><tr><th>Sınıf</th><th>Örnek</th><th>Cevabın kaynağı</th><th>Bu fazda</th></tr></thead>
+  <tbody>
+    <tr><td><b>Çıktı sorusu</b></td><td>"H221 neden çalıştı?", "Yetki seviyesi neden 8?"</td><td>Başvurunun strateji JSON'u + kural kataloğu + yetki matrisi</td><td>Otomatik taslak</td></tr>
+    <tr><td><b>Girdi sorusu</b></td><td>"KKB verisi yanlış geliyor", "Bilanço eksik görünüyor"</td><td>Veri kaynağı, güncelleme tarihi, düzeltme kanalı</td><td>Yönlendirme notuyla ekibe; kural da sorulmuşsa kural cevabı</td></tr>
+    <tr><td><b>Hata bildirimi</b></td><td>"Strateji ekranı hata verdi, sonuç gelmedi"</td><td>BT / strateji destek</td><td>Yönlendirme; otomatik cevap yok</td></tr>
+  </tbody>
+</table>

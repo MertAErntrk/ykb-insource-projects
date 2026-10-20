@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant CM as Çözüm Merkezi
+    participant M as Motor
+    participant Q as Qwen 3.8
+    participant DB as Strateji logu
+    participant E as Onay ekranı
+    participant ST as Strateji ekibi
+    CM->>M: kayıt: "H221 çalışmış, neden?" + müşteri no
+    M->>M: düzenli ifade: H221, müşteri no, sınıf çıktı
+    opt sınıf belirsizse
+        M->>Q: sınıflandırma istemi (JSON şema)
+        Q-->>M: sınıf (kod ve numara metinle doğrulanır)
+    end
+    M->>DB: müşteri no → son başvuru
+    DB-->>M: indata, outdata, action_code
+    M->>M: katalog: H221 tanımı (tarihte geçerli sürüm)
+    M->>M: CRBNotice: son 5 yıl, durum 1/2, en eski kayıt
+    M->>M: şablonu doldur, kural çalışmış mı, tutarlılık
+    opt birden çok kural
+        M->>Q: şablon metinlerini tek mesaja topla
+        Q-->>M: metin (olgu denetimi, aykırıysa ret)
+    end
+    M->>E: taslak + olgular + durum + notlar
+    ST->>E: Onayla / Düzelt / Kapsam dışı
+    E->>CM: onaylı cevap

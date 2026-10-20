@@ -1,0 +1,19 @@
+<h2 id="b13"><span class="no">13</span>Dağıtım ve işletim</h2>
+<p>Bugün motor ve ekran geliştirme düzeninde, tek bilgisayarda ve yalnız yerel adreste çalışıyor. Hedef düzen,
+ekibin tarayıcıdan kurum kimliğiyle eriştiği, kurum içi sunucuda ya da OpenShift'te çalışan tek bir servis.
+Dil modeli ve veritabanları zaten kurum içinde; servis onlara kurum ağından bağlanır.</p>
+<!--SVG:10_dagitim|maxw=165|baslik=Hedef dağıtım düzeni-->
+
+<table>
+  <thead><tr><th>Konu</th><th>Hedef düzen</th></tr></thead>
+  <tbody>
+    <tr><td>Çalışma biçimi</td><td>Tek servis: motor + ekran. Kayıtlar belirli aralıkla Çözüm Merkezi'nden okunur (faz 1'de dışa aktarılmış liste, faz 2'de bağlantı); her kayıt için taslak üretilir ve saklanır.</td></tr>
+    <tr><td>Yapılandırma</td><td>Ayar dosyası ConfigMap'te; DB parolaları ve model adresi Secret'ta; matris dosyası ve onaylar kalıcı diskte.</td></tr>
+    <tr><td>Kimlik</td><td>Kurum kimlik sağlayıcısıyla giriş; onay düğmeleri yetkili role açık.</td></tr>
+    <tr><td>Loglama</td><td>Her kayıt için: sınıf, kurallar, kaynak, durum, notlar, model çağrısı yapıldı mı, süre. Müşteri numarası log satırında maskelenir.</td></tr>
+    <tr><td>İzleme</td><td>Günlük kayıt sayısı, otomatik / onaya gitti oranı, model hata oranı, DB sorgu süresi; eşik aşımında uyarı.</td></tr>
+    <tr><td>Yedekleme</td><td>Onay dosyası ve logların günlük yedeği; matris ve katalog sürümleri depoda.</td></tr>
+    <tr><td>Sürüm ve dağıtım</td><td>Depodan imaj; katalog ve kod ayrı sürümlenir; her dağıtımda testler çalışır (bugün Linux ve Windows üzerinde CI var).</td></tr>
+    <tr><td>Kapasite</td><td>Aylık birkaç yüz kayıt; tek örnek yeterli. Veritabanı sorgusu kayıt başına bir kez.</td></tr>
+  </tbody>
+</table>

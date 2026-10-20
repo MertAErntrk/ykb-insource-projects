@@ -1,0 +1,29 @@
+<h2 id="b14"><span class="no">14</span>Kalite güvencesi ve ölçüm</h2>
+<h3 id="b14-1">14.1 Otomatik testler</h3>
+<p>130 test var ve hiçbiri dil modeli, ağ ya da veritabanı gerektirmiyor. Katalog doğrulaması, H221'in dalları ve
+tarih penceresi sınırları, segmentli matris ve tavan kuralı, tutarsızlık notları, sınıflandırıcının kod ve
+numara kuralları, dil modeli çıktısının olgu denetimi, dosya ve veritabanı kaynak seçimi, onay ekranının
+API'si ve on beş sentetik Çözüm Merkezi kaydının uçtan uca beklenen sınıf ve duruma ulaşması test ediliyor.
+Testler her gönderimde Linux (Python 3.11) ve Windows (Python 3.9) üzerinde çalışıyor.</p>
+
+<h3 id="b14-2">14.2 Değerlendirme seti ve ölçütler</h3>
+<p>Gerçek kalite ancak gerçek kayıtlarla ölçülür. Değerlendirme seti Çözüm Merkezi kayıtlarından çıkacak: en sık
+sorulan kurallardan örneklenmiş 100–200 kayıt, ekibin verdiği cevapla motorun taslağı yan yana. Her kayıt
+için başvurunun strateji JSON'u gerekiyor.</p>
+<table>
+  <thead><tr><th>Ölçüt</th><th>Tanım</th><th>Hedef</th><th>Nasıl ölçülür</th></tr></thead>
+  <tbody>
+    <tr><td>Kapsama</td><td>Motorun bir kurala ya da konuya eşleyebildiği kayıt oranı</td><td>En az %70</td><td>Değerlendirme setinde otomatik</td></tr>
+    <tr><td>Olgu doğruluğu</td><td>Taslaktaki tarih, tutar, seviye ve kural kodunun ekibin cevabıyla aynı olması</td><td>En az %95 (kapsanan kayıtlarda)</td><td>Kodla token karşılaştırması + örnekleme</td></tr>
+    <tr><td>Sınıflandırma doğruluğu</td><td>Sınıf ve kural kodunun ekibin etiketiyle aynı olması</td><td>En az %90</td><td>Etiketli set</td></tr>
+    <tr><td>Düzeltmesiz gönderim</td><td>Pilotta ekibin hiç değiştirmeden onayladığı taslak oranı</td><td>%60 civarı; workshop'ta netleşecek</td><td>Onay kayıtlarından</td></tr>
+    <tr><td>İnceleme oranı ve nedenleri</td><td>"Onaya gitti" oranı ve not dağılımı</td><td>İzlenir; nedenler kataloğu büyütür</td><td>Onay kayıtlarından</td></tr>
+    <tr><td>Süre ve transfer</td><td>Kayıt başına ekibin süresi; transfer sayısı; kapanış süresi</td><td>Önce / sonra karşılaştırması</td><td>Çözüm Merkezi raporları</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b14-3">14.3 Pilot tasarımı</h3>
+<p>Pilotta motor gelen kayıtlar için taslak üretir, ekipten iki kişi ekrandan onaylar ya da düzeltir. Üç hafta
+boyunca her kaydın durumu, düzeltme notu ve süresi kaydedilir. Haftalık gözden geçirmede en çok düzeltilen
+şablonlar ve "onaya gitti" nedenleri ele alınır; katalog ve anahtar kelime listeleri güncellenir. Pilot sonunda
+ölçüt tablosu doldurulur ve faz 2 kararı için sunulur.</p>

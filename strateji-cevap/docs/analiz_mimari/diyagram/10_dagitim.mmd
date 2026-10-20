@@ -1,0 +1,12 @@
+flowchart TB
+    ST["Strateji ekibi<br/>tarayıcı · kurum kimliği"] --> POD
+    subgraph OS["Kurum içi sunucu / OpenShift"]
+        POD["motor + ekran servisi<br/>Deployment · Route"]
+        CFG["ConfigMap / Secret<br/>ayarlar · parolalar"]
+        PVC[("kalıcı disk<br/>onaylar · matris · loglar")]
+    end
+    POD --> CFG
+    POD --> PVC
+    POD -.-> VLLM["LLM platformu<br/>vLLM · Qwen 3.8 (http)"]
+    POD --> ORA[("Oracle strateji logları<br/>salt okunur")]
+    POD --> SM["Çözüm Merkezi<br/>oku · faz 2: cevap yaz"]

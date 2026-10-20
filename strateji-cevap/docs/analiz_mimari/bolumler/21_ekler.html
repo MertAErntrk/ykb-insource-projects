@@ -1,0 +1,77 @@
+<h2 id="ekA">Ek A. Sözlük</h2>
+<table>
+  <thead><tr><th>Terim</th><th>Anlamı</th></tr></thead>
+  <tbody>
+    <tr><td>Strateji</td><td>Kurumsal ve ticari kredi başvurularını kurallarla değerlendiren karar motoru ve kural seti</td></tr>
+    <tr><td>Indata / Outdata</td><td>Strateji motorunun bir başvuru için gördüğü girdi ve ürettiği çıktı; log tablosunda JSON</td></tr>
+    <tr><td>H kuralı, D kuralı, CR kuralı</td><td>Strateji kural kümeleri; Sparx ekranında D ve H görünür, CR yalnız çıktıda</td></tr>
+    <tr><td>H221</td><td>Ticari KKB bildirimine göre bağımsız denetim raporu isteyen kural</td></tr>
+    <tr><td>Onay yetki seviyesi</td><td>Başvuruyu onaylamaya yetkili makamın seviyesi; matris ve H kurallarının büyüğü</td></tr>
+    <tr><td>Yetki matrisi</td><td>Segment, nominal ve ağırlıklı limit eşiklerine göre onay makamını veren tablo</td></tr>
+    <tr><td>Tavan kuralı</td><td>Nominal limit belirli eşiğin altındaysa seviyenin belirli bir makamı geçmemesi</td></tr>
+    <tr><td>Çözüm Merkezi (Smile)</td><td>Şube ve satış ekiplerinin kayıt açtığı destek sistemi</td></tr>
+    <tr><td>Hızlı Tahsis, Smile+</td><td>Başvuruların geldiği iki kanal; ayrı log tabloları</td></tr>
+    <tr><td>Katalog</td><td>Kural tanımları, şablonlar, onay durumu ve geçerlilik tarihlerini tutan JSON dosyası</td></tr>
+    <tr><td>Şablon</td><td>Olgu alanlarıyla yazılmış cevap kalıbı; onaylı ya da taslak</td></tr>
+    <tr><td>Guardrail</td><td>Dil modeli çıktısının ve taslağın olgu, dil ve tutarlılık denetimi</td></tr>
+    <tr><td>Qwen 3.8 / vLLM</td><td>Kurum içinde çalışan dil modeli ve onu sunan servis; OpenAI uyumlu uç nokta</td></tr>
+    <tr><td>Taslak durumu</td><td>otomatik, onaya gitti, gönderildi, düzeltildi, kapsam dışı</td></tr>
+  </tbody>
+</table>
+
+<h2 id="ekB">Ek B. Yapılandırma alanları</h2>
+<table>
+  <thead><tr><th>Alan</th><th>Anlamı</th><th>Kim doldurur</th></tr></thead>
+  <tbody>
+    <tr><td><code>route</code>, <code>model</code>, <code>ca_bundle</code>, <code>zaman_asimi</code></td><td>Dil modeli adresi, model adı, TLS sertifikası, zaman aşımı</td><td>LLM platform ekibi / proje ekibi</td></tr>
+    <tr><td><code>kaynak</code></td><td><code>dosya</code> ya da <code>db</code></td><td>Proje ekibi</td></tr>
+    <tr><td><code>db.hizli_tahsis</code>, <code>db.smile_plus</code></td><td>DSN, kullanıcı, parola</td><td>BT / DBA</td></tr>
+    <tr><td><code>db.tablolar.*</code></td><td>Log, kimlik, değerlendirme, teklif ve kural açıklama tabloları</td><td>BT; kimlik ve değerlendirme adları boş</td></tr>
+    <tr><td><code>db.sutunlar.*</code></td><td>Müşteri no, başvuru no, tarih, indata, outdata, action_code sütunları</td><td>BT; müşteri no, başvuru no ve tarih boş</td></tr>
+    <tr><td><code>cif_yolu</code>, <code>tarih_yolu</code>, <code>h_kurallari_yolu</code></td><td>Başvuru JSON'unda müşteri no, tarih ve çalışan kural listesi yolları</td><td>Strateji ekibi (JSON yapısı)</td></tr>
+    <tr><td><code>kendi_banka_kodu</code></td><td>KKB kayıtlarında bankamızın kodu</td><td>Strateji ekibi</td></tr>
+    <tr><td><code>matris_dosya</code>, <code>varsayilan_segment</code>, <code>unvan_seviye</code></td><td>Excel'den üretilen matris; segment yoksa varsayılan; unvan-seviye eşlemesi</td><td>Strateji ekibi</td></tr>
+    <tr><td><code>kayitlar_dosya</code>, <code>onaylar_dosya</code>, <code>ekran_port</code></td><td>Çözüm Merkezi kayıt listesi, onay kayıtları, ekran portu</td><td>Proje ekibi</td></tr>
+  </tbody>
+</table>
+
+<h2 id="ekC">Ek C. Katalog kaydı örneği (H221, kısaltılmış)</h2>
+<pre>{
+  "kod": "H221",
+  "ad": "Bağımsız denetim raporu (ticari KKB kaydı)",
+  "sinif": "cikti",
+  "gecerlilik": {"baslangic": "2020-01-01", "bitis": null},
+  "cozum": {
+    "tur": "liste_kosul",
+    "liste": "Indata.CRBNotice",
+    "kosul": {"alan": "Status", "degerler": [1, 2]},
+    "tarih_alani": "NoticeDate", "pencere_yil": 5, "secim": "en_eski",
+    "banka_alani": "BankCode"
+  },
+  "sablonlar": {
+    "baska_banka": {"metin": "Merhaba, \"{cif}\" numaralı müşterinin ticari KKB kayıtlarına göre ilk olarak {ay_yil} tarihli ...", "onay": "strateji ekibi, 2026-10"},
+    "kendi_banka": {"metin": "...", "onay": "taslak"},
+    "kayit_yok":   {"metin": "...", "onay": "taslak"}
+  },
+  "anahtar_kelimeler": ["bağımsız denetim", "denetim raporu"]
+}</pre>
+
+<h2 id="ekD">Ek D. Onay ekranı API'si</h2>
+<table>
+  <thead><tr><th>Uç</th><th>İş</th><th>Dönen</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /api/kayitlar</code></td><td>Kayıt listesi; önce onaya gidenler</td><td>kayıt no, tarih, kanal, kategori, sınıf, kurallar, durum</td></tr>
+    <tr><td><code>GET /api/kayit/&lt;no&gt;</code></td><td>Kayıt detayı</td><td>kayıt, çağrı, taslak (metin, olgular, notlar), durum, onay, kaynak</td></tr>
+    <tr><td><code>POST /api/kayit/&lt;no&gt;/onayla</code></td><td>Taslağı (ya da verilen metni) onayla</td><td>durum: gonderildi</td></tr>
+    <tr><td><code>POST /api/kayit/&lt;no&gt;/duzelt</code></td><td>Düzeltilmiş metin ve not kaydet</td><td>durum: duzeltildi</td></tr>
+    <tr><td><code>POST /api/kayit/&lt;no&gt;/kapsam_disi</code></td><td>Kapsam dışı işaretle</td><td>durum: kapsam_disi</td></tr>
+  </tbody>
+</table>
+
+<h2 id="ekE">Ek E. Komutlar</h2>
+<pre>python motor.py --cagri ornekler/cagrilar/h221.json [--config config.json] [--llm] [--json]
+python ekran.py [--config config.json] [--port 8765]
+python matris_excel.py --excel &lt;yetki-excel&gt;.xlsx --cikti veri/yetki_matrisi.json
+python matris_excel.py --excel &lt;yetki-excel&gt;.xlsx --dogrula nominal=... agirlikli=... segment=... beklenen=...
+python analiz_smile.py &lt;kayit-listesi&gt;.xlsx --rapor veri/analiz.md
+python -m pytest tests -q</pre>

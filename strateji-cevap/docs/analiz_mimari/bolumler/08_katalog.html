@@ -1,0 +1,33 @@
+<h2 id="b8"><span class="no">8</span>Kural kataloğu ve yorumlama</h2>
+<p>Katalog, projenin iş tarafındaki ana ürünü. Her kural için üç şey yazılı: veride nereye bakılacak, hangi koşul
+süzülecek, hangi şablon doldurulacak. Katalog değişince kod değişmez; kural geçerlilik tarihleriyle
+sürümlenir ve başvurunun tarihinde geçerli sürüm kullanılır. Böylece geçen yılki bir başvuru bugünkü kuralla
+yanlış açıklanmaz.</p>
+<!--SVG:07_katalog|maxw=120|baslik=Katalog ve yetki matrisi veri modeli-->
+
+<h3 id="b8-1">8.1 Çözüm türleri</h3>
+<table>
+  <thead><tr><th>Tür</th><th>Ne yapar</th><th>Örnek</th><th>Sınır</th></tr></thead>
+  <tbody>
+    <tr><td><b>liste_kosul</b></td><td>JSON'daki bir listede koşulu sağlayan ve tarih penceresine düşen kayıtları bulur; en eski ya da en yeni kaydın olgularını çıkarır; banka alanına göre şablon dalı seçer</td><td>H221: CRBNotice, durum 1/2, son 5 yıl, en eski kayıt</td><td>Tek liste, tek alan koşulu; iki listeyi birleştiren ya da hesap gerektiren kurallar için yeni tür gerekir</td></tr>
+    <tr><td><b>yetki_matrisi</b></td><td>Nominal ve ağırlıklı limiti segment matrisinden geçirir, tavanı uygular, H kurallarıyla birleştirir, JSON'daki seviyelerle karşılaştırır</td><td>Onay yetki seviyesi sorusu</td><td>Segment alanı ve seviye-unvan eşlemesi doğrulanmalı</td></tr>
+    <tr><td><b>sabit</b></td><td>Yalnız kural açıklamasını yazar</td><td>Ek veri gerektirmeyen kurallar</td><td>Olgu içermez; açıklamanın doğruluğu kataloğa bağlı</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b8-2">8.2 Şablonlar ve onay</h3>
+<p>Her şablonun bir onay alanı var. "Taslak" olan şablonla üretilen cevap otomatik sayılmaz, ekrana "onaya gitti"
+olarak düşer. Bugün H221'in "farklı banka" dalı ekibin verdiği örnek cevapla onaylı; H221'in diğer dalları ve
+yetki seviyesi şablonlarının tamamı taslak. Şablon metinleri alan adlarıyla yazılır ({cif}, {ay_yil},
+{nominal}, {segment} gibi); doldurulamayan bir alan varsa cevap üretilmez ve not düşülür.</p>
+
+<h3 id="b8-3">8.3 Sahiplik ve değişiklik</h3>
+<ul>
+  <li>Katalog strateji ekibinindir; teknik ekip biçimi korur ve bozuk kataloğu yükletmeyen doğrulamayı çalıştırır.</li>
+  <li>Kural değişince eski satır silinmez: bitiş tarihi yazılır, aynı kodla yeni satır eklenir.</li>
+  <li>Kural açıklamalarının kaynağı <code>APP_POLICY_RULE_LKP</code>; katalogdaki açıklama alanı bu tablodan beslenecek.</li>
+  <li>Ekibin düzelttiği her taslak hangi şablonun eksik olduğunu gösterir; en çok düzeltilen şablon katalogda gözden geçirilir.</li>
+</ul>
+<div class="kutu"><p>Bugün katalogda iki kural var. Çözüm Merkezi kayıtlarının çoğunu kapsamak için en sık sorulan
+kuralların listesi, her birinin veri yolu ve koşulu ve onaylı şablonları strateji ekibiyle yapılacak çalışmada
+çıkarılacak (bölüm 16 ve 17).</p></div>

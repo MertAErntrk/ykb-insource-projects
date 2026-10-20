@@ -1,0 +1,6 @@
+flowchart TB
+    K["Katalog<br/>sürüm · varsayılan kapanış"] --> R["Kural<br/>kod · ad · sınıf · açıklama<br/>geçerlilik: başlangıç, bitiş · anahtar kelimeler"]
+    R --> C["Çözüm<br/>tür: liste_kosul / yetki_matrisi / sabit<br/>veri yolu · koşul · tarih penceresi · seçim · banka alanı"]
+    R --> S["Şablonlar<br/>ad · metin: {cif}, {ay_yil}, {nominal} …<br/>onay: taslak / onaylı (kim, ne zaman)"]
+    C -.->|"yetki_matrisi türü"| M["Yetki matrisi<br/>sürüm · para birimi · unvan ↔ seviye<br/>segment başına satırlar"]
+    M --> T["Satır<br/>sıra · unvan · seviye<br/>nominal / ağırlıklı üst sınır · koşul · tavan"]

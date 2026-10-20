@@ -1,0 +1,26 @@
+<h2 id="b11"><span class="no">11</span>Onay ekranı ve durum modeli</h2>
+<p>Ekip ayrı bir araç öğrenmesin diye ekran tek sayfa: solda Çözüm Merkezi'nden gelen kayıtlar, sağda tıklanan
+kaydın sorusu, taslak, olgular, notlar ve üç düğme. Liste önce onaya düşenleri gösterir. Her karar kayıt
+numarası, zaman ve motorun ilk durumuyla birlikte saklanır; ekran yeniden açılınca durumlar korunur.</p>
+<!--SVG:09_durum|maxw=135|baslik=Bir kaydın durumları-->
+
+<table>
+  <thead><tr><th>Durum</th><th>Anlamı</th><th>Kim verir</th></tr></thead>
+  <tbody>
+    <tr><td><code>otomatik</code></td><td>Motor onaylı şablonla, tutarsızlık görmeden üretti</td><td>Motor</td></tr>
+    <tr><td><code>onaya_gitti</code></td><td>Motor inceleme istedi: taslak şablon, veri tutarsızlığı, çalışmamış kural, hata ya da girdi sınıfı, başvuru bulunamadı</td><td>Motor</td></tr>
+    <tr><td><code>gonderildi</code></td><td>Ekip taslağı onayladı</td><td>Ekip</td></tr>
+    <tr><td><code>duzeltildi</code></td><td>Ekip metni düzeltti; düzeltilmiş metin ve not saklandı</td><td>Ekip</td></tr>
+    <tr><td><code>kapsam_disi</code></td><td>Ekip kaydı kapsam dışı işaretledi; sınıflandırıcıya örnek olur</td><td>Ekip</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b11-1">11.1 Ekranın bugünkü hali</h3>
+<ul>
+  <li>Sunucu standart kütüphaneyle çalışır ve yalnız yerel adresi dinler; kayıtlar açılışta motordan geçirilip bellekte tutulur.</li>
+  <li>API: kayıt listesi, kayıt detayı, Onayla / Düzelt / Kapsam dışı. İstek gövdesi yalnız JSON kabul edilir; alan adı doğrulaması, boyut sınırı ve yerel olmayan isteklerin reddi var.</li>
+  <li>Kararlar onay dosyasına atomik yazılır; yazma başarısızsa bellek değişmez ve hata döner.</li>
+  <li>Düzeltmeler iki işe yarar: hangi şablonun eksik olduğunu gösterir ve faz 2'de otomatik gönderim eşiğini belirlerken gerçek bir ölçüm sağlar.</li>
+</ul>
+<p>Çok kullanıcılı çalışma, kimlik doğrulama ve Çözüm Merkezi'ne geri yazma henüz yok; bunlar hedef dağıtımın
+parçası olarak bölüm 13 ve 16'da ele alınıyor.</p>

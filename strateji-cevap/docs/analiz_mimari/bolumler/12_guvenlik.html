@@ -1,0 +1,17 @@
+<h2 id="b12"><span class="no">12</span>Güvenlik, gizlilik ve denetim izi</h2>
+<table>
+  <thead><tr><th>Konu</th><th>Bugün</th><th>Hedef</th></tr></thead>
+  <tbody>
+    <tr><td>Müşteri verisinin yeri</td><td>Gerçek başvuru kayıtları, yetki matrisi ve Çözüm Merkezi kayıtları kod deposuna girmez; depoda yalnız kod, sentetik örnekler ve belgeler var</td><td>Aynı; gerçek veri yalnız kurum içi sunucuda</td></tr>
+    <tr><td>Dil modeline giden veri</td><td>Kayıt metni (sınıf için) ve şablon cümleleri (yeniden yazım için); başvuru JSON'u modele gitmez</td><td>Aynı; istem ve cevaplar denetim için kaydedilir</td></tr>
+    <tr><td>Cevaptaki kişisel veri</td><td>Yalnız müşteri numarası; ad ya da unvan geçmez</td><td>Aynı; gerekirse numaranın da maskelenmesi</td></tr>
+    <tr><td>Veritabanı erişimi</td><td>Salt okunur; sorgu metnindeki tablo ve sütun adları ayar dosyasından okunur ve ad biçimi doğrulanır; değerler bağlı parametreyle gider</td><td>Uygulamaya özel salt okunur hesap; parolalar gizli bilgi deposunda</td></tr>
+    <tr><td>Ekran erişimi</td><td>Yalnız yerel adres; yerel olmayan istekler reddedilir</td><td>Kurum kimliğiyle giriş; rol bazlı yetki (kim onaylayabilir)</td></tr>
+    <tr><td>Denetim izi</td><td>Her onay, düzeltme ve kapsam dışı kararı kayıt numarası, zaman ve motorun ilk durumuyla dosyada</td><td>Karar veren kullanıcı kimliği; değiştirilemez log; gönderilen cevabın kopyası</td></tr>
+    <tr><td>Yapılandırma ve gizli bilgi</td><td>Ayar dosyası depo dışı; DB bağlantı bilgileri bu dosyada</td><td>Parolalar ayrı gizli bilgi yönetiminde (OpenShift Secret ya da kurum kasası)</td></tr>
+    <tr><td>Uyum</td><td>KVKK, bilgi güvenliği ve model risk yönetimi görüşmeleri başlamadı</td><td>Pilot öncesi onaylar; bölüm 17 ve 18</td></tr>
+  </tbody>
+</table>
+<p>Sorumluluk zinciri açık olmalı: taslağı motor üretir, cevabı ekipten bir kişi onaylar, kayda yazan odur.
+Faz 2'de otomatik gönderim düşünülürse bu zincir yeniden tanımlanacak ve ölçüm sonuçlarıyla birlikte karara
+sunulacak.</p>

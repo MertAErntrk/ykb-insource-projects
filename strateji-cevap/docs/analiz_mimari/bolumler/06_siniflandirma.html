@@ -1,0 +1,18 @@
+<h2 id="b6"><span class="no">6</span>Kayıt sınıflandırma</h2>
+<p>Sınıflandırıcının üç işi var: kaydın sınıfını belirlemek, sorulan kural kodlarını bulmak ve müşteri
+numarasını çıkarmak. Üçü de önce deterministik yapılır; dil modeli yalnız sınıf belirsiz kaldığında
+devreye girer ve bulduğu kod ya da numara metinde yoksa kabul edilmez.</p>
+
+<table>
+  <thead><tr><th>Çıkarım</th><th>Yöntem</th><th>Sınır ve varsayım</th></tr></thead>
+  <tbody>
+    <tr><td>Kural kodu</td><td>Düzenli ifade: bir ya da iki harf + üç rakam (H221, H 221, H-221 aynı sayılır); katalogdaki anahtar kelimeler ("yetki seviyesi", "bağımsız denetim") kodu yazılmamış soruyu konuya eşler</td><td>Katalogda olmayan ve H ile başlamayan kodlar atılır; CR ve D kuralları katalog genişleyince kapsanır</td></tr>
+    <tr><td>Müşteri numarası</td><td>Sekiz haneli, başka rakamla bitişik olmayan sayı</td><td>Numara biçimi varsayım; başvuru numarası deseni Çözüm Merkezi alanları netleşince eklenecek</td></tr>
+    <tr><td>Sınıf</td><td>Anahtar kelime puanı: hata ("hata", "çalışmıyor", "sonuç gelmedi"), girdi ("KKB", "bilanço", "yanlış geliyor"), çıktı ("neden", "kural", "yetki", "limit"); kural kodu varsa çıktı ağırlık kazanır</td><td>Kelime listeleri sentetik örneklerle ayarlandı; gerçek kayıtlarla kalibre edilmeli</td></tr>
+    <tr><td>Dil modeliyle zenginleştirme</td><td>JSON şemalı istem: sınıf, kodlar, numaralar; sıcaklık 0, düşünme kapalı</td><td>Modelin önerdiği sınıf alınır; kod ancak metinde ya da katalogda varsa, numara ancak metinde geçiyorsa eklenir</td></tr>
+  </tbody>
+</table>
+
+<p>Kayıt birden çok müşteri numarası içeriyorsa ilki alınır ve uyarı notu düşülür; kural kodu ya da bilinen
+konu bulunamazsa kayıt doğrudan onaya gider. Girdi sınıfı bir kayıtta kural da sorulmuşsa kural cevabı
+üretilir, veri kaynağı açıklaması bu fazda verilmez.</p>

@@ -1,0 +1,15 @@
+flowchart TB
+    S["Segment<br/>JSON'dan, yoksa varsayılan ve not"] --> MX
+    N["Nominal limit"] --> SN["segment satırlarında<br/>koşulu sağlayan ilk uyan satır"]
+    W["Ağırlıklı limit"] --> SW["segment satırlarında<br/>ilk uyan satır"]
+    SN --> MX["büyük olan seviye"]
+    SW --> MX
+    MX --> T{"tavan satırı<br/>koşulu sağlıyor mu?"}
+    T -->|"evet"| TV["seviye tavana çekilir"]
+    T -->|"hayır"| MS
+    TV --> MS["matris seviyesi<br/>AUTHLEVELFORMATRIX ile karşılaştırılır"]
+    HR["H kuralları seviyesi<br/>AUTHLEVELFORHRULES"] --> F
+    MS --> F["büyük olan → nihai seviye<br/>APPROVALAUTHORITY ile karşılaştırılır"]
+    F --> U{"tutarlı mı?"}
+    U -->|"evet"| OK["şablon: matris / tavan / H kuralı"]
+    U -->|"hayır"| INC["onaya gider, not düşer"]

@@ -1,0 +1,38 @@
+<h2 id="b3"><span class="no">3</span>Hedef, kapsam ve ilkeler</h2>
+<p>Hedef, 2027 planlama dönemine kadar Çözüm Merkezi'ne düşen strateji kayıtlarının büyük kısmı için
+onaya hazır cevap taslağı üreten, ekibin tek ekrandan onaylayıp düzelttiği, ölçülebilir bir prototip. Faz 1'in
+sınırı bilinçli olarak dar: cevabı şubeye kendiliğinden göndermiyoruz, önce taslakların ne kadar tutturduğunu
+görmek istiyoruz.</p>
+
+<table>
+  <thead><tr><th></th><th>Faz 1: prototip ve pilot</th><th>Faz 2 ve sonrası</th></tr></thead>
+  <tbody>
+    <tr><td>Girdi</td><td>Çözüm Merkezi kaydı: açıklama, kanal, kategori, müşteri ya da başvuru numarası</td><td>Aynı; kayıt Smile'dan otomatik okunur</td></tr>
+    <tr><td>Çıktı</td><td>Cevap taslağı + olgular + durum (otomatik / onaya gitti) + gerekçe notları</td><td>Onaylı cevabın kayda otomatik yazılması; güven eşiğine göre otomatik gönderim</td></tr>
+    <tr><td>Soru sınıfları</td><td>Çıktı soruları tam; girdi ve hata sınıfı yalnız yönlendirme</td><td>Girdi soruları için veri kaynağı açıklamaları</td></tr>
+    <tr><td>Kural kapsamı</td><td>En sık sorulan kurallar (hedef: kayıtların en az %70'i)</td><td>Katalog genişler; CR ve D kuralları, ret gerekçeleri</td></tr>
+    <tr><td>Onay</td><td>İnsan onayı zorunlu; düzeltmeler kaydedilir</td><td>Düzeltme oranına göre otomatik gönderim kararı</td></tr>
+    <tr><td>Arayüz</td><td>Tek sayfalık onay ekranı (liste, detay, Onayla / Düzelt / Kapsam dışı)</td><td>Çözüm Merkezi içine gömülü akış</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b3-1">3.1 Tasarım ilkeleri</h3>
+<ol>
+  <li><b>Olgular koddan gelir.</b> Taslaktaki her tarih, tutar, seviye ve kural kodu ya başvurunun strateji
+  JSON'undan ya kataloğdan ya da matristen gelir. Dil modeli olgu üretmez; ürettiği metin olgu kümesiyle
+  karşılaştırılır, uyuşmazsa atılır.</li>
+  <li><b>Katalog ekibindir.</b> Kuralın neye baktığı, hangi koşulun süzüldüğü ve hangi şablonun yazıldığı
+  katalog dosyasında durur; kural değişince kod değil katalog değişir. Onaysız şablonla üretilen cevap
+  otomatik sayılmaz.</li>
+  <li><b>Şüphe varsa insan görür.</b> Sorulan kural başvuruda çalışmamışsa, matris hesabı JSON'daki seviyeyle
+  tutmuyorsa, segment bilinmiyorsa ya da şablon taslak durumundaysa kayıt incelemeye düşer ve gerekçesi yazılır.</li>
+  <li><b>Dil modeli olmadan da çalışır.</b> Model kapalıysa aynı cevaplar şablonla üretilir; yalnız çok kurallı
+  cevaplar daha kuru olur. Motor ve ekran standart Python kütüphanesiyle çalışır; dış bağımlılık yalnız
+  isteğe bağlı parçalarda.</li>
+  <li><b>Müşteri verisi kurum dışına çıkmaz.</b> Dil modeli kurum içinde çalışır; cevaplarda yalnız müşteri numarası
+  geçer, ad geçmez; gerçek veri kod deposuna girmez.</li>
+</ol>
+
+<h3 id="b3-2">3.2 Kapsam dışı</h3>
+<p>Girdi verisini düzeltmek, kural değişikliği önermek, kredi kararını değiştirmek ve strateji dışı konular
+her fazda kapsam dışı. Motor hiçbir strateji tablosuna yazmaz; yalnız okur.</p>

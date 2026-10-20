@@ -1,0 +1,43 @@
+<h2 id="b4"><span class="no">4</span>Mimari genel bakış</h2>
+<p>Sistem üç halkadan oluşuyor: Çözüm Merkezi'nden gelen kayıt, kaydı cevap taslağına çeviren motor ve
+taslağı ekibin önüne koyan onay ekranı. Motor, başvurunun strateji çıktısını iki kaynaktan (Hızlı Tahsis
+ve Smile+ logları) salt okunur çeker; kural bilgisini kendi kataloğundan ve yetki matrisinden alır; dil
+modelini kurum içi platformdan isteğe bağlı kullanır.</p>
+<!--SVG:01_baglam|maxw=150|baslik=Bağlam: sistemin çevresiyle ilişkisi-->
+
+<h3 id="b4-1">4.1 Bileşenler</h3>
+<p>Her bileşen tek bir Python dosyasına karşılık geliyor; biri değişince diğerleri etkilenmiyor. Motor ve
+ekran standart kütüphaneyle çalışıyor; Oracle sürücüsü yalnız veritabanı kaynağı seçildiğinde, dil modeli
+istemcisi yalnız model açıkken, Excel okuyucu yalnız matris üretilirken yükleniyor.</p>
+<!--SVG:02_bilesenler|maxw=150|baslik=Bileşenler ve aralarındaki veri akışı-->
+
+<table>
+  <thead><tr><th>Bileşen</th><th>Görev</th><th>Girdi → Çıktı</th><th>Dil modeli</th></tr></thead>
+  <tbody>
+    <tr><td><code>kayitlar.py</code></td><td>Çözüm Merkezi kaydını motorun çağrı biçimine çevirir</td><td>Kayıt (numara, tarih, kanal, kategori, açıklama) → çağrı</td><td>Hayır</td></tr>
+    <tr><td><code>siniflandirici.py</code></td><td>Sınıf, kural kodları, müşteri numarası</td><td>Metin → sınıf, kodlar, numaralar</td><td>Sınıf için isteğe bağlı</td></tr>
+    <tr><td><code>veri.py</code></td><td>Başvurunun strateji JSON'u; dosya kaynağı ya da Oracle kaynağı; ayara göre seçim</td><td>Müşteri no, tarih → başvuru JSON'u</td><td>Hayır</td></tr>
+    <tr><td><code>katalog.py</code>, <code>katalog/kurallar.json</code></td><td>Kural tanımları, şablonlar, onay durumu, geçerlilik tarihi</td><td>Kod, tarih → geçerli kural sürümü</td><td>Hayır</td></tr>
+    <tr><td><code>cozumleyici.py</code></td><td>Kuralı JSON'a uygular, olguları çıkarır, şablonu seçer</td><td>Kural + JSON → olgular, metin, notlar</td><td>Hayır</td></tr>
+    <tr><td><code>matris.py</code>, <code>yetki_matrisi.json</code></td><td>Limit ve segmentten matris seviyesi; tavan kuralı; nihai seviye</td><td>Nominal, ağırlıklı, segment → seviye</td><td>Hayır</td></tr>
+    <tr><td><code>matris_excel.py</code></td><td>Yetki matrisi Excel'ini okuyup matris JSON'u üretir; örnek başvuruyla doğrular</td><td>Excel → JSON</td><td>Hayır</td></tr>
+    <tr><td><code>yazici.py</code></td><td>Şablonları tek metne kurar, olgu denetimi yapar, durumu belirler</td><td>Olgular → taslak, durum, notlar</td><td>Çok kurallı yeniden yazımda isteğe bağlı</td></tr>
+    <tr><td><code>llm.py</code></td><td>Kurum içi OpenAI uyumlu uca ince istemci; düşünme kapalı; JSON şema</td><td>İstem → metin / JSON</td><td>Evet</td></tr>
+    <tr><td><code>motor.py</code></td><td>Boru hattı ve komut satırı; ayar dosyası; kaynak seçimi</td><td>Çağrı → taslak</td><td>Hayır</td></tr>
+    <tr><td><code>ekran.py</code>, <code>ekran.html</code></td><td>Kayıt listesi, detay, Onayla / Düzelt / Kapsam dışı; onay dosyası</td><td>HTTP → JSON</td><td>Hayır</td></tr>
+    <tr><td><code>analiz_smile.py</code></td><td>Çözüm Merkezi kayıt listesinden hacim, sınıf ve kural sıklığı raporu</td><td>Tablo → rapor</td><td>Hayır</td></tr>
+  </tbody>
+</table>
+
+<h3 id="b4-2">4.2 Teknoloji seçimleri ve gerekçeleri</h3>
+<table>
+  <thead><tr><th>Seçim</th><th>Gerekçe</th></tr></thead>
+  <tbody>
+    <tr><td>Python, standart kütüphane ağırlıklı, Python 3.9 uyumlu</td><td>Ekip bilgisayarlarında ve kurum sunucusunda ek kurulum gerektirmeden çalışmalı; bağımlılık onay süreçleri kısa kalmalı.</td></tr>
+    <tr><td>Kural bilgisi kodda değil JSON katalogda</td><td>Kural değişikliği bir yazılım dağıtımı değil, katalog güncellemesi olmalı; sürümleme ve onay kataloğun kendisinde tutulur.</td></tr>
+    <tr><td>Deterministik olgu çıkarma, dil modeli yalnız dil işleri için</td><td>Bankacılık cevabında yanlış tarih ya da tutar kabul edilemez; modelin yalnız anlama ve ifade katkısı alınır.</td></tr>
+    <tr><td>Kurum içi Qwen 3.8 (vLLM, OpenAI uyumlu uç)</td><td>Veri dışarı çıkmaz; aynı altyapı başka kurum içi projelerde kullanılıyor; istemci ve dağıtım deseni hazır.</td></tr>
+    <tr><td>Onay ekranı için standart <code>http.server</code> ve tek HTML sayfa</td><td>Pilot için çerçeve ve ek sunucu gerekmez; hedef dağıtımda aynı API korunarak kurum sunucusuna taşınır.</td></tr>
+    <tr><td>Onay kararları dosyada (<code>onaylar.json</code>)</td><td>Pilot hacmi için yeterli; çok kullanıcılı hedef düzende veritabanına taşınacak (bölüm 16).</td></tr>
+  </tbody>
+</table>

@@ -1,0 +1,41 @@
+<h2 id="b1"><span class="no">1</span>Yönetici özeti</h2>
+<p>Kurumsal ve ticari kredi başvuruları strateji motorundan geçiyor. Motor her başvuru için onlarca kural
+çalıştırıyor, onay yetki seviyesini hesaplıyor ve sonucu Sparx ekranına yansıtıyor. Şubeler ve satış
+ekipleri bu sonucu görüyor ama gerekçesini her zaman çözemiyor: "Bu müşteride H221 neden çalıştı?",
+"Onay yetki seviyesi neden bu kadar yüksek?", "Strateji neden ret verdi?" Bu sorular Çözüm Merkezi
+üzerinden strateji ekibine kayıt olarak düşüyor. Ekipten biri başvuruyu buluyor, strateji logundaki JSON'u
+açıyor, kuralın ne yaptığını hatırlıyor ve cevabı elle yazıyor. Soruların büyük kısmı aynı birkaç kural
+etrafında dönüyor ve cevaplar birbirine benziyor.</p>
+
+<p><b>Yapmak istediğimiz:</b> kayıt geldiğinde başvuruyu kendiliğinden bulan, kuralın neye baktığını
+başvurunun strateji çıktısından çıkaran ve ekibin onayladığı şablonla <b>cevap taslağı</b> yazan bir motor;
+taslağı ekibin önüne koyan tek sayfalık bir onay ekranı. Taslak kendi başına gönderilmez; ekipten biri
+onaylar ya da düzeltir. Kurum içi dil modeli (Qwen 3.8) yalnız iki yerde çalışır: soruyu sınıflandırmak ve
+birden çok kural sorulduğunda cümleleri tek metinde toplamak. Tarih, tutar, seviye ve kural kodu gibi
+olgular hiçbir zaman dil modelinden gelmez; kod ve veriden gelir.</p>
+
+<div class="iki-sutun">
+  <div class="ozet-kart"><h4>Bugün elimizde ne var</h4>
+    <ul>
+      <li>Uçtan uca çalışan prototip: sınıflandırma, başvuru verisine erişim (dosya ve Oracle), kural
+      yorumlama, segmentli yetki matrisi, guardrail'li taslak üretimi, onay ekranı.</li>
+      <li>Kural kataloğu biçimi ve iki tanımlı kural: H221 (bağımsız denetim raporu) ve onay yetki seviyesi.</li>
+      <li>Excel'den yetki matrisi üreten okuyucu; Çözüm Merkezi kayıt düzenine uygun sentetik veri; 130 otomatik test.</li>
+      <li>Veri kaynaklarının hangi tablolarda olduğu ve müşteri numarasından başvuruya nasıl gidileceği netleşti.</li>
+    </ul></div>
+  <div class="ozet-kart"><h4>Ne eksik</h4>
+    <ul>
+      <li>Gerçek veriyle doğrulama: veritabanı erişimi, strateji JSON'undaki alan adları, segment alanı,
+      matristeki seviye numaraları.</li>
+      <li>Kural kataloğunun genişletilmesi: bugün iki kural var; Çözüm Merkezi'ne düşen soruların çoğunu
+      kapsayacak kural listesi ve onaylı şablonlar strateji ekibiyle çıkarılacak.</li>
+      <li>Çözüm Merkezi ile bağlantı: kayıtların otomatik okunması ve onaylı cevabın kayda yazılması.</li>
+      <li>Kurum içi sunucuda çalışma düzeni: kimlik doğrulama, loglama, yapılandırma ve gizli bilgi yönetimi,
+      bilgi güvenliği ve KVKK görüşmeleri, değerlendirme seti ve pilot.</li>
+    </ul></div>
+</div>
+
+<div class="kutu"><p><b>Bu belgeden beklediğimiz:</b> bölüm 16'daki eksik listesinin ve bölüm 17'deki soruların
+sahipleriyle birlikte okunması; bölüm 18'deki erişim ve karar ihtiyaçlarının karşılanması. Bunlar
+tamamlandığında pilot için teknik bir engel kalmıyor; yol haritası (bölüm 20) 2027 planlama dönemine
+ölçüm sonuçlarıyla birlikte bir prototip yetiştirmeyi hedefliyor.</p></div>

@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Uretim : kayıt motordan geçer
+    Uretim --> otomatik : onaylı şablon, tutarlı veri, kural çalışmış
+    Uretim --> onaya_gitti : taslak şablon / tutarsızlık / hata veya girdi sınıfı / başvuru yok
+    otomatik --> gonderildi : Onayla
+    otomatik --> duzeltildi : Düzelt (metin + not)
+    otomatik --> kapsam_disi : Kapsam dışı
+    onaya_gitti --> gonderildi : Onayla
+    onaya_gitti --> duzeltildi : Düzelt
+    onaya_gitti --> kapsam_disi : Kapsam dışı
+    gonderildi --> [*]
+    duzeltildi --> [*] : düzeltme, ölçüm verisi olur
+    kapsam_disi --> [*] : sınıflandırıcıya örnek olur

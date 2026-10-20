@@ -1,0 +1,20 @@
+flowchart TB
+    subgraph K1["Kullanım 1: sınıflandırma (yalnız belirsiz metinde)"]
+        direction LR
+        A1["Kayıt metni"] --> B1["Qwen 3.8: sınıf, kodlar, numaralar<br/>JSON şema · düşünme kapalı · sıcaklık 0"]
+        B1 --> C1{"kod metinde ya da katalogda,<br/>numara metinde var mı?"}
+        C1 -->|"evet"| D1["sınıf alınır,<br/>kod ve numara eklenir"]
+        C1 -->|"hayır"| E1["uydurulan kod ve<br/>numara atılır"]
+    end
+    subgraph K2["Kullanım 2: çok kurallı yeniden yazım"]
+        direction LR
+        A2["Şablon metinleri<br/>deterministik taslak"] --> B2["Qwen 3.8: tek akıcı mesaj<br/>taslakta olmayan olgu eklenmez"]
+        B2 --> C2{"sayı, tarih, kural kodu<br/>kümeleri eşit mi? Türkçe mi?"}
+        C2 -->|"evet"| D2["LLM metni kullanılır"]
+        C2 -->|"hayır"| E2["şablon metni kalır,<br/>uyarı notu"]
+    end
+    subgraph K0["LLM'siz çalışan kısım"]
+        Z["tek kurallı cevap · olgu çıkarma · matris hesabı · durum kararı · onay akışı"]
+    end
+    K1 ~~~ K2
+    K2 ~~~ K0
