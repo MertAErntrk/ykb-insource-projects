@@ -4,7 +4,8 @@ Kurumsal ve ticari kredi karar motorunun ("strateji") çıktıları hakkında Sm
 ("H221 neden çalıştı?", "onay yetki seviyesi neden 8?") otomatik **cevap taslağı** üreten motor. Olgular
 (tarih, tutar, seviye, kural kodu) başvurunun strateji JSON'undan ve strateji ekibinin onayladığı
 şablonlardan gelir; LLM yalnızca soruyu anlamak ve birden çok kuralı tek metne toplamak için kullanılır.
-Taslak gönderilmez, insan onayına gider. Plan ve açık sorular: [`docs/UYGULAMA_PLANI.md`](docs/UYGULAMA_PLANI.md).
+Taslak gönderilmez, insan onayına gider. Mimari ve akış: [`docs/MIMARI.md`](docs/MIMARI.md). Plan ve açık
+sorular: [`docs/UYGULAMA_PLANI.md`](docs/UYGULAMA_PLANI.md).
 
 Durum: prototip iskeleti, sentetik veriyle çalışıyor. smile2025 dökümü, yetki seviyeleri Excel'i ve gerçek
 başvuru JSON'u gelince katalog yolları ve matris güncellenecek (planda bölüm 12).
@@ -29,8 +30,9 @@ başvuru JSON'u gelince katalog yolları ve matris güncellenecek (planda bölü
 | `llm.py` | Kurum içi OpenAI uyumlu LLM istemcisi (Qwen, vLLM); BriefMind'dan sadeleştirildi |
 | `veri.py` | Başvuru JSON'u kaynağı (klasör); hedefte DB/API uyarlayıcısı |
 | `analiz_smile.py` | Smile dökümü analizi: aylık hacim, sınıflar, kural sıklığı, kapsama |
+| `excel_dok.py` | Excel yapı/hücre dökümü (maskeli, dışarı verilebilir); iş bilgisayarından çıkmayan dosyaların yapısını paylaşmak için |
 | `ornekler/` | Sentetik başvuru JSON'ları ve çağrılar |
-| `tests/` | 62 test, LLM ya da ağ gerektirmez |
+| `tests/` | 67 test, LLM ya da ağ gerektirmez |
 
 ## Kurulum
 
@@ -55,6 +57,11 @@ python motor.py --cagri ornekler/cagrilar/iki_kural.json --llm
 
 # Smile dökümü analizi (dosya veri/ altında, repoya girmez)
 python analiz_smile.py veri/smile2025.xlsx --rapor veri/smile_analiz.md --csv veri/smile_siniflar.csv
+
+# Excel yapı dökümü: sayfa, başlık, tip, dağılım; 6+ haneli sayılar maskeli, serbest metin yazılmaz
+python excel_dok.py veri/smile2025.xlsx
+# müşteri verisi OLMAYAN dosyada her hücre: değer, dolgu rengi (sarı/yeşil), formül, birleşik alanlar
+python excel_dok.py "veri/Kurumsal ve Ticari Kredi Onay Yetki Seviyeleri.xlsx" --hucreler
 ```
 
 Çıktı: sınıf, kurallar, müşteri numarası, durum (`otomatik` / `inceleme_gerekli`), inceleme notları ve
