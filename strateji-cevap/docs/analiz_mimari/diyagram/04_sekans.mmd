@@ -8,7 +8,7 @@ sequenceDiagram
     participant ST as Strateji ekibi
     CM->>M: kayıt: "H221 çalışmış, neden?" + müşteri no
     M->>M: düzenli ifade: H221, müşteri no, sınıf çıktı
-    opt sınıf belirsizse
+    opt dil modeli açıksa
         M->>Q: sınıflandırma istemi (JSON şema)
         Q-->>M: sınıf (kod ve numara metinle doğrulanır)
     end

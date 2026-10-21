@@ -8,12 +8,16 @@ numarası, zaman ve motorun ilk durumuyla birlikte saklanır; ekran yeniden aç�
   <thead><tr><th>Durum</th><th>Anlamı</th><th>Kim verir</th></tr></thead>
   <tbody>
     <tr><td><code>otomatik</code></td><td>Motor onaylı şablonla, tutarsızlık görmeden üretti</td><td>Motor</td></tr>
-    <tr><td><code>onaya_gitti</code></td><td>Motor inceleme istedi: taslak şablon, veri tutarsızlığı, çalışmamış kural, hata ya da girdi sınıfı, başvuru bulunamadı</td><td>Motor</td></tr>
+    <tr><td><code>onaya_gitti</code><br/><span class="kucuk">motorda <code>inceleme_gerekli</code></span></td><td>Motor inceleme istedi: taslak şablon, veri tutarsızlığı, çalışmamış görünen kural, hata sınıfı, kural ya da kimlik bulunamadı, başvuru bulunamadı, kaynak hatası</td><td>Motor</td></tr>
     <tr><td><code>gonderildi</code></td><td>Ekip taslağı onayladı</td><td>Ekip</td></tr>
     <tr><td><code>duzeltildi</code></td><td>Ekip metni düzeltti; düzeltilmiş metin ve not saklandı</td><td>Ekip</td></tr>
     <tr><td><code>kapsam_disi</code></td><td>Ekip kaydı kapsam dışı işaretledi; sınıflandırıcıya örnek olur</td><td>Ekip</td></tr>
   </tbody>
 </table>
+
+<p>Motor iki durum üretir: <code>otomatik</code> ve <code>inceleme_gerekli</code>; ekran ikincisini <code>onaya_gitti</code>
+olarak gösterir ve kayıt detayındaki taslak alanında motorun kendi değeri korunur. Kararlı bir kayıt için yeniden karar
+verilebilir; son karar öncekini ezer, her kararın zamanı ve motorun ilk durumu saklanır.</p>
 
 <h3 id="b11-1">11.1 Ekranın bugünkü hali</h3>
 <ul>

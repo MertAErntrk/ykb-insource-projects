@@ -7,5 +7,5 @@ flowchart TB
     K -->|"cevap"| S
     M -->|"salt okunur"| HT[("Hızlı Tahsis logu<br/>EVA_STRATEGY_IO_LOG")]
     M -->|"salt okunur"| SP[("Smile+ logu<br/>uwr_app_pc_log")]
-    M -.->|"kural açıklaması"| RL[("APP_POLICY_RULE_LKP")]
+    M -.->|"kural açıklaması (hedef)"| RL[("APP_POLICY_RULE_LKP")]
     M -.->|"sınıflandırma<br/>yeniden yazım"| Q["Qwen 3.8 27B<br/>vLLM · kurum içi"]

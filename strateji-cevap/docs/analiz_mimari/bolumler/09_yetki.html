@@ -1,7 +1,8 @@
 <h2 id="b9"><span class="no">9</span>Onay yetki seviyesi</h2>
 <p>Yetki seviyesi sorusu diğer kurallardan farklı bir mantık ister. Strateji çıktısında nominal limit ve ağırlıklı
 limit, matristen gelen seviye, H kurallarının zorladığı seviye ve nihai seviye ayrı alanlarda duruyor. Nihai
-seviye, matris seviyesi ile H kuralları seviyesinin büyüğü. Motor bu hesabı kendisi de yapar ve JSON'daki
+seviyenin matris seviyesi ile H kuralları seviyesinin büyüğü olduğunu varsayıyoruz; eldeki örneklerle tutarlı ama teyit
+edilecek (soru 7). Motor bu hesabı kendisi de yapar ve JSON'daki
 değerlerle karşılaştırır; fark varsa taslak onaya düşer, çünkü ya matris dosyası eskimiştir ya da yanlış
 alana bakılıyordur.</p>
 <!--SVG:06_yetki|maxw=130|maxh=200|baslik=Limitlerden nihai onay yetki seviyesine-->
@@ -23,9 +24,9 @@ kod deposuna girmez; depoda yalnız geliştirme için hazırlanmış sentetik bi
   <thead><tr><th>Girdi</th><th>Nereden</th><th>Belirsizlik</th></tr></thead>
   <tbody>
     <tr><td>Nominal limit</td><td><code>CORPCOMMMATRIXOUTPUTS.NOMINALLIMIT</code></td><td>Yok</td></tr>
-    <tr><td>Ağırlıklı limit</td><td><code>WEIGHTEDLIMWCASHCOLL</code> (nakit teminat düşülmüş) varsayımı</td><td>Nakit teminat dahil mi hariç mi teyit edilecek</td></tr>
+    <tr><td>Ağırlıklı limit</td><td>Bugün <code>WEIGHTEDLIMWCASHCOLL</code> varsayımı</td><td>Nakit teminat dahil (W) ya da hariç (WO) alanlardan hangisinin matrise girdiği teyit edilecek</td></tr>
     <tr><td>Segment</td><td>Başvuru JSON'unda segment alanı; yoksa ayardaki varsayılan</td><td>Alanın yeri bilinmiyor; varsayılanla hesap yapılan kayıt onaya düşer</td></tr>
-    <tr><td>Seviye numarası ↔ onay makamı</td><td>Matris JSON'undaki unvan-seviye eşlemesi</td><td>Belgede seviye numarası yok; <code>AUTHLEVELFORMATRIX</code> değerleriyle eşleme teyit edilecek; "Otomatik Onay" satırının numarası</td></tr>
+    <tr><td>Seviye numarası ↔ onay makamı</td><td>Matris JSON'undaki unvan-seviye eşlemesi (bugün yalnız Excel okuyucuda kullanılıyor; cevaba seviye numarası giriyor, unvan girmiyor)</td><td>Belgede seviye numarası yok; <code>AUTHLEVELFORMATRIX</code> değerleriyle eşleme teyit edilecek; "Otomatik Onay" satırının numarası</td></tr>
     <tr><td>Para birimi</td><td>Matris dosyası</td><td>Teyit edilecek</td></tr>
   </tbody>
 </table>

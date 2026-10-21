@@ -1,7 +1,7 @@
 stateDiagram-v2
     [*] --> Uretim : kayıt motordan geçer
-    Uretim --> otomatik : onaylı şablon, tutarlı veri, kural çalışmış
-    Uretim --> onaya_gitti : taslak şablon / tutarsızlık / hata veya girdi sınıfı / başvuru yok
+    Uretim --> otomatik : onaylı şablon, tutarlı veri, çalışmamış kural bulgusu yok
+    Uretim --> onaya_gitti : (motor inceleme_gerekli) taslak şablon / tutarsızlık / hata sınıfı / kural, kimlik ya da başvuru yok
     otomatik --> gonderildi : Onayla
     otomatik --> duzeltildi : Düzelt (metin + not)
     otomatik --> kapsam_disi : Kapsam dışı

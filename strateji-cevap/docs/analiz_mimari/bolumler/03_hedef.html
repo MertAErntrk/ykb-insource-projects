@@ -9,7 +9,7 @@ görmek istiyoruz.</p>
   <tbody>
     <tr><td>Girdi</td><td>Çözüm Merkezi kaydı: açıklama, kanal, kategori, müşteri ya da başvuru numarası</td><td>Aynı; kayıt Smile'dan otomatik okunur</td></tr>
     <tr><td>Çıktı</td><td>Cevap taslağı + olgular + durum (otomatik / onaya gitti) + gerekçe notları</td><td>Onaylı cevabın kayda otomatik yazılması; güven eşiğine göre otomatik gönderim</td></tr>
-    <tr><td>Soru sınıfları</td><td>Çıktı soruları tam; girdi ve hata sınıfı yalnız yönlendirme</td><td>Girdi soruları için veri kaynağı açıklamaları</td></tr>
+    <tr><td>Soru sınıfları</td><td>Çıktı soruları tam; hata sınıfı yönlendirme; girdi sınıfında kural sorulmamışsa yönlendirme, sorulmuşsa kural cevabı</td><td>Girdi soruları için veri kaynağı açıklamaları</td></tr>
     <tr><td>Kural kapsamı</td><td>En sık sorulan kurallar (hedef: kayıtların en az %70'i)</td><td>Katalog genişler; CR ve D kuralları, ret gerekçeleri</td></tr>
     <tr><td>Onay</td><td>İnsan onayı zorunlu; düzeltmeler kaydedilir</td><td>Düzeltme oranına göre otomatik gönderim kararı</td></tr>
     <tr><td>Arayüz</td><td>Tek sayfalık onay ekranı (liste, detay, Onayla / Düzelt / Kapsam dışı)</td><td>Çözüm Merkezi içine gömülü akış</td></tr>
@@ -20,7 +20,7 @@ görmek istiyoruz.</p>
 <ol>
   <li><b>Olgular koddan gelir.</b> Taslaktaki her tarih, tutar, seviye ve kural kodu ya başvurunun strateji
   JSON'undan ya kataloğdan ya da matristen gelir. Dil modeli olgu üretmez; ürettiği metin olgu kümesiyle
-  karşılaştırılır, uyuşmazsa atılır.</li>
+  karşılaştırılır, uyuşmazsa model metni atılır ve şablon metni kullanılır; durum değişmez, yalnız uyarı notu düşülür.</li>
   <li><b>Katalog ekibindir.</b> Kuralın neye baktığı, hangi koşulun süzüldüğü ve hangi şablonun yazıldığı
   katalog dosyasında durur; kural değişince kod değil katalog değişir. Onaysız şablonla üretilen cevap
   otomatik sayılmaz.</li>

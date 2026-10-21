@@ -1,7 +1,7 @@
 <h2 id="b4"><span class="no">4</span>Mimari genel bakış</h2>
 <p>Sistem üç halkadan oluşuyor: Çözüm Merkezi'nden gelen kayıt, kaydı cevap taslağına çeviren motor ve
-taslağı ekibin önüne koyan onay ekranı. Motor, başvurunun strateji çıktısını iki kaynaktan (Hızlı Tahsis
-ve Smile+ logları) salt okunur çeker; kural bilgisini kendi kataloğundan ve yetki matrisinden alır; dil
+taslağı ekibin önüne koyan onay ekranı. Motor, başvurunun strateji çıktısını strateji loglarından salt okunur çeker (iki kaynak tanımlı: Hızlı
+Tahsis ve Smile+; bugün yalnız Hızlı Tahsis sorgusu bağlı); kural bilgisini kendi kataloğundan ve yetki matrisinden alır; dil
 modelini kurum içi platformdan isteğe bağlı kullanır.</p>
 <!--SVG:01_baglam|maxw=150|baslik=Bağlam: sistemin çevresiyle ilişkisi-->
 
@@ -36,7 +36,7 @@ istemcisi yalnız model açıkken, Excel okuyucu yalnız matris üretilirken yü
     <tr><td>Python, standart kütüphane ağırlıklı, Python 3.9 uyumlu</td><td>Ekip bilgisayarlarında ve kurum sunucusunda ek kurulum gerektirmeden çalışmalı; bağımlılık onay süreçleri kısa kalmalı.</td></tr>
     <tr><td>Kural bilgisi kodda değil JSON katalogda</td><td>Kural değişikliği bir yazılım dağıtımı değil, katalog güncellemesi olmalı; sürümleme ve onay kataloğun kendisinde tutulur.</td></tr>
     <tr><td>Deterministik olgu çıkarma, dil modeli yalnız dil işleri için</td><td>Bankacılık cevabında yanlış tarih ya da tutar kabul edilemez; modelin yalnız anlama ve ifade katkısı alınır.</td></tr>
-    <tr><td>Kurum içi Qwen 3.8 (vLLM, OpenAI uyumlu uç)</td><td>Veri dışarı çıkmaz; aynı altyapı başka kurum içi projelerde kullanılıyor; istemci ve dağıtım deseni hazır.</td></tr>
+    <tr><td>Kurum içi Qwen 3.8 (vLLM, OpenAI uyumlu uç)</td><td>Veri dışarı çıkmaz; aynı altyapı başka kurum içi projelerde kullanılıyor; istemci kodu başka bir kurum içi projeden uyarlandı, bu projede uçla henüz denenmedi.</td></tr>
     <tr><td>Onay ekranı için standart <code>http.server</code> ve tek HTML sayfa</td><td>Pilot için çerçeve ve ek sunucu gerekmez; hedef dağıtımda aynı API korunarak kurum sunucusuna taşınır.</td></tr>
     <tr><td>Onay kararları dosyada (<code>onaylar.json</code>)</td><td>Pilot hacmi için yeterli; çok kullanıcılı hedef düzende veritabanına taşınacak (bölüm 16).</td></tr>
   </tbody>

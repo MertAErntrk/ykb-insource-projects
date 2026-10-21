@@ -1,7 +1,9 @@
 <h2 id="b6"><span class="no">6</span>Kayıt sınıflandırma</h2>
 <p>Sınıflandırıcının üç işi var: kaydın sınıfını belirlemek, sorulan kural kodlarını bulmak ve müşteri
-numarasını çıkarmak. Üçü de önce deterministik yapılır; dil modeli yalnız sınıf belirsiz kaldığında
-devreye girer ve bulduğu kod ya da numara metinde yoksa kabul edilmez.</p>
+numarasını çıkarmak. Üçü de önce deterministik yapılır. Dil modeli açıksa her kayıt için sınıflandırma istemi gönderilir ve
+modelin sınıfı esas alınır; modelin bulduğu kod metinde ya da katalogda, numara metinde yoksa kabul edilmez.
+Tasarım hedefi, modeli yalnız anahtar kelimelerin karar veremediği kayıtlarda çağırmak; bu geçiş bölüm 16.4'te
+listelenmiştir.</p>
 
 <table>
   <thead><tr><th>Çıkarım</th><th>Yöntem</th><th>Sınır ve varsayım</th></tr></thead>

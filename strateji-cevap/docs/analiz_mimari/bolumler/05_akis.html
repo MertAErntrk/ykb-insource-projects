@@ -8,21 +8,24 @@ kimlik bulunamazsa, başvuru bulunamazsa, kural çalışmamışsa ya da hesap ve
   <li><b>Kayıt gelir.</b> Çözüm Merkezi kaydının numarası, tarihi, kanalı, kategorisi ve açıklaması motorun
   çağrı biçimine çevrilir.</li>
   <li><b>Sınıflandırma.</b> Açıklamadan sınıf (çıktı / girdi / hata), kural kodları (H221 gibi) ve müşteri
-  numarası çıkarılır. Önce düzenli ifade ve anahtar kelime; sınıf belirsiz kalırsa dil modeli.</li>
-  <li><b>Başvuru bulunur.</b> Müşteri numarasından kanalına göre Hızlı Tahsis ya da Smile+ logunda kayıt
-  tarihinden önceki son başvuru bulunur; girdi (indata), çıktı (outdata) ve karar (action_code) okunur.</li>
+  numarası çıkarılır. Önce düzenli ifade ve anahtar kelime; dil modeli açıksa her kayıt için sınıflandırma istemi
+  gönderilir ve modelin sınıfı esas alınır, kod ve numara yine metinle doğrulanır.</li>
+  <li><b>Başvuru bulunur.</b> Müşteri numarasından strateji logunda kayıt tarihinden önceki son başvuru bulunur (bugün
+  Hızlı Tahsis sorgusu; Smile+ sorgusu yazıldı, kanal seçimi bağlanmadı); girdi (indata), çıktı (outdata) ve karar (action_code) okunur.</li>
   <li><b>Kural yorumlanır.</b> Katalogdaki tanım başvurunun tarihinde geçerli sürümüyle JSON'a uygulanır:
   koşul doğrulanır, tarih, tutar, seviye gibi olgular çıkarılır, dallanmaya göre şablon seçilir. Yetki
   sorusunda nominal ve ağırlıklı limit segment matrisinden geçirilir.</li>
-  <li><b>Taslak kurulur ve denetlenir.</b> Şablonlar tek selamlama ve tek kapanışla birleştirilir. Onaylı şablon,
-  çalışmış kural ve tutarlı veri varsa durum "otomatik"; aksi halde "onaya gitti".</li>
+  <li><b>Taslak kurulur ve denetlenir.</b> Şablonlar tek selamlama ve tek kapanışla birleştirilir. Onaylı şablon ve
+  tutarlı veri varsa ve kuralın çalışmadığına dair bulgu yoksa durum "otomatik" (çalışan kural listesi JSON'da
+  yoksa uyarı notuyla); aksi halde "onaya gitti".</li>
   <li><b>Ekip karar verir.</b> Onay ekranında taslak, olgular ve notlar görünür. Onayla, Düzelt ya da Kapsam dışı
   seçilir; karar kayıt numarasıyla saklanır.</li>
 </ol>
 
 <h3 id="b5-1">5.1 Bir kaydın hayatı</h3>
 <p>Aşağıdaki sekans, H221 sorusu için bileşenler arasındaki alışverişi gösteriyor. Dil modeline giden iki
-çağrı da isteğe bağlı: tek kurallı, kodu açık yazılmış bir soruda model hiç devreye girmez.</p>
+çağrı da yalnız model açıkken yapılır: sınıflandırma her kayıtta, yeniden yazım yalnız birden çok kural varsa.
+Model kapalıysa ikisi de atlanır.</p>
 <!--SVG:04_sekans|yatay|maxw=255|maxh=148|baslik=H221 sorusu için bileşenler arası sekans-->
 
 <h3 id="b5-2">5.2 Örnek: H221 cevabı</h3>

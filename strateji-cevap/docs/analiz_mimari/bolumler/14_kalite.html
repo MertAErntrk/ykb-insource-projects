@@ -4,12 +4,13 @@
 tarih penceresi sınırları, segmentli matris ve tavan kuralı, tutarsızlık notları, sınıflandırıcının kod ve
 numara kuralları, dil modeli çıktısının olgu denetimi, dosya ve veritabanı kaynak seçimi, onay ekranının
 API'si ve on beş sentetik Çözüm Merkezi kaydının uçtan uca beklenen sınıf ve duruma ulaşması test ediliyor.
-Testler her gönderimde Linux (Python 3.11) ve Windows (Python 3.9) üzerinde çalışıyor.</p>
+Testler her gönderimde Linux (Python 3.11) ve Windows (Python 3.9) üzerinde çalışıyor. Excel okuyucu ve kayıt
+analizi testleri pandas ve openpyxl bulunmayan ortamda atlanır; 130 sayısı bu paketlerin kurulu olduğu ortam içindir.</p>
 
 <h3 id="b14-2">14.2 Değerlendirme seti ve ölçütler</h3>
 <p>Gerçek kalite ancak gerçek kayıtlarla ölçülür. Değerlendirme seti Çözüm Merkezi kayıtlarından çıkacak: en sık
-sorulan kurallardan örneklenmiş 100–200 kayıt, ekibin verdiği cevapla motorun taslağı yan yana. Her kayıt
-için başvurunun strateji JSON'u gerekiyor.</p>
+sorulan kurallardan örneklenmiş 100–200 kayıt, ekibin verdiği cevapla motorun taslağı yan yana. Her kayıt için başvurunun strateji JSON'u gerekiyor. Ayda yaklaşık 54 kayıtla bu set iki ila dört aylık geçmişe karşılık
+gelir; geçmiş kayıtların bu amaçla kullanılması için KVKK değerlendirmesi (bölüm 16.7) ölçümün ön koşuludur.</p>
 <table>
   <thead><tr><th>Ölçüt</th><th>Tanım</th><th>Hedef</th><th>Nasıl ölçülür</th></tr></thead>
   <tbody>
@@ -23,7 +24,9 @@ için başvurunun strateji JSON'u gerekiyor.</p>
 </table>
 
 <h3 id="b14-3">14.3 Pilot tasarımı</h3>
-<p>Pilotta motor gelen kayıtlar için taslak üretir, ekipten iki kişi ekrandan onaylar ya da düzeltir. Üç hafta
+<p>Pilotta motor gelen kayıtlar için taslak üretir, ekipten iki kişi ekrandan onaylar ya da düzeltir. İlk hafta gölge
+mod önerilir: ekip eski usul cevap yazar, taslak yalnız kaydedilir ve sonradan karşılaştırılır; sonraki haftalarda taslak
+önce gelir. Üç hafta
 boyunca her kaydın durumu, düzeltme notu ve süresi kaydedilir. Haftalık gözden geçirmede en çok düzeltilen
 şablonlar ve "onaya gitti" nedenleri ele alınır; katalog ve anahtar kelime listeleri güncellenir. Pilot sonunda
 ölçüt tablosu doldurulur ve faz 2 kararı için sunulur.</p>

@@ -1,7 +1,7 @@
 <h2 id="b10"><span class="no">10</span>Dil modeli: Qwen 3.8 ve sınırları</h2>
 <p>Kurum içinde vLLM üzerinde çalışan Qwen 3.8 27B modelini (FP8) OpenAI uyumlu uç noktasından kullanıyoruz.
 Aynı altyapı başka kurum içi projelerde de çalışıyor; istemci kodu, TLS doğrulaması ve OpenShift içinden
-servis adresiyle erişim deseni hazır. Model dışarıya hiçbir istek atmaz; bu projede müşteri verisi modele
+servis adresiyle erişim deseni başka bir kurum içi projeden uyarlandı; bu projede uçla henüz denenmedi. Model dışarıya hiçbir istek atmaz; bu projede müşteri verisi modele
 yalnız iki dar kanaldan gider ve her iki kanalın çıktısı denetimden geçer.</p>
 <!--SVG:08_llm_guardrail|maxw=160|baslik=Dil modelinin iki kullanım yeri ve çıktı denetimi-->
 
@@ -9,18 +9,18 @@ yalnız iki dar kanaldan gider ve her iki kanalın çıktısı denetimden geçer
 <table>
   <thead><tr><th>İş</th><th>Dil modeli</th><th>Nasıl</th></tr></thead>
   <tbody>
-    <tr><td>Kayıt metninin sınıfı</td><td>Belirsiz metinde evet</td><td>JSON şemalı istem (sınıf, kodlar, numaralar); sıcaklık 0; düşünme kapalı; düşünme etiketleri temizlenir; kesik cevap kabul edilmez</td></tr>
+    <tr><td>Kayıt metninin sınıfı</td><td>Model açıkken her kayıtta</td><td>Modelin sınıfı esas alınır; JSON şemalı istem (sınıf, kodlar, numaralar); sıcaklık 0; düşünme kapalı; düşünme etiketleri temizlenir; kesik cevap kabul edilmez</td></tr>
     <tr><td>Kural kodu ve müşteri numarası</td><td>Hayır (üretemez)</td><td>Modelin önerdiği kod metinde ya da katalogda, numara metinde geçmiyorsa atılır</td></tr>
     <tr><td>Olguların çıkarılması, matris hesabı, kural çalıştı mı kontrolü</td><td>Hayır</td><td>Tamamen kod ve katalog</td></tr>
     <tr><td>Tek kurallı cevap metni</td><td>Hayır</td><td>Onaylı şablon olduğu gibi gider</td></tr>
-    <tr><td>Çok kurallı cevabı tek akıcı metne toplamak</td><td>Evet</td><td>Model yalnız şablon metinlerini görür, başvuru verisini görmez; çıktı taslaktaki sayı, tarih ve kural kodu kümeleriyle karşılaştırılır; fazlası ya da eksiği varsa, metin İngilizceye kaymışsa ya da çok kısaysa şablon metni kalır ve uyarı notu düşülür</td></tr>
+    <tr><td>Çok kurallı cevabı tek akıcı metne toplamak</td><td>Evet</td><td>Modele kayıt metni ve doldurulmuş şablon metinleri gider, ham başvuru JSON'u gitmez; çıktı taslaktaki sayı, tarih ve kural kodu kümeleriyle karşılaştırılır; fazlası ya da eksiği varsa, metin İngilizceye kaymışsa ya da çok kısaysa şablon metni kalır ve uyarı notu düşülür</td></tr>
     <tr><td>Durum kararı ve onay akışı</td><td>Hayır</td><td>Kod</td></tr>
   </tbody>
 </table>
 
 <h3 id="b10-2">10.2 İstem tasarımı</h3>
 <p>Sınıflandırma istemi, bankanın strateji ekibine gelen bir kaydı üç sınıftan birine ayırmasını ve metindeki
-kural kodlarını ve sekiz haneli müşteri numaralarını olduğu gibi aktarmasını ister; "uydurma" talimatı
+kural kodlarını ve sekiz haneli müşteri numaralarını olduğu gibi almasını ister; "uydurma" talimatı
 istemde açıkça yazar ve kod tarafı bunu ayrıca denetler. Yeniden yazım istemi, ekibin ağzından şube ve satış
 ekibine yazılan tek bir Türkçe mesaj ister; taslakta olmayan hiçbir sayı, tarih, kural kodu ya da müşteri
 bilgisi eklememesini, bütün olguları korumasını ve kapanış cümlesini aynen bırakmasını söyler. İstemler kodda
@@ -29,10 +29,11 @@ sabit metin olarak duruyor; sürümlenmesi ve değişiklik kaydı bölüm 16'da 
 <h3 id="b10-3">10.3 Çalışma düzeni ve beklentiler</h3>
 <ul>
   <li><b>Model kapalıysa</b> motor aynı cevapları şablonla üretir; sınıf anahtar kelimeyle belirlenir. Kalite düşmez, çok kurallı cevaplar daha kuru olur.</li>
-  <li><b>Hacim:</b> ayda birkaç yüz kayıt; her kayıt için en fazla iki kısa istek. Gecikme ve eşzamanlılık bu hacimde sorun değildir; yine de pilot öncesi ölçülecek.</li>
+  <li><b>Hacim:</b> ayda yaklaşık 50–60 kayıt; her kayıt için en fazla iki kısa istek. Gecikme ve eşzamanlılık bu hacimde sorun değildir; yine de pilot öncesi ölçülecek.</li>
   <li><b>Bağlam:</b> istemler kısa (kayıt metni ya da birkaç şablon cümlesi); model bağlam penceresinin küçük bir kısmı kullanılır.</li>
   <li><b>Türkçe:</b> çıktının dili denetlenir; İngilizceye kayan metin kullanılmaz.</li>
   <li><b>Yapılandırılmış çıktı:</b> JSON şema isteği uç tarafından desteklenmezse düz istekle JSON istenir ve ayrıştırılır; ayrıştırılamazsa model sonucu yok sayılır.</li>
+  <li><b>Çağrı sıklığı:</b> tasarım hedefi modeli yalnız anahtar kelimelerin karar veremediği kayıtlarda çağırmak; bugün model açıkken her kayıtta çağrılıyor (bölüm 16.4).</li>
   <li><b>Değerlendirme:</b> sınıflandırıcının doğruluğu ve yeniden yazımın olgu sadakati, Çözüm Merkezi kayıtlarından oluşturulacak değerlendirme setinde ölçülecek (bölüm 14).</li>
 </ul>
 <div class="kutu"><p><b>Neden dil modelini daha geniş kullanmıyoruz?</b> Çünkü cevabın değeri olgularda ve olguların

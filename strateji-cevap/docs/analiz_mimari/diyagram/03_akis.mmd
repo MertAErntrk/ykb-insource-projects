@@ -1,14 +1,14 @@
 flowchart TB
-    A["Kayıt gelir<br/>açıklama, kanal, kategori"] --> B["Sınıflandırma<br/>düzenli ifade + anahtar kelime, gerekirse LLM"]
+    A["Kayıt gelir<br/>açıklama, kanal, kategori"] --> B["Sınıflandırma<br/>düzenli ifade + anahtar kelime; model açıksa dil modeli"]
     B --> C{"çıktı sorusu,<br/>müşteri no ve kural kodu var mı?"}
-    C -->|"hata · girdi · kimlik yok"| H["Onaya gider<br/>yönlendirme notu"]
-    C -->|"evet"| E["Başvuru JSON'u<br/>Hızlı Tahsis / Smile+"]
+    C -->|"hata · kural yok · kimlik yok"| H["Onaya gider<br/>yönlendirme notu"]
+    C -->|"evet"| E["Başvuru JSON'u<br/>strateji logu"]
     E -->|"bulunamadı"| H
     E -->|"bulundu"| G["Her kural için çözüm<br/>katalog + matris → olgular"]
     G --> I["Taslak<br/>tek selamlama, tek kapanış"]
-    I --> J{"Guardrail: onaylı şablon?<br/>kural çalışmış? veri tutarlı?"}
+    I --> J{"Guardrail: onaylı şablon?<br/>kural çalışmamış mı? veri tutarlı mı?"}
     J -->|"hepsi evet"| K["durum: otomatik"]
-    J -->|"biri hayır"| L["durum: onaya gitti<br/>gerekçe notlarıyla"]
+    J -->|"biri hayır"| L["durum: onaya gitti<br/>(motor: inceleme gerekli) gerekçe notlarıyla"]
     K --> M["Onay ekranı"]
     L --> M
     H --> M
