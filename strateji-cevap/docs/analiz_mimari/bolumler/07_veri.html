@@ -18,8 +18,7 @@ sorgusunu kullanıyor, Smile+ sorgusu yazılmış ama kanal seçimi bağlanmamı
 kaynak "db" seçilmiş ama bağlantı bilgisi, sürücü ya da tablo adı eksikse motor dosya kaynağına düşer ve
 ekran bunu "kaynak: dosya" etiketiyle, nedeniyle birlikte gösterir. Ayar tam ama veritabanına erişilemiyorsa
 dosyaya düşülmez: kayıt "başvuru kaynağı hatası" notuyla onaya düşer. Böylece bağlantı gelene kadar aynı kod
-sentetik veriyle çalışmaya devam ediyor. Kod bugün başvuru numarasına tek bir alt sorguyla (kimlik ya da
-değerlendirme tablosu üzerinden) gidiyor; şekildeki tam zincir tablo ve sütun adları netleşince kurulacak.</p>
+sentetik veriyle çalışmaya devam ediyor. Kod bugün başvuru numarasına tek bir alt sorguyla (kimlik ya da değerlendirme tablosu üzerinden) gidiyor; iki tablo adı da ayarda boşsa log tablosunda doğrudan müşteri numarası sütunuyla arıyor. Şekildeki tam zincir tablo ve sütun adları netleşince kurulacak.</p>
 
 <p><b>Başvuru kanalının belirlenmesi.</b> Çözüm Merkezi kaydındaki "Kanal" alanı iletişim kanalını (IVR, Web)
 gösteriyor; başvurunun Hızlı Tahsis mi Smile+ mı olduğunu söyleyen bir alan bugün yok. Önerdiğimiz tasarım: kayıtta
@@ -30,7 +29,7 @@ sırayla denenir ve hangi kaynaktan bulunduğu olgulara yazılır. Bu karar böl
 görünüyor; logdaki çıktı alanında CR gibi başka kural kümeleri de var. Şubenin sorduğu kuralla logdaki kural
 kümesi her zaman örtüşmeyebilir; motor sorulan kuralın başvuruda gerçekten çalışıp çalışmadığını kontrol
 eder (çıktıdaki çalışan kural listesine bakarak), çalışmamışsa taslağı onaya düşürür ve notunu yazar. Katalogda
-tanımlı olmayan kodlar (bugün CR ve D) sınıflandırmada elenir ve kayıt "kural bulunamadı" notuyla onaya düşer.</p></div>
+tanımlı olmayan kodlar (bugün CR ve D) sınıflandırmada elenir ve kayıt "kural kodu ya da bilinen konu tespit edilemedi" notuyla onaya düşer; katalogda tanımlı olmayan bir H kodu için not "katalogda bu tarihte geçerli tanım yok" olur.</p></div>
 
 <h3 id="b7-1">7.1 Başvuru JSON'unda kullanılan alanlar</h3>
 <table>

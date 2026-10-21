@@ -6,7 +6,7 @@ modelini kurum içi platformdan isteğe bağlı kullanır.</p>
 <!--SVG:01_baglam|maxw=150|baslik=Bağlam: sistemin çevresiyle ilişkisi-->
 
 <h3 id="b4-1">4.1 Bileşenler</h3>
-<p>Her bileşen tek bir Python dosyasına karşılık geliyor; biri değişince diğerleri etkilenmiyor. Motor ve
+<p>Her bileşen tek bir Python dosyasına karşılık geliyor ve tek başına test edilebiliyor; boru hattı (<code>motor.py</code>) onları birbirine bağlıyor. Motor ve
 ekran standart kütüphaneyle çalışıyor; Oracle sürücüsü yalnız veritabanı kaynağı seçildiğinde, dil modeli
 istemcisi yalnız model açıkken, Excel okuyucu yalnız matris üretilirken yükleniyor.</p>
 <!--SVG:02_bilesenler|maxw=150|baslik=Bileşenler ve aralarındaki veri akışı-->
@@ -26,6 +26,8 @@ istemcisi yalnız model açıkken, Excel okuyucu yalnız matris üretilirken yü
     <tr><td><code>motor.py</code></td><td>Boru hattı ve komut satırı; ayar dosyası; kaynak seçimi</td><td>Çağrı → taslak</td><td>Hayır</td></tr>
     <tr><td><code>ekran.py</code>, <code>ekran.html</code></td><td>Kayıt listesi, detay, Onayla / Düzelt / Kapsam dışı; onay dosyası</td><td>HTTP → JSON</td><td>Hayır</td></tr>
     <tr><td><code>analiz_smile.py</code></td><td>Çözüm Merkezi kayıt listesinden hacim, sınıf ve kural sıklığı raporu</td><td>Tablo → rapor</td><td>Hayır</td></tr>
+    <tr><td><code>excel_dok.py</code>, <code>json_yapi.py</code></td><td>Yardımcı betikler: bir Excel dosyasının yapısını (sayfa, sütun, tip) özetler; bir başvuru JSON'unun anahtar ağacını çıkarır</td><td>Dosya → yapı özeti</td><td>Hayır</td></tr>
+    <tr><td><code>yardimci.py</code></td><td>Ortak küçük işlevler: tarih ayrıştırma, Türkçe büyük/küçük harf, sayı biçimi, JSON içinde yol okuma</td><td>—</td><td>Hayır</td></tr>
   </tbody>
 </table>
 
