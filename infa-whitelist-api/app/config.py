@@ -5,7 +5,7 @@ Doğrulama başarısızsa uygulama açılmaz. Gizli değerler SecretStr'dir; hat
 
 import re
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Optional
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     api_keys: Annotated[list[SecretStr], NoDecode]
     # Thick kip: veritabanı Native Network Encryption istiyorsa gerekir (Thin kipte DPY-3001 hatası).
     oracle_thick: bool = False
-    oracle_thick_lib_dir: str | None = None
+    oracle_thick_lib_dir: Optional[str] = None  # Python 3.9 uyumu için "str | None" yazılmaz
     db_call_timeout_ms: int = Field(5000, ge=100, le=60_000)
     db_pool_max: int = Field(4, ge=1, le=32)
 

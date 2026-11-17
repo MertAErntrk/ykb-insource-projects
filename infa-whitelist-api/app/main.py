@@ -11,6 +11,7 @@ import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Optional  # iş bilgisayarı Python 3.9: "X | None" çalışma anında desteklenmez
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
@@ -28,7 +29,7 @@ class ApiError(Exception):
         self.status, self.code, self.message = status, code, message
 
 
-def match_key(presented: str | None, keys: list[SecretStr]) -> int | None:
+def match_key(presented: Optional[str], keys: list[SecretStr]) -> Optional[int]:
     """Eşleşen anahtarın sıra numarası (1'den başlar); yoksa None. Karşılaştırma sabit zamanlıdır."""
     if not presented:
         return None
@@ -40,7 +41,7 @@ def match_key(presented: str | None, keys: list[SecretStr]) -> int | None:
     return found
 
 
-def clean_name(name: str, value: str | None) -> str:
+def clean_name(name: str, value: Optional[str]) -> str:
     """Baş/son boşluğu kırpar. Boş değer fonksiyona gitmez: fonksiyon boşa 0 döner, bu 'devam' demektir."""
     text = (value or "").strip()
     if not text:
@@ -50,7 +51,7 @@ def clean_name(name: str, value: str | None) -> str:
     return text
 
 
-def create_app(settings: Settings | None = None, db: WhitelistDb | None = None) -> FastAPI:
+def create_app(settings: Optional[Settings] = None, db: Optional[WhitelistDb] = None) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     injected = db is not None
@@ -70,7 +71,7 @@ def create_app(settings: Settings | None = None, db: WhitelistDb | None = None) 
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
         return JSONResponse(status_code=exc.status, content={"error": exc.code, "message": exc.message})
 
-    def require_key(request: Request, x_api_key: str | None = Header(default=None)) -> int:
+    def require_key(request: Request, x_api_key: Optional[str] = Header(default=None)) -> int:
         key_no = match_key(x_api_key, settings.api_keys)
         if key_no is None:
             log.warning("yetkisiz çağrı ip=%s", request.client.host if request.client else "-")
@@ -83,7 +84,7 @@ def create_app(settings: Settings | None = None, db: WhitelistDb | None = None) 
         return {"status": "ok"}
 
     @app.get("/api/v1/infa-whitelist/check")
-    def check(folder: str | None = None, workflow: str | None = None,
+    def check(folder: Optional[str] = None, workflow: Optional[str] = None,
               key_no: int = Depends(require_key)) -> JSONResponse:
         folder = clean_name("folder", folder)
         workflow = clean_name("workflow", workflow)

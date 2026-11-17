@@ -1,0 +1,88 @@
+# Infa Whitelist API: kilitten kurulum, testler ve servisin acilisi. Veritabani ya da ag gerekmez.
+# Linux/Python 3.11 = OpenShift imaji (requirements*.lock); Windows/Python 3.9.7 = is bilgisayari (requirements*-py39.lock).
+name: infa-whitelist-api
+
+on:
+  push:
+    paths: ['infa-whitelist-api/**', '.github/workflows/infa-whitelist-api.yml']
+  pull_request:
+    paths: ['infa-whitelist-api/**', '.github/workflows/infa-whitelist-api.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  linux-py311:
+    name: Linux / Python 3.11 (OpenShift imaji)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infa-whitelist-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Kilitten kurulum (kilit eksiksiz mi)
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --no-deps -r requirements-dev.lock
+          .venv/bin/python -m pip check
+      - name: Testler
+        run: .venv/bin/python -m pytest
+
+  windows-py39:
+    name: Windows PowerShell 5.1 / Python 3.9.7 (is bilgisayari)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: infa-whitelist-api
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9.7'
+      # Is bilgisayarindaki adimlarin aynisi: ortamin kendi pip'i (21.2.3), yalniz calisma kilidi.
+      - name: Kilitten kurulum
+        run: |
+          python --version
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip --version
+          .\.venv\Scripts\python.exe -m pip install -r requirements-py39.lock
+      - name: Servisin acilisi (veritabani yok; 401, 400, 503 beklenir)
+        run: |
+          $env:IWC_DB_USER = 'u'; $env:IWC_DB_PASSWORD = 'p'; $env:IWC_DB_DSN = '127.0.0.1:1/yok'; $env:IWC_API_KEYS = ('k' * 40)
+          $py = (Resolve-Path '.\.venv\Scripts\python.exe').Path
+          $out = Join-Path $env:RUNNER_TEMP 'uv.out'; $err = Join-Path $env:RUNNER_TEMP 'uv.err'
+          $p = Start-Process -FilePath $py -ArgumentList '-m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000' -WorkingDirectory (Get-Location).Path -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          function Code($uri, $headers) {
+            try { (Invoke-WebRequest -UseBasicParsing -Uri $uri -Headers $headers -TimeoutSec 30).StatusCode }
+            catch { if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { -1 } }
+          }
+          try {
+            $base = 'http://127.0.0.1:8000'
+            $up = $false
+            foreach ($i in 1..40) { if ((Code "$base/api/health" @{}) -eq 200) { $up = $true; break }; Start-Sleep -Milliseconds 500 }
+            if (-not $up) { throw 'servis acilmadi' }
+            $u = "$base/api/v1/infa-whitelist/check"
+            $k = @{ 'X-API-Key' = $env:IWC_API_KEYS }
+            $r401 = Code "${u}?folder=F&workflow=W" @{}
+            $r400 = Code "${u}?folder=F" $k
+            $r503 = Code "${u}?folder=F&workflow=W" $k
+            "401=$r401 400=$r400 503=$r503"
+            if ($r401 -ne 401 -or $r400 -ne 400 -or $r503 -ne 503) { throw 'beklenmeyen durum kodu' }
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            Get-Content $err, $out -Encoding UTF8 -ErrorAction SilentlyContinue
+          }
+      - name: Testler
+        run: |
+          .\.venv\Scripts\python.exe -m pip install -r requirements-dev-py39.lock
+          if ($LASTEXITCODE -ne 0) { throw 'test bagimliliklari kurulamadi' }
+          .\.venv\Scripts\python.exe -m pytest
